@@ -425,14 +425,11 @@ Dump_Directory {}\n",
 }
 
 /// An absolute `multiConfigResultsOutputFile` / `Dump_Directory` runs from ANY
-/// cwd: the `bestNNWeight_<n>_` / `weights_` / `weightsDerivatives_` save
-/// prefixes go onto the basename, never ahead of the directory. The legacy
-/// glued them onto the whole string (`BagOfProcessors.cpp:463`,
-/// `BLSTMNeuralNetwork.cpp:319-321`), so an absolute results key composed
-/// `bestNNWeight_1_/abs/out.mat` and the exact path died with a bare
-/// `os error 2` after the whole corpus fold -- IMPROVEMENTS.md's
-/// "`saveWeights` glues the prefix to the WHOLE filename" entry, now FIXED.
-/// Every artifact lands under `out`; nothing lands relative to the cwd.
+/// cwd: the results `.mat` and the VRCTS dumps land under `out`, nothing lands
+/// relative to the cwd, and `out` holds nothing else -- since issue #136 the
+/// best-cost gate writes no `bestNNWeight_<n>_` weight files (IMPROVEMENTS.md's
+/// "`saveWeights` glues the prefix to the WHOLE filename" entry, RETIRED with
+/// them).
 #[test]
 fn bench_runs_with_absolute_output_keys() {
     let dir = tempfile::tempdir().unwrap();
@@ -459,17 +456,16 @@ fn bench_runs_with_absolute_output_keys() {
         "expected exactly one BENCH line (--repeat=1), got:\n{stdout}"
     );
 
-    for name in [
-        "bench_result.mat",
-        "bestNNWeight_1_bench_result.mat",
-        "weights_bestNNWeight_1_bench_result.mat",
-        "weightsDerivatives_bestNNWeight_1_bench_result.mat",
-    ] {
-        assert!(
-            out.path().join(name).is_file(),
-            "{name} must land in the results key's directory"
-        );
-    }
+    let mut landed: Vec<String> = std::fs::read_dir(out.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    landed.sort();
+    assert_eq!(
+        landed,
+        ["bench_result.mat", "vrcts_bench"],
+        "the results key's directory holds the results .mat and the dumps, no weight file"
+    );
     for chan in [1, 2] {
         let xml = out
             .path()
@@ -489,7 +485,9 @@ fn bench_runs_with_absolute_output_keys() {
 }
 
 /// The write that fails names its path: a results key in a directory that does
-/// not exist dies with the composed path in the error, not a bare `os error 2`.
+/// not exist dies with the path in the error, not a bare `os error 2`. Since issue
+/// #136 the failing write is the results `.mat` itself (`save_results`), the weight
+/// files that used to fail first being gone.
 #[test]
 fn bench_names_the_unwritable_output_path() {
     let dir = tempfile::tempdir().unwrap();

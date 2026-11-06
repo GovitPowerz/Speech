@@ -361,14 +361,15 @@ impl CorpusProcessor {
         }
         let n = n.max(1) as usize;
 
-        // legacy: :147-148 clear per epoch.
+        // legacy: :147-148 clear per epoch. The legacy's per-conf input-statistics
+        // fold (`:192-198`) fed only `saveWeights`'s stats file and left with it (issue
+        // #136).
         self.results.clear();
-        let mut input_statistics: BTreeMap<usize, Vec<InputStatistics>> = BTreeMap::new();
 
         // === Static-lane parallel section ===================================
         // Lane `l` owns files `{ j : j % n == l }` in ascending j. Each lane clones
         // the epoch-start bag once (`firstprivate(processors)`, :172) and walks its
-        // files, collecting per-file (j, results_j, derivs_j, stats_j). rayon::scope
+        // files, collecting per-file (j, results_j, derivs_j). rayon::scope
         // with one spawn per lane, each writing its own Vec (no shared mutation).
         //
         // The legacy harvests EVERY conf on every processed file (`:183-199` loops
@@ -384,7 +385,6 @@ impl CorpusProcessor {
             usize,                                           // file index j
             BTreeMap<usize, BTreeMap<usize, ChannelResult>>, // results_j (conf -> chan -> result)
             BTreeMap<usize, Vec<Array2<f64>>>,               // derivs_j (all confs)
-            BTreeMap<usize, Vec<InputStatistics>>,           // stats_j (all confs)
         );
         type LaneOut = Result<Vec<LaneEntry>>;
 
@@ -417,18 +417,16 @@ impl CorpusProcessor {
                                 return;
                             }
                         };
-                        // Per-file harvest for EVERY conf (:183-199): read the LANE
-                        // bag's post-file derivs/stats (drivers reset per file inside
+                        // Per-file harvest for EVERY conf (:183-191): read the LANE
+                        // bag's post-file derivs (drivers reset per file inside
                         // get_segmentation, so this is file j's own contribution).
                         let mut derivs_j: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
-                        let mut stats_j: BTreeMap<usize, Vec<InputStatistics>> = BTreeMap::new();
                         if !tmp.is_empty() {
                             for ii in 0..nb_of_conf {
                                 derivs_j.insert(ii, bag.get_weights_derivatives(ii));
-                                stats_j.insert(ii, bag.get_input_statistics(ii));
                             }
                         }
-                        out.push((j, tmp, derivs_j, stats_j));
+                        out.push((j, tmp, derivs_j));
                         j += n;
                     }
                     *slot = Ok(out);
@@ -444,19 +442,19 @@ impl CorpusProcessor {
         for lane_result in lane_outputs {
             per_file.extend(lane_result?);
         }
-        per_file.sort_by_key(|(j, _, _, _)| *j);
+        per_file.sort_by_key(|(j, _, _)| *j);
 
-        for (j, tmp, derivs_j, stats_j) in per_file {
+        for (j, tmp, derivs_j) in per_file {
             // legacy: :181 if (tmp.size() > 0).
             if tmp.is_empty() {
                 continue;
             }
             // legacy: :182 _Results[jj] = tmp.
             self.results.insert(j, tmp);
-            // legacy: :183-199 per-conf derivative + input-stats accumulation.
+            // legacy: :183-191 per-conf derivative accumulation.
             for ii in 0..nb_of_conf {
-                // `derivs_j`/`stats_j` carry ALL confs for this file (the lane
-                // harvest above is unconditional per :183-199), so this `if let`
+                // `derivs_j` carries ALL confs for this file (the lane harvest
+                // above is unconditional per :183-191), so this `if let`
                 // matches every `ii` when the file produced results -- it is not
                 // gating on caller-requested confs.
                 if let Some(tmp_derivs) = derivs_j.get(&ii) {
@@ -469,19 +467,6 @@ impl CorpusProcessor {
                         }
                         _ => {
                             derivs.insert(ii, tmp_derivs.clone());
-                        }
-                    }
-                }
-                if let Some(tmp_stats) = stats_j.get(&ii) {
-                    // legacy: :192-198 first file COPIES, later files .update() merge.
-                    match input_statistics.get_mut(&ii) {
-                        Some(existing) if !existing.is_empty() => {
-                            for (kk, s) in tmp_stats.iter().enumerate() {
-                                existing[kk].update(s);
-                            }
-                        }
-                        _ => {
-                            input_statistics.insert(ii, tmp_stats.clone());
                         }
                     }
                 }
@@ -517,7 +502,7 @@ impl CorpusProcessor {
             if self.training_epochs > 0 {
                 // legacy: :217-224 training branch -- saveAndUpdate + saveResults
                 // ALWAYS (every epoch, including the final epoch > _TrainingEpochs).
-                self.save_and_update_epoch(epoch, derivs, &input_statistics)?;
+                self.save_and_update_epoch(epoch, derivs);
                 #[cfg(feature = "test-support")]
                 {
                     // Post-update snapshot: config-0's flat weights + the best-cost
@@ -541,7 +526,7 @@ impl CorpusProcessor {
                 // legacy: :226-230 non-training branch -- only when epoch <=
                 // _TrainingEpochs (i.e. epoch == 0, since _TrainingEpochs == 0).
                 if epoch <= self.training_epochs {
-                    self.save_and_update_epoch(epoch, derivs, &input_statistics)?;
+                    self.save_and_update_epoch(epoch, derivs);
                     self.save_results(epoch)?;
                 }
             }
@@ -554,12 +539,7 @@ impl CorpusProcessor {
 
     /// Extract the epoch's mem rows as mutable slices and hand them to the bag's
     /// `save_and_update` (the legacy `_CostMem.block(epoch,0,1,cols)` row views).
-    fn save_and_update_epoch(
-        &mut self,
-        epoch: usize,
-        derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
-        stats: &BTreeMap<usize, Vec<InputStatistics>>,
-    ) -> Result<()> {
+    fn save_and_update_epoch(&mut self, epoch: usize, derivs: &BTreeMap<usize, Vec<Array2<f64>>>) {
         // The mem matrices are row-major Array2; a single row is a contiguous slice.
         let nb = self.processors.nb_of_conf();
         let mut cost_row = vec![0.0; nb];
@@ -571,16 +551,14 @@ impl CorpusProcessor {
         // ascending (file, chan) order the matrix rows take.
         let per_conf = Self::results_per_config(&self.results, nb);
         self.processors.save_and_update(
-            &self.output_file_name,
             &per_conf,
             &mut self.best_cost,
             derivs,
-            stats,
             &mut cost_row,
             &mut bad_row,
             &mut cost_lid_row,
             &mut bad_lid_row,
-        )?;
+        );
 
         for ii in 0..nb {
             self.mems.cost[[epoch, ii]] = cost_row[ii];
@@ -588,7 +566,6 @@ impl CorpusProcessor {
             self.mems.cost_lid[[epoch, ii]] = cost_lid_row[ii];
             self.mems.bad_classif_lid[[epoch, ii]] = bad_lid_row[ii];
         }
-        Ok(())
     }
 
     /// Port of `CorpusProcessor::transformResults()` (`:342-389`): ascending
@@ -849,7 +826,7 @@ impl CorpusProcessor {
     /// truncation); every accumulated value is an exact integer count stored in
     /// a double, so an f64 accumulator is value-identical.
     fn grad_check_cost(&self, algo0: i32, ii: usize) -> f64 {
-        let pair = training_policy(algo0).and_then(|(_, nets)| nets.get(ii).map(|(pair, _)| *pair));
+        let pair = training_policy(algo0).and_then(|(_, nets)| nets.get(ii).copied());
         let mut cost = 0.0;
         let mut counter = 0.0;
         for jj in 0..self.corpus.nb_of_files() {

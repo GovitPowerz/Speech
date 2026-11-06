@@ -1243,62 +1243,6 @@ impl BlstmNetwork {
         self.input_statistics = InputStatistics::new();
     }
 
-    /// `saveWeights` (`BLSTMNeuralNetwork.cpp:312-331`): write the flat weight vector
-    /// to a `.bin` NAMED `weights_<filename>` and the Nx2 derivatives to
-    /// `weightsDerivatives_<filename>` (both via the custom `.bin` codec -- the
-    /// commented-out `.mat` writes at `:324-325` are dead), then a MAT v5 file AT
-    /// `<filename>` carrying `nbOfInputs` (scalar), `meanInputs`, `stdInputs`. The
-    /// `weights_`/`weightsDerivatives_` PREFIX goes onto the BASENAME (`<dir>/weights_<base>`,
-    /// so `<filename>` typically ends in `.mat` and the `.bin` siblings sit next to it);
-    /// the legacy glued it onto the WHOLE path string (`weights_<dir>/<base>.mat`, a
-    /// nonexistent directory for anything but a bare name) -- FIXED, see
-    /// `io::prefix_basename` and IMPROVEMENTS.md.
-    /// The stats matrices are `1 x D` row vectors (`InputStatistics.cpp:11-12`
-    /// `colwise().sum()`), whose column-major `.mat` payload is the mean/std `Vec`
-    /// order directly.
-    pub fn save_weights(
-        &self,
-        filename: &str,
-        weights_derivatives: &Array2<f64>,
-        stats: &InputStatistics,
-    ) -> Result<()> {
-        // `buf << "weights_%s" << filename` / `buf2 << "weightsDerivatives_%s"`
-        // (:319-321), the prefix on the basename rather than the raw string.
-        let weights_name = crate::io::prefix_basename("weights_", filename);
-        let derivs_name = crate::io::prefix_basename("weightsDerivatives_", filename);
-
-        // getWeights() is N x 1; write as N rows, 1 col (:322).
-        let flat = self.get_weights();
-        crate::io::binary::write_matrix(std::path::Path::new(&weights_name), flat.len(), 1, &flat)?;
-
-        // weightsDerivatives is N x 2, row-major in ndarray; the `.bin` payload is
-        // column-major, so emit col0 then col1 (:323).
-        let (dr, dc) = weights_derivatives.dim();
-        let mut derivs_col_major = Vec::with_capacity(dr * dc);
-        for c in 0..dc {
-            for r in 0..dr {
-                derivs_col_major.push(weights_derivatives[[r, c]]);
-            }
-        }
-        crate::io::binary::write_matrix(
-            std::path::Path::new(&derivs_name),
-            dr,
-            dc,
-            &derivs_col_major,
-        )?;
-
-        // MAT v5 stats artifact (:326-328). `_MeanValue`/`_StandardDeviation` are
-        // `1 x D` row vectors; their column-major payload IS the Vec order.
-        let d = stats.mean.len();
-        let mut writer = crate::io::matfile::MatWriter::create(std::path::Path::new(filename))?;
-        writer.write_scalar("nbOfInputs", stats.n as f64)?;
-        writer.write_matrix("meanInputs", 1, d, &stats.mean)?;
-        writer.write_matrix("stdInputs", 1, d, &stats.std)?;
-        writer.finish()?;
-
-        Ok(())
-    }
-
     /// `<prefix>_weightsFile` load (`BLSTMNeuralNetwork.cpp:122-150`): read the config
     /// key (default `""`); an EMPTY string skips the load (`:123` `size() != 0`
     /// guard). Otherwise read the `.bin` (`BinaryFile2Vector`, `:132`) and compare

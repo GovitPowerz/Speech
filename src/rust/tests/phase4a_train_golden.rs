@@ -13,7 +13,8 @@
 //!     canary-gated per element (the NN chain is libm-bearing);
 //!   - the result matrix and the four epoch arrays vs the converted fixtures
 //!     (id/count columns strict, timing col 6 masked);
-//!   - the `bestNNWeight` artifact split (weights Nx1 + derivs Nx2, io::binary);
+//!   - the best pack (issue #136: the `bestNNWeight` weights Nx1 + derivs Nx2 the
+//!     legacy wrote, now captured in memory) vs the committed legacy artifacts;
 //!   - the tier-2 VRCTS bytes (final epoch's segmentation);
 //!   - NON-VACUITY (measured, not assumed): every consecutive epoch weight pair
 //!     DIFFERS (bit compare), and the best-cost save gate FIRED and SKIPPED at
@@ -32,7 +33,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use indexmap::IndexMap;
-use ndarray::Array2;
 
 use common::{
     assert_matrix, assert_oracle_eq_f64, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a,
@@ -124,7 +124,7 @@ fn manifest_non_vacuity() -> (i64, i64, i64) {
 // === tier2_train_epoch_weights_golden ========================================
 // The whole tier-2 train replay: run, then compare every observable against the
 // committed fixtures. One test (one expensive run, ~15s) covering the epoch
-// weights, the result matrix and epoch arrays, the bestNNWeight artifacts, the VRCTS bytes, and the
+// weights, the result matrix and epoch arrays, the best pack, the VRCTS bytes, and the
 // non-vacuity trajectory.
 #[test]
 fn tier2_train_epoch_weights_golden() {
@@ -233,27 +233,6 @@ fn tier2_train_epoch_weights_golden() {
         assert_oracle_eq_f64(g, want_d[ix], &format!("best pack deriv {ix:?}"));
     }
 
-    let got_w = std::fs::read("weights_bestNNWeight_1_tier2_spectral.mat").unwrap();
-    let want_w = load_bin_phase4a("weights_bestNNWeight_1_tier2_spectral.mat");
-    let got_w_mat = parse_bin(&got_w);
-    assert_eq!(got_w_mat.dim(), want_w.dim(), "bestNNWeight weights dims");
-    for (g, w) in got_w_mat.iter().zip(want_w.iter()) {
-        assert_oracle_eq_f64(*g, *w, "bestNNWeight weights");
-    }
-    let got_d = std::fs::read("weightsDerivatives_bestNNWeight_1_tier2_spectral.mat").unwrap();
-    let want_d = load_bin_phase4a("weightsDerivatives_bestNNWeight_1_tier2_spectral.mat");
-    let got_d_mat = parse_bin(&got_d);
-    assert_eq!(got_d_mat.dim(), want_d.dim(), "bestNNWeight derivs dims");
-    for (g, w) in got_d_mat.iter().zip(want_d.iter()) {
-        assert_oracle_eq_f64(*g, *w, "bestNNWeight derivs");
-    }
-    // The stats .mat exists (contents: nbOfInputs 0 + empty mean/std -- the real
-    // config's InputNormalizationType -1 never accumulates input statistics).
-    assert!(
-        Path::new("bestNNWeight_1_tier2_spectral.mat").exists(),
-        "bestNNWeight stats .mat written"
-    );
-
     // --- VRCTS bytes (final epoch's segmentation), per file per channel. -------
     for f in ["f1", "f2"] {
         for chan in [1, 2] {
@@ -265,15 +244,4 @@ fn tier2_train_epoch_weights_golden() {
             assert_vrcts_eq(&got, &want, &format!("tier2 VRCTS {f} chan {chan}"));
         }
     }
-}
-
-/// Parse an io::binary buffer (i64 LE rows, i64 LE cols, f64 LE column-major) into
-/// a row-major `Array2` (the engine-written artifacts, read back for comparison).
-fn parse_bin(b: &[u8]) -> Array2<f64> {
-    let rows = i64::from_le_bytes(b[0..8].try_into().unwrap()) as usize;
-    let cols = i64::from_le_bytes(b[8..16].try_into().unwrap()) as usize;
-    Array2::from_shape_fn((rows, cols), |(r, c)| {
-        let off = 16 + (c * rows + r) * 8;
-        f64::from_le_bytes(b[off..off + 8].try_into().unwrap())
-    })
 }
