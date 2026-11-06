@@ -57,6 +57,33 @@ pub struct GradCheckReport {
     pub per_weight: Vec<(f64, f64, f64)>,
 }
 
+/// The four per-epoch result arrays (`_CostMem` / `_BadClassifMem` / `_CostLIDMem` /
+/// `_BadClassifLIDMem`, `CorpusProcessor.h`), each `epochs x configs`: row `e` is
+/// what epoch `e`'s `saveAndUpdate` wrote for every config (issue #134). Sized
+/// `1 x n` by the ctor, `run_solo` and the gradient check, `(N + 2) x n` by
+/// `train` (solo, `N` inner epochs, the final eval), and filled row by row, so
+/// after `run()` every row is written and each array equals the variable
+/// `saveResults` writes last (`topRows(epoch + 1)` at the final epoch is the
+/// whole array). Read through [`CorpusProcessor::epoch_mems`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct EpochMems {
+    pub cost: Array2<f64>,
+    pub bad_classif: Array2<f64>,
+    pub cost_lid: Array2<f64>,
+    pub bad_classif_lid: Array2<f64>,
+}
+
+impl EpochMems {
+    fn zeros(rows: usize, cols: usize) -> EpochMems {
+        EpochMems {
+            cost: Array2::zeros((rows, cols)),
+            bad_classif: Array2::zeros((rows, cols)),
+            cost_lid: Array2::zeros((rows, cols)),
+            bad_classif_lid: Array2::zeros((rows, cols)),
+        }
+    }
+}
+
 /// Port of `CorpusProcessor` (`CorpusProcessor.h`/`.cpp`): mode dispatch, the epoch
 /// loop, corpus-level gradient check, and `.mat` result reduction.
 ///
@@ -64,8 +91,8 @@ pub struct GradCheckReport {
 /// keyed identically, its 18+N-col row rendered by `ChannelResult::to_row`).
 /// `results_e` is the rendered `MultiConfigResults` matrix (`transformResults`,
 /// `:342-389`); the per-config lists the fold reads are built from `results` at
-/// `saveAndUpdate` time ([`Self::results_per_config`]). The four `*_mem` matrices
-/// accumulate per-epoch cost/badClassif/costLID/badLIDClassif rows.
+/// `saveAndUpdate` time ([`Self::results_per_config`]). `mems` ([`EpochMems`])
+/// accumulates the per-epoch cost/badClassif/costLID/badLIDClassif rows.
 pub struct CorpusProcessor {
     training_epochs: usize,
     epsilon: f64,
@@ -75,10 +102,7 @@ pub struct CorpusProcessor {
     output_file_name: String,
     results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
     results_e: Array2<f64>,
-    cost_mem: Array2<f64>,
-    bad_classif_mem: Array2<f64>,
-    cost_lid_mem: Array2<f64>,
-    bad_classif_lid_mem: Array2<f64>,
+    mems: EpochMems,
     best_cost: BTreeMap<usize, f64>,
     /// F10 (phase 5): the folded per-conf derivatives from the LAST completed
     /// `run_epoch` fold, keyed by conf index (each value the per-network `Nx2`
@@ -179,10 +203,7 @@ impl CorpusProcessor {
             output_file_name,
             results: BTreeMap::new(),
             results_e: Array2::zeros((0, 0)),
-            cost_mem: Array2::zeros((1, nb_of_conf)),
-            bad_classif_mem: Array2::zeros((1, nb_of_conf)),
-            cost_lid_mem: Array2::zeros((1, nb_of_conf)),
-            bad_classif_lid_mem: Array2::zeros((1, nb_of_conf)),
+            mems: EpochMems::zeros(1, nb_of_conf),
             best_cost,
             seam_derivs: BTreeMap::new(),
             #[cfg(feature = "test-support")]
@@ -253,10 +274,7 @@ impl CorpusProcessor {
     /// (no config is asked for its derivatives, so the harvest never fires).
     fn run_solo(&mut self) -> Result<()> {
         let nb = self.processors.nb_of_conf();
-        self.cost_mem = Array2::zeros((1, nb));
-        self.bad_classif_mem = Array2::zeros((1, nb));
-        self.cost_lid_mem = Array2::zeros((1, nb));
-        self.bad_classif_lid_mem = Array2::zeros((1, nb));
+        self.mems = EpochMems::zeros(1, nb);
         let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
         self.run_epoch(0, self.mode, &mut derivs, true)
     }
@@ -272,10 +290,7 @@ impl CorpusProcessor {
         // site (issue #110), so `self.processors` trains exact f64 nets by construction.
         let nb = self.processors.nb_of_conf();
         let rows = self.training_epochs + 2;
-        self.cost_mem = Array2::zeros((rows, nb));
-        self.bad_classif_mem = Array2::zeros((rows, nb));
-        self.cost_lid_mem = Array2::zeros((rows, nb));
-        self.bad_classif_lid_mem = Array2::zeros((rows, nb));
+        self.mems = EpochMems::zeros(rows, nb);
 
         // legacy: :92 epoch-0 solo with _Mode, isLog true, fresh derivs.
         let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
@@ -553,10 +568,10 @@ impl CorpusProcessor {
         )?;
 
         for ii in 0..nb {
-            self.cost_mem[[epoch, ii]] = cost_row[ii];
-            self.bad_classif_mem[[epoch, ii]] = bad_row[ii];
-            self.cost_lid_mem[[epoch, ii]] = cost_lid_row[ii];
-            self.bad_classif_lid_mem[[epoch, ii]] = bad_lid_row[ii];
+            self.mems.cost[[epoch, ii]] = cost_row[ii];
+            self.mems.bad_classif[[epoch, ii]] = bad_row[ii];
+            self.mems.cost_lid[[epoch, ii]] = cost_lid_row[ii];
+            self.mems.bad_classif_lid[[epoch, ii]] = bad_lid_row[ii];
         }
         Ok(())
     }
@@ -664,21 +679,21 @@ impl CorpusProcessor {
         write_row_major(&mut w, "MultiConfigResults", &self.results_e)?;
         // legacy: :398-401 each mem topRows(epoch+1).
         let top = epoch + 1;
-        write_row_major(&mut w, "CostMem", &truncate_rows(&self.cost_mem, top))?;
+        write_row_major(&mut w, "CostMem", &truncate_rows(&self.mems.cost, top))?;
         write_row_major(
             &mut w,
             "BadClassifMem",
-            &truncate_rows(&self.bad_classif_mem, top),
+            &truncate_rows(&self.mems.bad_classif, top),
         )?;
         write_row_major(
             &mut w,
             "CostLIDMem",
-            &truncate_rows(&self.cost_lid_mem, top),
+            &truncate_rows(&self.mems.cost_lid, top),
         )?;
         write_row_major(
             &mut w,
             "BadClassifLIDMem",
-            &truncate_rows(&self.bad_classif_lid_mem, top),
+            &truncate_rows(&self.mems.bad_classif_lid, top),
         )?;
         w.finish()?;
         Ok(())
@@ -722,10 +737,7 @@ impl CorpusProcessor {
         let seam_mem = self.seam_derivs.clone();
         let nb = self.processors.nb_of_conf();
         // legacy: :239-242 zero the four mem matrices to 1 x nConfs.
-        self.cost_mem = Array2::zeros((1, nb));
-        self.bad_classif_mem = Array2::zeros((1, nb));
-        self.cost_lid_mem = Array2::zeros((1, nb));
-        self.bad_classif_lid_mem = Array2::zeros((1, nb));
+        self.mems = EpochMems::zeros(1, nb);
         // legacy: :243 _TrainingEpochs = 0.
         self.training_epochs = 0;
 
@@ -890,6 +902,13 @@ impl CorpusProcessor {
             }
         }
         out
+    }
+
+    /// The four per-epoch result arrays (issue #134): the same numbers the `.mat`
+    /// variables `CostMem` / `BadClassifMem` / `CostLIDMem` / `BadClassifLIDMem`
+    /// carry, read off the engine. `1 x n` zeros before the first `run()`.
+    pub fn epoch_mems(&self) -> &EpochMems {
+        &self.mems
     }
 
     /// The number of configs this run holds: the bound every `pos` on the seam is
@@ -1169,7 +1188,7 @@ impl CorpusProcessor {
 /// the legacy `topRows(n)`: the same first `n` rows), a plain row-slice copy. Live
 /// call sites shrink or keep, except the pathological gradcheck empty-results
 /// path, where `truncate_rows` can be asked for more rows than
-/// `m` has (e.g. a 1-row `cost_mem` with `epoch+1 == 2`) -- that indexes out of
+/// `m` has (e.g. a 1-row `mems.cost` with `epoch+1 == 2`) -- that indexes out of
 /// bounds here, mirroring legacy `topRows(2)`-on-1-row UB. Faithful to legacy UB,
 /// unreachable under non-empty corpora, panics by design if hit.
 fn truncate_rows(m: &Array2<f64>, n: usize) -> Array2<f64> {

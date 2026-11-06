@@ -465,3 +465,42 @@ fn synthetic_signal_corpus_config(dir: &Path) -> IndexMap<String, String> {
 
 // `mat_var_order`/`mat_var_dims`/`mat_var_matrix` are shared via `common`
 // (hoisted from four copy-pasted phase4a test files; see `tests/common/mod.rs`).
+
+// === epoch_mems_shape_and_fill ===============================================
+// Issue #134: the four per-epoch arrays have an in-memory surface. Shape: the
+// ctor seeds `1 x nb_conf`; a solo run keeps 1 row; a train run of N epochs holds
+// (N+2) rows, every one written (the final epoch is N+1). Fill: each array is
+// bit-identical to the variable `save_results` writes last, so a golden
+// re-pointed from the `.mat` to the accessor reads the same numbers.
+#[test]
+fn epoch_mems_shape_and_fill() {
+    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (epochs, kind, rows) in [(0, ModeKind::Solo, 1), (2, ModeKind::Multi, 4)] {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = tdc_corpus_config(dir.path(), 1, epochs);
+        let _cwd = CwdGuard::enter(dir.path());
+        let mut cp = CorpusProcessor::new(vec![cfg], mode(kind)).unwrap();
+        assert_eq!(cp.epoch_mems().cost.dim(), (1, 1), "ctor seed 1 x nb_conf");
+        cp.run().unwrap();
+
+        let mems = cp.epoch_mems();
+        let bytes = std::fs::read("MultiConfigResults.mat").unwrap();
+        let mut any_nonzero = false;
+        for (name, got) in [
+            ("CostMem", &mems.cost),
+            ("BadClassifMem", &mems.bad_classif),
+            ("CostLIDMem", &mems.cost_lid),
+            ("BadClassifLIDMem", &mems.bad_classif_lid),
+        ] {
+            assert_eq!(got.dim(), (rows, 1), "{name} after {epochs} epochs");
+            let want = mat_var_matrix(&bytes, name).unwrap();
+            assert_eq!(
+                got.mapv(f64::to_bits),
+                want.mapv(f64::to_bits),
+                "{name} equals the written variable"
+            );
+            any_nonzero |= got.iter().any(|v| *v != 0.0);
+        }
+        assert!(any_nonzero, "a scored TDC run fills at least one array");
+    }
+}
