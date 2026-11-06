@@ -261,7 +261,8 @@ pub struct BagOfProcessors {
     #[cfg(feature = "test-support")]
     last_update_cost_lid: BTreeMap<usize, f64>,
     /// Test-support capture (issue #136): per conf, one [`BestPack`] per trainable net in
-    /// pack order, replaced at every fire of [`Self::best_cost_gate`].
+    /// pack order, replaced at every fire of [`Self::best_cost_gate`] (captured by
+    /// [`Self::save_and_update`]).
     #[cfg(feature = "test-support")]
     best_packs: BTreeMap<usize, Vec<BestPack>>,
     /// T1-review hardening (Phase 8 Task 1, finding 1; no legacy counterpart):
@@ -589,6 +590,9 @@ impl BagOfProcessors {
     /// per trainable net (`[regular, LID]` for algo 6); EMPTY for a conf with no
     /// trainable net (`:128-129`). Read-shaped and never indexed back out for such a
     /// conf, so it stays inert rather than fallible on a plain inference run (T6b).
+    /// Since issue #136 no epoch fold harvests it (the stats file it fed is gone);
+    /// [`CorpusProcessor::input_statistics`](crate::engine::corpus_processor::CorpusProcessor::input_statistics)
+    /// is its one caller.
     pub fn get_input_statistics(&self, pos: usize) -> Vec<InputStatistics> {
         let nets = self.processors[pos].driver().nets();
         nets.iter()
@@ -617,36 +621,36 @@ impl BagOfProcessors {
     /// `bestCost[pos]` (strict `>`: a tie does not fire); every trainable net of the conf
     /// fires under the ONE gate. The legacy wrote each net's pack, derivatives and input
     /// statistics to `weights_` / `weightsDerivatives_` / stats files that nothing in the
-    /// port read; a fire now records the new best cost and, under `test-support`, captures
-    /// the [`BestPack`]s. A conf with no trainable net (algo 0/1/2, no legacy branch; the
-    /// fast drivers) is a no-op that reads neither `bestCost` nor `derivs`.
+    /// port read; a fire now records the new best cost and answers `true`, and
+    /// [`Self::save_and_update`] captures the [`BestPack`]s under `test-support`. In a
+    /// production build the running `bestCost` is the gate's only effect, read by nothing
+    /// outside `test-support` (the accepted state of issue #136: the Modern loop's
+    /// `Checkpoint` is the production writer). A conf with no trainable net (algo 0/1/2,
+    /// no legacy branch; the fast drivers) never fires and leaves `bestCost` unread.
     fn best_cost_gate(
-        &mut self,
+        &self,
         pos: usize,
         best_cost: &mut BTreeMap<usize, f64>,
         cost: f64,
         cost_lid: f64,
         bad_classif_lid: f64,
-        derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
-    ) {
+    ) -> bool {
         let Some((save_criterion, _)) = training_policy(self.algo_types[pos]) else {
-            return;
+            return false;
         };
         if self.processors[pos].driver().nets().is_empty() {
-            return;
+            return false;
         }
         let save_criterion = save_criterion.value(cost, cost_lid, bad_classif_lid);
         if best_cost[&pos] > save_criterion {
-            #[cfg(feature = "test-support")]
-            self.capture_best_pack(pos, derivs);
             best_cost.insert(pos, save_criterion);
+            return true;
         }
-        #[cfg(not(feature = "test-support"))]
-        let _ = derivs;
+        false
     }
 
     /// The test-support half of a gate fire (issue #136): every trainable net's flat pack
-    /// as it stands (the caller runs the gate BEFORE `update_weights`) and its folded
+    /// as it stands (the caller captures BEFORE `update_weights`) and its folded
     /// derivatives, keyed by pack order, with the conf's fire count bumped.
     #[cfg(feature = "test-support")]
     fn capture_best_pack(&mut self, pos: usize, derivs: &BTreeMap<usize, Vec<Array2<f64>>>) {
@@ -874,8 +878,15 @@ impl BagOfProcessors {
             bad_classif_lid_row[ii] = bad_lid_classif;
 
             // legacy: :462-464 saveWeights(bestNNWeight_<pos+1>_<filename>) -- the gate
-            // without the files (issue #136), BEFORE the :465 costLID override.
-            self.best_cost_gate(ii, best_cost, cost, cost_lid, bad_lid_classif, derivs);
+            // without the files (issue #136), BEFORE the :465 costLID override; a fire's
+            // capture takes the pack BEFORE update_weights moves it.
+            let fired = self.best_cost_gate(ii, best_cost, cost, cost_lid, bad_lid_classif);
+            #[cfg(feature = "test-support")]
+            if fired {
+                self.capture_best_pack(ii, derivs);
+            }
+            #[cfg(not(feature = "test-support"))]
+            let _ = fired;
 
             // legacy: :465 costLID = -1.0 when totalSpeechDuration < 1e-3. ORDER:
             // after the best-cost gate, before update_weights.

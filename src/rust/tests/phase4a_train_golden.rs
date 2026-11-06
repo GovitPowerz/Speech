@@ -233,6 +233,19 @@ fn tier2_train_epoch_weights_golden() {
         assert_oracle_eq_f64(g, want_d[ix], &format!("best pack deriv {ix:?}"));
     }
 
+    // --- Issue #136 acceptance: a `-m` training run writes no weight file (every
+    // legacy save name carried `bestNNWeight`: the stats file, its `weights_` /
+    // `weightsDerivatives_` siblings, the Twin's `LID_` pair). ------------------------
+    let leftovers: Vec<String> = std::fs::read_dir(".")
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.contains("bestNNWeight"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no weight file written: {leftovers:?}"
+    );
+
     // --- VRCTS bytes (final epoch's segmentation), per file per channel. -------
     for f in ["f1", "f2"] {
         for chan in [1, 2] {

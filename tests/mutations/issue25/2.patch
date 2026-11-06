@@ -1,16 +1,15 @@
-mutation: the best-pack capture hands every net the first net's folded derivatives, so the Twin's LID pack takes the SAD fold (before #136: training_policy saved the LID net without the LID_ prefix; phase4b item 4 too)
+mutation: the best-pack capture keeps only the first net's pack, so the Twin's LID pack is dropped (before #136 this id dropped the LID_ save prefix; that site and phase4b item 4 are retired with the files)
 catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
-index 6535193..916aa6d 100644
+index c3c4219..732283a 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -663,7 +663,7 @@ impl BagOfProcessors {
+@@ -664,6 +664,7 @@ impl BagOfProcessors {
+             .driver()
+             .nets()
+             .iter()
++            .take(1)
              .enumerate()
              .map(|(i, net)| BestPack {
                  weights: net.get_weights(),
--                derivs: derivs[&pos][i].clone(),
-+                derivs: derivs[&pos][0].clone(),
-                 fires,
-             })
-             .collect();

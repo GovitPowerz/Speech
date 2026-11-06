@@ -118,8 +118,9 @@ wrote, issue #134; and a file side effect removed, 2026-11-06: the best-weight s
 `.mat`, the `bestNNWeight_<n>_` / `LID_` naming, `run_epoch`'s input-statistics fold that fed only
 the stats file) is deleted while the decision stays: the bag's `best_cost_gate` keeps the
 per-algo criterion, the strict `>` and the order before the update, and a fire captures each
-net's pre-update pack and folded derivatives in memory under `test-support`; every exact-path
-number unchanged, proven by the two training goldens re-pointed to that capture staying
+net's pre-update pack and folded derivatives in memory under `test-support` (so in a production
+build the gate's only effect is the running `bestCost`, the accepted state: the Modern loop's
+`Checkpoint` is the production writer); every exact-path number unchanged, proven by the two training goldens re-pointed to that capture staying
 byte-green against the unchanged `.bin` fixtures, issue #136).
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0

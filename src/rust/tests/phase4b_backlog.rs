@@ -29,8 +29,7 @@ use speech::engine::channel_result::ChannelResult;
 use speech::engine::corpus_processor::CorpusProcessor;
 
 /// `set_current_dir` is process-global; serialize against `cargo test`'s
-/// default parallel threads (same pattern as `phase4a_save_update.rs`/
-/// `phase4a_train_golden.rs`).
+/// default parallel threads (same pattern as `phase4a_train_golden.rs`).
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 struct CwdGuard {

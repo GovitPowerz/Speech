@@ -273,6 +273,19 @@ fn twin_train_epoch_weights_golden() {
         }
     }
 
+    // --- Issue #136 acceptance: a `-m` training run writes no weight file (every
+    // legacy save name carried `bestNNWeight`: the stats file, its `weights_` /
+    // `weightsDerivatives_` siblings, the Twin's `LID_` pair). ------------------------
+    let leftovers: Vec<String> = std::fs::read_dir(".")
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.contains("bestNNWeight"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no weight file written: {leftovers:?}"
+    );
+
     // --- The save_and_update confusion capture: errorPercLID (display-only in
     // the legacy; the :443 cout) == the measured harness value per epoch. The
     // LAST save_and_update's capture is the final epoch's. ---------------------

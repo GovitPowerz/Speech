@@ -11,16 +11,17 @@
 //! `#pragma omp parallel for ... schedule(dynamic, 1)` over files, folding each
 //! file's contribution inside an `omp critical` block. OpenMP's dynamic schedule
 //! makes the FOLD ORDER nondeterministic even at a fixed thread count -- and since
-//! the derivative/input-statistics accumulation (`:184-199`) is order-sensitive
-//! (float `+=`, `InputStatistics::update` merge), the reduced values are not
-//! reproducible run to run.
+//! the derivative accumulation (`:184-191`) is order-sensitive (float `+=`), the
+//! reduced values are not reproducible run to run. (The legacy also merged the
+//! per-file input statistics there, `:192-198`; that fold fed only `saveWeights`'s
+//! stats file and is not ported since issue #136.)
 //!
 //! This port fixes the fold to a DETERMINISTIC order: file `j` is assigned to lane
 //! `j % N` (`N = nb_of_threads` clamped to `[1, nb_files]`); each lane clones the
 //! epoch-start bag ONCE and walks its files in ascending `j` (so genuine cross-file
 //! driver state chains within a lane); after the parallel section the per-file
 //! contributions are folded in ASCENDING FILE INDEX (`0, 1, 2, ...`), transcribing
-//! the critical-section body (`:178-202`) in that fixed order. At `N == 1` this is
+//! the critical-section body (`:178-191`) in that fixed order. At `N == 1` this is
 //! byte-identical to a plain sequential loop -- the golden-pinned parity mode
 //! (`lanes_n1_equals_sequential`). For `N > 1` the results are still deterministic
 //! (fixed for a fixed N) but DIFFER from the legacy's nondeterministic run and,
@@ -943,10 +944,9 @@ impl CorpusProcessor {
     }
 
     /// Config-`pos`'s per-network input-normalization statistics (algo 6 ->
-    /// `[sad, lid]`). The PyO3 seam surface (Phase 4c); no prior `_for_test`
-    /// hook existed for this -- a new thin delegation to
-    /// `BagOfProcessors::get_input_statistics`, which already dispatches
-    /// per-`pos`.
+    /// `[sad, lid]`), a thin delegation to `BagOfProcessors::get_input_statistics`.
+    /// Added as a PyO3 seam surface in Phase 4c, but nothing in `speech-py` calls it
+    /// and, since issue #136, no epoch fold reads the statistics either.
     pub fn input_statistics(&self, pos: usize) -> Vec<InputStatistics> {
         self.processors.get_input_statistics(pos)
     }
