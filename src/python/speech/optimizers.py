@@ -1,18 +1,18 @@
 """Optimizer zoo for NN training and DSP-hyperparameter search.
 
 Ported from legacy MATLAB: SMORMS3.m (wired), Rprop.m (wired), QuantumPSO.m (wired --
-bespoke hand-port, do NOT swap for pymoo), cmaes.m (via the `cma` package, alternative
-branch). Adam.m/RMSprop.m/sfo.m/pso_Trelea_vectorized.m are EXCLUDED (never wired in
-legacy, YAGNI per the Phase 4c spec); BackPropagation.m's inner-loop contract is
-implemented by `drivers/train.py::_backprop_inner`. See design spec section 6.
+bespoke hand-port, do NOT swap for pymoo). Adam.m/RMSprop.m/sfo.m/pso_Trelea_vectorized.m
+are EXCLUDED (never wired in legacy, YAGNI per the Phase 4c spec); cmaes.m's `cma`-package
+stand-in (a different lineage, never bit-pinned, never wired by a driver) was retired in
+issue #103; BackPropagation.m's inner-loop contract is implemented by
+`drivers/train.py::_backprop_inner`. See design spec section 6.
 
 SMORMS3/Rprop are bit-pinned against GNU Octave running the vendored .m sources unchanged
 (Phase 4c Task 6). QuantumPSO is bit-pinned against a MODIFIED-COPY of QuantumPSO.m
 (`tools/octave_harness/qpso_modified/`) whose rand/randperm/stblrnd are substituted by
 reads of a shared committed random table -- the legacy path reseeds from the wall clock,
 so no single legacy RUN is reproducible; the table makes the OPERATOR STRUCTURE pinnable.
-cmaes_optimize is NOT bit-pinned (a different `cma`-package lineage). Goldens under
-`tests/reference_data/phase4c/`.
+Goldens under `tests/reference_data/phase4c/`.
 """
 
 from __future__ import annotations
@@ -612,49 +612,4 @@ def quantum_pso(
         gbest_traj=gbest_traj,
         gbestval_traj=gbestval_traj,
         out=out_final,
-    )
-
-
-@dataclass
-class CmaesResult:
-    """Best-so-far solution from `cmaes_optimize` (a thin `cma`-package wrap, NOT bit-pinned)."""
-
-    x: NDArray[np.float64]
-    fun: float
-    evals: int
-    stop: dict[str, object]
-
-
-def cmaes_optimize(
-    cost_fn: QpsoObjective,
-    x0: NDArray[np.float64],
-    sigma0: float,
-    opts: dict[str, object] | None = None,
-) -> CmaesResult:
-    """CMA-ES via the `cma` pip package -- the alternative outer-optimizer branch of
-    Train_BLSTM.m:1147 (`[X,F,E,STOP,OUT] = cmaes(functname, adim/2*ones(dims,1), adim/3,
-    OPTS, PS, 1)` with `OPTS.EvalParallel='yes'`).
-
-    NOT bit-pinned, and a DIFFERENT lineage than the vendored `cmaes.m`: the legacy `cmaes.m`
-    is Hansen's older MATLAB reference implementation; the `cma` package is Hansen's maintained
-    Python port. Their sampling/recombination RNG and default stop criteria differ, so this
-    wrap targets the same INVOCATION SHAPE and search behaviour, not bit equality. Kept thin;
-    validated by a smoke test, not a golden.
-
-    `EvalParallel='yes'` is honoured by handing the whole `ask()` population to `cost_fn` as a
-    (lambda x D) matrix per generation (one candidate per row)."""
-    import cma  # type: ignore[import-untyped]  # lazy: core dep, but only this branch needs it
-
-    x0_list = np.asarray(x0, dtype=np.float64).reshape(-1).tolist()
-    es = cma.CMAEvolutionStrategy(x0_list, float(sigma0), opts or {})
-    while not es.stop():
-        solutions = es.ask()
-        costs, _ = cost_fn(np.asarray(solutions, dtype=np.float64), 0)  # EvalParallel: whole population
-        es.tell(solutions, [float(c) for c in np.asarray(costs).reshape(-1)])
-    res = es.result
-    return CmaesResult(
-        x=np.asarray(res.xbest, dtype=np.float64),
-        fun=float(res.fbest),
-        evals=int(res.evaluations),
-        stop=dict(es.stop()),
     )

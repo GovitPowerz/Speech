@@ -25,7 +25,7 @@ from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
-from speech.optimizers import QpsoObjective, QpsoParams, QpsoResult, TableRng, cmaes_optimize, levy_stable_cms, quantum_pso
+from speech.optimizers import QpsoObjective, QpsoParams, QpsoResult, TableRng, levy_stable_cms, quantum_pso
 from speech.weight_bridge import read_bin
 
 from tests._libm_gate import assert_f64_close
@@ -185,14 +185,3 @@ def test_dead_banks_consume_stream() -> None:
     assert diverged, "dead-bank draws removed but the trajectory is unchanged -- they would be vacuous"
     # And specifically epoch 0 already shifts (the very first per-epoch draws are the dead banks).
     assert not np.allclose(r.pos_traj[0], m.pos_traj[0]), "epoch-0 pos unaffected by the dead banks"
-
-
-def test_cmaes_optimize_smoke() -> None:
-    """cmaes_optimize is NOT bit-pinned (a different `cma`-package lineage than the vendored
-    cmaes.m); a smoke test only. On a separable quadratic it must converge near the optimum,
-    driving cost_fn with the whole ask() population (EvalParallel='yes' shape)."""
-    center = np.array([2.0, -3.0, 5.0])
-    cost_fn = _surrogate_quadratic_factory(center)
-    res = cmaes_optimize(cost_fn, x0=np.zeros(3), sigma0=2.0, opts={"seed": 7, "maxfevals": 3000, "verbose": -9})
-    assert np.allclose(res.x, center, atol=1e-2), f"cmaes did not converge: {res.x} vs {center}"
-    assert res.fun < 1e-3 and res.evals > 0
