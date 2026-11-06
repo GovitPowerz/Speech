@@ -172,11 +172,12 @@ Speech/
     speech-py/src/lib.rs                   # the PyO3 module speech_rs
   src/python/speech/                       # the optimizer / orchestrator (README.md: the module map)
     cli.py  config_bridge.py  weight_bridge.py  init_weights.py  engine.py  genome.py
-    evaluate.py  optimizers.py  scoring.py  batching.py  nn_reference.py  features_oracle.py
+    evaluate.py  optimizers.py  scoring.py  batching.py
     drivers/{state,init,train,retrain,test,baseline,spec}.py
     dataprep/{augment,opensad15,stm_normalize,lre}.py
     ledger/{schema,tables,render,cli,stage,bench,prose}.py   # the record schema, the RESULTS.md renderers, the staged bench legs, `python -m speech.ledger`
   tests/                                   # pytest suites + tests/pyo3/ (the seam) + reference_data/ (goldens)
+    oracles/                               # test-only numpy oracles (nn_reference, features_oracle, the scorer / batching / QPSO-table oracles)
 ```
 
 ## Testing / CI

@@ -2866,7 +2866,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   narrower follow-up if that call site ever needs its own golden.
 
 - **[phase4c] Fixed-seed / injected-source determinism deviation -- REALIZED for QuantumPSO**
-  (`src/python/speech/optimizers.py::quantum_pso`, `TableRng`; `QuantumPSO.m:91`): the legacy
+  (`src/python/speech/optimizers.py::quantum_pso`; `TableRng`, `tests/oracles/optimizers.py` since
+  issue #133; `QuantumPSO.m:91`): the legacy
   optimizer path is nondeterministic BY DESIGN (`QuantumPSO.m:91` `rand('state',sum(100*clock))`
   reseeds `rand` from the wall clock; no fixed seed anywhere), so no single legacy RUN is
   reproducible in principle. The port routes EVERY stochastic draw (rand/randperm/stblrnd) through
