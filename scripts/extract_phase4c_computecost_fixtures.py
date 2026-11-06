@@ -158,7 +158,7 @@ def main() -> None:
     octave = _find_octave()
     octave_version = _octave_version(octave)
 
-    # Guard prior phases AND the existing phase4c fixtures (smorms3/rprop/genome) -- we only
+    # Guard prior phases AND the existing phase4c fixtures (smorms3/genome) -- we only
     # write computecost_* files here.
     before = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
     before["phase4c"] = _hash_tree(PHASE4C_DIR, skip_prefix="computecost_")

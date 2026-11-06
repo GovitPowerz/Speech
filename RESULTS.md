@@ -3964,6 +3964,6 @@ which generate the JSON cases the Rust segmenter and scorer goldens replay). The
 `stage_writelisting.m` still drives the vendored `WriteListing.m` whole; only `plain.flst` is
 committed.
 
-Measured 2026-11-06: pytest 1225 -> 1209 non-slow (the 16 retired tests: 1 cmaes, 4 rprop, 7
+Measured 2026-11-06: pytest 1225 -> 1209 passed non-slow (plus the one standing skip; the 16 retired tests: 1 cmaes, 4 rprop, 7
 check_grad, 4 shard), 0 failures; `uv run python tests/mutations/run.py --check`: 185 mutations,
 0 problems; the close run `--changed-since origin/main` is recorded in the pull request.
