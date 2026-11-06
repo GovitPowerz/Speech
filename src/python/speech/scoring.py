@@ -1,4 +1,4 @@
-"""LID confusion matrices, EER cutoff, masking sanity.
+"""LID confusion matrices, masking sanity.
 
 Ported from legacy MATLAB: confusion*.m, MaskingValidation.m. See design spec section 6.
 (The CheckGrad.m port, `check_grad`, was retired in issue #103: the port's gradient check

@@ -1,7 +1,7 @@
 """Hard-example mini-batch scheduler and listing parsing.
 
-Ported from legacy MATLAB: CreateBatches.m, GetNewBatch.m, processListing.m. See design
-spec section 6. (`getCases.m`'s private `getWorstAndBest` oracle lives in
+Ported from legacy MATLAB: CreateBatches.m, GetNewBatch.m, processListing.m,
+WriteListing.m, WriteWeightedListing.m. See design spec section 6. (`getCases.m`'s private `getWorstAndBest` oracle lives in
 `tests/oracles/batching.py` since issue #133.)
 
 `create_batches` is the ONLY RNG consumer here: it takes an injected
