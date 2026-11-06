@@ -1104,6 +1104,18 @@ impl CorpusProcessor {
         self.weights(0)
     }
 
+    /// Config-0's net `net` (pack order) as the best-cost gate last captured it
+    /// (issue #136: the in-memory successor of the `bestNNWeight_1_` weight and
+    /// derivative files). `None` before the first fire.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn best_pack_for_test(
+        &self,
+        net: usize,
+    ) -> Option<&crate::engine::bag_of_processors::BestPack> {
+        self.processors.best_pack_for_test(0, net)
+    }
+
     /// The bag's captured per-conf `(errorPercLID, confusion)` pairs from the
     /// LAST `save_and_update` (Task 9; display-only in the legacy).
     #[cfg(feature = "test-support")]

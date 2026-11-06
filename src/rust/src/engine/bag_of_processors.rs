@@ -183,6 +183,20 @@ pub(crate) fn training_policy(
     }
 }
 
+/// What one trainable net held at the last fire of its conf's best-cost gate (issue #136):
+/// the flat pack BEFORE that epoch's update and the folded `Nx2` derivatives the update
+/// consumed, plus how many times the gate has fired. The legacy wrote the first two to
+/// `weights_bestNNWeight_<n>_<f>` / `weightsDerivatives_...` (`saveWeights`); the port keeps
+/// them in memory, observable under `test-support` only. Every net of a conf shares one gate,
+/// so `fires` is the same across a conf's packs.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct BestPack {
+    pub weights: Vec<f64>,
+    pub derivs: Array2<f64>,
+    pub fires: usize,
+}
+
 /// The ONE refusal of a training-shaped config on the fast tree (issue #92's one body,
 /// issue #110's one site). The fast drivers' training arms are inert (`nets()` empty,
 /// training stays exact f64), so a config that would train or gradient-check them is a
@@ -251,6 +265,10 @@ pub struct BagOfProcessors {
     /// gate order is observable on a SAD conf.
     #[cfg(feature = "test-support")]
     last_update_cost_lid: BTreeMap<usize, f64>,
+    /// Test-support capture (issue #136): per conf, one [`BestPack`] per trainable net in
+    /// pack order, replaced at every fire of the best-cost gate in [`Self::save_weights`].
+    #[cfg(feature = "test-support")]
+    best_packs: BTreeMap<usize, Vec<BestPack>>,
     /// T1-review hardening (Phase 8 Task 1, finding 1; no legacy counterpart):
     /// sum-of-`|x|` over `data_raw` from the LAST [`Self::segmentation_function`]
     /// internal [`read_audio`] call. `segmentation_function`'s dispatch surface
@@ -467,6 +485,8 @@ impl BagOfProcessors {
             #[cfg(feature = "test-support")]
             last_update_cost_lid: BTreeMap::new(),
             #[cfg(feature = "test-support")]
+            best_packs: BTreeMap::new(),
+            #[cfg(feature = "test-support")]
             last_audio_abs_sum: None,
         })
     }
@@ -630,9 +650,36 @@ impl BagOfProcessors {
                 let file = crate::io::prefix_basename(prefix, filename);
                 net.save_weights(&file, &derivs[&pos][i], &stats[&pos][i])?;
             }
+            #[cfg(feature = "test-support")]
+            self.capture_best_pack(pos, derivs);
             best_cost.insert(pos, save_criterion);
         }
         Ok(())
+    }
+
+    /// The test-support half of a gate fire (issue #136): every trainable net's flat pack
+    /// as it stands (the caller runs this BEFORE `update_weights`) and its folded
+    /// derivatives, keyed by pack order, with the conf's fire count bumped.
+    #[cfg(feature = "test-support")]
+    fn capture_best_pack(&mut self, pos: usize, derivs: &BTreeMap<usize, Vec<Array2<f64>>>) {
+        let fires = self
+            .best_packs
+            .get(&pos)
+            .and_then(|packs| packs.first())
+            .map_or(0, |pack| pack.fires)
+            + 1;
+        let packs = self.processors[pos]
+            .driver()
+            .nets()
+            .iter()
+            .enumerate()
+            .map(|(i, net)| BestPack {
+                weights: net.get_weights(),
+                derivs: derivs[&pos][i].clone(),
+                fires,
+            })
+            .collect();
+        self.best_packs.insert(pos, packs);
     }
 
     /// Port of `BagOfProcessors::updateWeights` (`:183-205`): unconditional (unlike
@@ -710,6 +757,14 @@ impl BagOfProcessors {
     #[cfg(feature = "test-support")]
     pub fn last_update_cost_lid_for_test(&self, pos: usize) -> Option<f64> {
         self.last_update_cost_lid.get(&pos).copied()
+    }
+
+    /// Test-observation hook (issue #136): conf `pos`'s net `net` (pack order) as the
+    /// best-cost gate last captured it; `None` before the first fire or for a conf with no
+    /// trainable net.
+    #[cfg(feature = "test-support")]
+    pub fn best_pack_for_test(&self, pos: usize, net: usize) -> Option<&BestPack> {
+        self.best_packs.get(&pos).and_then(|packs| packs.get(net))
     }
 
     /// Test-observation hook (Phase 8 Task 1, T1-review hardening finding 1, no

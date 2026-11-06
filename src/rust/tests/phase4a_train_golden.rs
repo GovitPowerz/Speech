@@ -211,9 +211,28 @@ fn tier2_train_epoch_weights_golden() {
         assert_matrix(got, &want, &[], &[], name);
     }
 
-    // --- bestNNWeight artifact split (the LAST gate fire = the final eval): the
-    // weights .bin (Nx1) and derivs .bin (Nx2), io::binary with the legacy's
-    // misleading .mat suffix. Canary-gated (NN chain). ---------------------------
+    // --- The best pack (the LAST gate fire = the final eval) vs the legacy's
+    // `saveWeights` artifacts: the pre-update weights (Nx1) and the folded derivs
+    // (Nx2), committed as io::binary with the legacy's misleading .mat suffix.
+    // Canary-gated (NN chain). `fires` counts epoch 0 (the 1e20 seed) plus every
+    // classified fire above. -----------------------------------------------------
+    let pack = cp.best_pack_for_test(0).expect("the gate fired");
+    assert_eq!(pack.fires as i64, fired + 1, "gate fires incl. epoch 0");
+    let want_w = load_bin_phase4a("weights_bestNNWeight_1_tier2_spectral.mat");
+    assert_eq!(
+        want_w.dim(),
+        (pack.weights.len(), 1),
+        "best pack weights dims"
+    );
+    for (k, &g) in pack.weights.iter().enumerate() {
+        assert_oracle_eq_f64(g, want_w[[k, 0]], &format!("best pack weight {k}"));
+    }
+    let want_d = load_bin_phase4a("weightsDerivatives_bestNNWeight_1_tier2_spectral.mat");
+    assert_eq!(pack.derivs.dim(), want_d.dim(), "best pack derivs dims");
+    for (ix, &g) in pack.derivs.indexed_iter() {
+        assert_oracle_eq_f64(g, want_d[ix], &format!("best pack deriv {ix:?}"));
+    }
+
     let got_w = std::fs::read("weights_bestNNWeight_1_tier2_spectral.mat").unwrap();
     let want_w = load_bin_phase4a("weights_bestNNWeight_1_tier2_spectral.mat");
     let got_w_mat = parse_bin(&got_w);

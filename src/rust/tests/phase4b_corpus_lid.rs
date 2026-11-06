@@ -237,9 +237,41 @@ fn twin_train_epoch_weights_golden() {
         assert_matrix(got, &want, &[], &[], name);
     }
 
-    // --- bestNNWeight artifact split, BOTH nets: the LID pair carries
-    // saveWeightsLID's LID_ prefix (BagOfProcessors.cpp:176 via
-    // TwinBLSTMSpectralLID.cpp:83-85). Value-compared (canary-gated). ----------
+    // --- The best packs of BOTH nets (the LAST gate fire) vs the legacy's
+    // `saveWeights` artifacts: net 0 the SAD pair, net 1 the LID pair the legacy
+    // wrote under saveWeightsLID's LID_ prefix (BagOfProcessors.cpp:176 via
+    // TwinBLSTMSpectralLID.cpp:83-85). The pack is keyed by net index, so a LID
+    // pack dropped or swapped with the SAD one fails here. Canary-gated. The SAD
+    // net's derivs are 0x0 (Mode 7 never forwards it), which `read_matrix` refuses,
+    // hence the local reader. -------------------------------------------------------
+    let fires_want = fired as usize + 1;
+    let read = |name: String| parse_bin(&std::fs::read(fixture_phase4b(&name)).unwrap());
+    for (net, prefix) in [(0, ""), (1, "LID_")] {
+        let pack = cp
+            .best_pack_for_test(net)
+            .unwrap_or_else(|| panic!("net {net}: no best pack"));
+        assert_eq!(
+            pack.fires, fires_want,
+            "net {net}: gate fires incl. epoch 0"
+        );
+        let want_w = read(format!("weights_{prefix}bestNNWeight_1_twin_train.mat"));
+        assert_eq!(
+            want_w.dim(),
+            (pack.weights.len(), 1),
+            "net {net} weights dims"
+        );
+        for (k, &g) in pack.weights.iter().enumerate() {
+            assert_oracle_eq_f64(g, want_w[[k, 0]], &format!("net {net} weight {k}"));
+        }
+        let want_d = read(format!(
+            "weightsDerivatives_{prefix}bestNNWeight_1_twin_train.mat"
+        ));
+        assert_eq!(pack.derivs.dim(), want_d.dim(), "net {net} derivs dims");
+        for (ix, &g) in pack.derivs.indexed_iter() {
+            assert_oracle_eq_f64(g, want_d[ix], &format!("net {net} deriv {ix:?}"));
+        }
+    }
+
     for name in [
         "weights_bestNNWeight_1_twin_train.mat",
         "weightsDerivatives_bestNNWeight_1_twin_train.mat",
