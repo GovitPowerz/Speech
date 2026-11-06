@@ -62,10 +62,13 @@ pub struct GradCheckReport {
 /// what epoch `e`'s `saveAndUpdate` wrote for every config (issue #134). Sized
 /// `1 x n` by the ctor, `run_solo` and the gradient check, `(N + 2) x n` by
 /// `train` (solo, `N` inner epochs, the final eval), and filled row by row, so
-/// after `run()` every row is written and each array equals the variable
-/// `saveResults` writes last (`topRows(epoch + 1)` at the final epoch is the
-/// whole array). Read through [`CorpusProcessor::epoch_mems`].
-#[derive(Debug, Clone, PartialEq)]
+/// after a solo or training `run()` every row is written and each array equals
+/// the variable `saveResults` writes last (`topRows(epoch + 1)` at the final
+/// epoch is the whole array). A gradient check resets them to `1 x n` zeros
+/// (legacy `:239-242`) and its sweep saves nothing, so after one they hold those
+/// zeros while the `.mat` on disk keeps the previous run's rows. Read through
+/// [`CorpusProcessor::epoch_mems`].
+#[derive(Debug, Clone)]
 pub struct EpochMems {
     pub cost: Array2<f64>,
     pub bad_classif: Array2<f64>,

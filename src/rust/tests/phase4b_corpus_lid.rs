@@ -150,8 +150,8 @@ fn parse_bin(b: &[u8]) -> Array2<f64> {
 // === twin_train_epoch_weights_golden =========================================
 // The whole Mode-7 train replay at N=1: run, then compare every observable
 // against the committed fixtures. One test (one run) covering BOTH nets' epoch
-// weights, the measured gate trajectory, the result matrix and epoch arrays, the bestNNWeight artifacts
-// (incl. the LID_ prefix), and the confusion capture.
+// weights, the measured gate trajectory, the result matrix and epoch arrays, the
+// bestNNWeight artifacts (incl. the LID_ prefix), and the confusion capture.
 #[test]
 fn twin_train_epoch_weights_golden() {
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());

@@ -11,8 +11,8 @@
 //!
 //!   - the per-epoch 33,671-weight vectors (`tier2_weights_epoch{0..4}.bin`) --
 //!     canary-gated per element (the NN chain is libm-bearing);
-//!   - the result matrix and the four epoch arrays vs the converted fixtures (id/count columns strict,
-//!     timing col 6 masked);
+//!   - the result matrix and the four epoch arrays vs the converted fixtures
+//!     (id/count columns strict, timing col 6 masked);
 //!   - the `bestNNWeight` artifact split (weights Nx1 + derivs Nx2, io::binary);
 //!   - the tier-2 VRCTS bytes (final epoch's segmentation);
 //!   - NON-VACUITY (measured, not assumed): every consecutive epoch weight pair

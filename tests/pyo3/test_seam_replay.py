@@ -275,8 +275,9 @@ def test_twin_train_replay(tmp_path: Path) -> None:
 def test_epoch_mems_bridge_matches_mat(tmp_path: Path) -> None:
     """Issue #134 bridge: `Engine.epoch_mems()` is a dict of the four per-epoch
     arrays under their `.mat` variable names, each bit-identical to what the
-    engine wrote to the `.mat` in the same run. The one test that still reads an
-    engine-written `.mat`; it goes with the writer (#135)."""
+    engine wrote to the `.mat` in the same run. The one pytest test that still
+    reads an engine-written `.mat` (the Rust writer's own tests are the others);
+    it goes with the writer (#135)."""
     _seed_tier2_spectral(tmp_path)
     with chdir(tmp_path):
         eng = speech_rs.Engine(["tier2_spectral.config"], "-m")

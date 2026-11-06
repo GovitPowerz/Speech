@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use indexmap::IndexMap;
 
-use common::{mat_var_dims, mat_var_matrix, mat_var_order};
+use common::{mat_var_dims, mat_var_order, named_epoch_mems};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::channel_result::ChannelResult;
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -358,6 +358,20 @@ fn grad_check_synthetic() {
 
     // Orchestration mechanics: exactly 10 per-weight triples produced by the sweep.
     assert_eq!(report.per_weight.len(), 10, "10 weights checked");
+    // Issue #134: the gradient check resets the four epoch arrays to `1 x nb_conf`
+    // zeros (legacy :239-242) and its sweep never saves a row, so the accessor
+    // reads those zeros afterwards.
+    for (name, got) in named_epoch_mems(cp.epoch_mems()) {
+        assert_eq!(
+            got.dim(),
+            (1, 1),
+            "{name} reset to 1 x nb_conf by the grad check"
+        );
+        assert!(
+            got.iter().all(|v| *v == 0.0),
+            "{name} stays zero through the sweep"
+        );
+    }
     // The cost path is now LIVE (Task 7b targets): the analytic normalized deriv and
     // the numerical central difference are finite and agree. Assert the Task 7 bound.
     assert!(
@@ -468,9 +482,10 @@ fn synthetic_signal_corpus_config(dir: &Path) -> IndexMap<String, String> {
 // === epoch_mems_shape_and_fill ===============================================
 // Issue #134: the four per-epoch arrays have an in-memory surface. Shape: the
 // ctor seeds `1 x nb_conf`; a solo run keeps 1 row; a train run of N epochs holds
-// (N+2) rows, every one written (the final epoch is N+1). Fill: each array is
-// bit-identical to the variable `save_results` writes last, so a golden
-// re-pointed from the `.mat` to the accessor reads the same numbers.
+// (N+2) rows, every one written (the final epoch is N+1). Fill: a scored TDC run
+// leaves a nonzero row (the values themselves are the goldens' business, pinned
+// against the `.bin` fixtures; the bit-identity with the written `.mat` is the
+// seam bridge test's, `tests/pyo3/test_seam_replay.py`).
 #[test]
 fn epoch_mems_shape_and_fill() {
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -482,22 +497,9 @@ fn epoch_mems_shape_and_fill() {
         assert_eq!(cp.epoch_mems().cost.dim(), (1, 1), "ctor seed 1 x nb_conf");
         cp.run().unwrap();
 
-        let mems = cp.epoch_mems();
-        let bytes = std::fs::read("MultiConfigResults.mat").unwrap();
         let mut any_nonzero = false;
-        for (name, got) in [
-            ("CostMem", &mems.cost),
-            ("BadClassifMem", &mems.bad_classif),
-            ("CostLIDMem", &mems.cost_lid),
-            ("BadClassifLIDMem", &mems.bad_classif_lid),
-        ] {
+        for (name, got) in named_epoch_mems(cp.epoch_mems()) {
             assert_eq!(got.dim(), (rows, 1), "{name} after {epochs} epochs");
-            let want = mat_var_matrix(&bytes, name).unwrap();
-            assert_eq!(
-                got.mapv(f64::to_bits),
-                want.mapv(f64::to_bits),
-                "{name} equals the written variable"
-            );
             any_nonzero |= got.iter().any(|v| *v != 0.0);
         }
         assert!(any_nonzero, "a scored TDC run fills at least one array");

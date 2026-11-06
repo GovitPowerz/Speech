@@ -100,7 +100,8 @@ fn mode(kind: ModeKind) -> Mode {
 // === solo_tdc_matches ========================================================
 // CorpusProcessor::new(tier1_tdc.config with epochs->0, Mode::Solo).run(); read the
 // result matrix and the epoch arrays off the engine (issue #134) and compare
-// MultiConfigResults (mask col 6), CostMem/BadClassifMem vs the converted fixtures. TDC is libm-bearing -> canary-gated compare; the id columns
+// MultiConfigResults (mask col 6), CostMem/BadClassifMem vs the converted
+// fixtures. TDC is libm-bearing -> canary-gated compare; the id columns
 // (file/conf/chan = cols 0/1/2) are strict.
 #[test]
 fn solo_tdc_matches() {
@@ -181,22 +182,12 @@ fn train_ltsv_two_epochs_matches() {
     );
 
     let mems = cp.epoch_mems();
-    let got_cost = &mems.cost;
-    let want_cost = load_bin_phase4a("train_ltsv_CostMem.bin");
-    assert_eq!(got_cost.dim(), (4, 1), "train CostMem (epochs+2)x1 = 4x1");
-    assert_matrix(got_cost, &want_cost, &[], &[], "train CostMem");
-
-    let got_bad = &mems.bad_classif;
-    let want_bad = load_bin_phase4a("train_ltsv_BadClassifMem.bin");
-    assert_matrix(got_bad, &want_bad, &[], &[], "train BadClassifMem");
-
-    for (var, got) in [
-        ("CostLIDMem", &mems.cost_lid),
-        ("BadClassifLIDMem", &mems.bad_classif_lid),
-    ] {
+    assert_eq!(mems.cost.dim(), (4, 1), "train CostMem (epochs+2)x1 = 4x1");
+    for (var, got) in named_epoch_mems(mems) {
         let want = load_bin_phase4a(&format!("train_ltsv_{var}.bin"));
         assert_matrix(got, &want, &[], &[], &format!("train {var}"));
     }
+    let got_bad = &mems.bad_classif;
 
     // Non-vacuity (Phase 3 standard): LTSV (Algo 2) is NN-free -- no weight updates
     // between epochs -- so every epoch re-evaluates the SAME hypothesis and the mem
