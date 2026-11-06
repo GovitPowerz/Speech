@@ -293,7 +293,7 @@ def test_derive_sad_listings_split_is_seeded_disjoint_and_covers_all(tmp_path: p
     assert valid_files.isdisjoint(test_files)
     assert len(train_files | valid_files | test_files) == 40
 
-    # no worker-shard duplicate emitted (the nb_workers=0 bypass)
+    # no worker-shard file: write_listing writes the base listing only (#103)
     assert not (out_dir / "sad_train_worker_1.flst").exists()
 
     split_json = json.loads(split.split_json_path.read_text())

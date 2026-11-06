@@ -232,12 +232,8 @@ def derive_sad_listings(corpus_root: Path, out_dir: Path, seed: int) -> SadSplit
     `*.xml` pair under `corpus_root` (see `_wav_xml_pairs`), then a SEEDED, disjoint
     70/15/15 train/valid/test split (`np.random.default_rng(seed).permutation`)
     recorded BOTH in the emitted listings' filenames (`sad_train.flst`/
-    `sad_valid.flst`/`sad_test.flst`, written via `write_listing(..., nb_workers=0)`
-    -- `nb_workers=0` skips `write_listing`'s worker-shard files entirely, since
-    `min(0, n) == 0` empties its shard loop; worker-sharding and this
-    train/valid/test split are different axes, and reusing `write_listing` with a
-    real worker count would silently also emit a redundant `_worker_1` duplicate of
-    the base listing per split) AND in a `split.json` sidecar (seed, ratios,
+    `sad_valid.flst`/`sad_test.flst`, written via `write_listing`) AND in a
+    `split.json` sidecar (seed, ratios,
     per-split counts, orphan counts, and each split's file list -- reproducible
     audit independent of re-parsing the listings).
 
@@ -268,7 +264,7 @@ def derive_sad_listings(corpus_root: Path, out_dir: Path, seed: int) -> SadSplit
     for name, idx in split_indices.items():
         items = [{"filename": str(pairs[i][0]), "refseg": str(pairs[i][1]), "lang": "unk", "dial": "unk"} for i in idx]
         base = out_dir / f"sad_{name}"
-        write_listing(base, items, nb_workers=0)
+        write_listing(base, items)
         split_paths[name] = base.parent / f"{base.name}.flst"
         split_files[name] = [it["filename"] for it in items]
 

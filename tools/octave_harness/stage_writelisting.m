@@ -4,9 +4,9 @@ function stage_writelisting(out_dir)
   % plain text directly -- there is no .mat -> .bin conversion step here, unlike every
   % other stage in this harness; the goldens ARE the files Octave itself wrote.
   %
-  % plain (WriteListing): 7 files, PS.VP.nbworker=3 -- 7 is NOT evenly divisible by 3
-  % (3+2+2), so the worker-shard fliplr(length(index)-jj+1:-nbworker:1) interleave is
-  % genuinely exercised across all 3 shards, by hand:
+  % plain (WriteListing): 7 files, PS.VP.nbworker=3 (the function requires it). Only
+  % plain.flst is committed: the worker-shard branch (:11-22) is not ported (issue #103),
+  % so the 3 shard files stay in the tempdir. For the record, the fliplr interleave:
   %   jj=1: fliplr(7:-3:1) = fliplr([7 4 1]) = [1 4 7]
   %   jj=2: fliplr(6:-3:1) = fliplr([6 3])   = [3 6]
   %   jj=3: fliplr(5:-3:1) = fliplr([5 2])   = [2 5]
