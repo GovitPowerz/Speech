@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 use indexmap::IndexMap;
 
-use common::{assert_matrix, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a, named_epoch_mems};
+use common::{assert_matrix, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus::Corpus;
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -94,7 +94,7 @@ fn mode(kind: ModeKind) -> Mode {
     }
 }
 
-// `named_epoch_mems`/`assert_matrix` are shared via `common` (hoisted from four
+// `assert_matrix` is shared via `common` (hoisted from four
 // copy-pasted phase4a test files; see `tests/common/mod.rs`).
 
 // === solo_tdc_matches ========================================================
@@ -137,7 +137,7 @@ fn solo_tdc_matches() {
         "solo MultiConfigResults",
     );
 
-    for (var, got) in named_epoch_mems(cp.epoch_mems()) {
+    for (var, got) in cp.epoch_mems().named() {
         let want = load_bin_phase4a(&format!("solo_tdc_{var}.bin"));
         assert_matrix(got, &want, &[], &[], &format!("solo {var}"));
     }
@@ -183,7 +183,7 @@ fn train_ltsv_two_epochs_matches() {
 
     let mems = cp.epoch_mems();
     assert_eq!(mems.cost.dim(), (4, 1), "train CostMem (epochs+2)x1 = 4x1");
-    for (var, got) in named_epoch_mems(mems) {
+    for (var, got) in mems.named() {
         let want = load_bin_phase4a(&format!("train_ltsv_{var}.bin"));
         assert_matrix(got, &want, &[], &[], &format!("train {var}"));
     }
@@ -275,7 +275,7 @@ fn multiconfig_matches() {
         );
     }
 
-    for (var, got) in named_epoch_mems(cp.epoch_mems()) {
+    for (var, got) in cp.epoch_mems().named() {
         let want = load_bin_phase4a(&format!("multiconfig_{var}.bin"));
         // 1 epoch x 2 confs.
         assert_eq!(got.dim(), (1, 2), "multiconfig {var} 1x2");

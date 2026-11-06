@@ -38,7 +38,6 @@ use ndarray::Array2;
 
 use common::{
     assert_matrix, assert_oracle_eq_f64, fixture_phase4b, load_bin_phase4b, mat_var_matrix,
-    named_epoch_mems,
 };
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -233,7 +232,7 @@ fn twin_train_epoch_weights_golden() {
         &[6],
         "twin_train MultiConfigResults",
     );
-    for (name, got) in named_epoch_mems(cp.epoch_mems()) {
+    for (name, got) in cp.epoch_mems().named() {
         let want = load_bin_phase4b(&format!("twin_train_{name}.bin"));
         assert_matrix(got, &want, &[], &[], name);
     }

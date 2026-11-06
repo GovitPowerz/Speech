@@ -36,7 +36,6 @@ use ndarray::Array2;
 
 use common::{
     assert_matrix, assert_oracle_eq_f64, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a,
-    named_epoch_mems,
 };
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -119,7 +118,7 @@ fn manifest_non_vacuity() -> (i64, i64, i64) {
     )
 }
 
-// `named_epoch_mems`/`assert_matrix` are shared via `common` (hoisted from four
+// `assert_matrix` is shared via `common` (hoisted from four
 // copy-pasted phase4a test files; see `tests/common/mod.rs`).
 
 // === tier2_train_epoch_weights_golden ========================================
@@ -207,7 +206,7 @@ fn tier2_train_epoch_weights_golden() {
     let got = cp.results_matrix();
     let want = load_bin_phase4a("tier2_spectral_MultiConfigResults.bin");
     assert_matrix(got, &want, &[0, 1, 2], &[6], "MultiConfigResults");
-    for (name, got) in named_epoch_mems(cp.epoch_mems()) {
+    for (name, got) in cp.epoch_mems().named() {
         let want = load_bin_phase4a(&format!("tier2_spectral_{name}.bin"));
         assert_matrix(got, &want, &[], &[], name);
     }

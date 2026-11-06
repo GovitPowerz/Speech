@@ -85,6 +85,18 @@ impl EpochMems {
             bad_classif_lid: Array2::zeros((rows, cols)),
         }
     }
+
+    /// The four arrays under their `.mat` variable names, in the order
+    /// `saveResults` writes them (`:398-401`): the one name map the writer, the
+    /// seam's `Engine.epoch_mems()` dict and the goldens read.
+    pub fn named(&self) -> [(&'static str, &Array2<f64>); 4] {
+        [
+            ("CostMem", &self.cost),
+            ("BadClassifMem", &self.bad_classif),
+            ("CostLIDMem", &self.cost_lid),
+            ("BadClassifLIDMem", &self.bad_classif_lid),
+        ]
+    }
 }
 
 /// Port of `CorpusProcessor` (`CorpusProcessor.h`/`.cpp`): mode dispatch, the epoch
@@ -682,22 +694,9 @@ impl CorpusProcessor {
         write_row_major(&mut w, "MultiConfigResults", &self.results_e)?;
         // legacy: :398-401 each mem topRows(epoch+1).
         let top = epoch + 1;
-        write_row_major(&mut w, "CostMem", &truncate_rows(&self.mems.cost, top))?;
-        write_row_major(
-            &mut w,
-            "BadClassifMem",
-            &truncate_rows(&self.mems.bad_classif, top),
-        )?;
-        write_row_major(
-            &mut w,
-            "CostLIDMem",
-            &truncate_rows(&self.mems.cost_lid, top),
-        )?;
-        write_row_major(
-            &mut w,
-            "BadClassifLIDMem",
-            &truncate_rows(&self.mems.bad_classif_lid, top),
-        )?;
+        for (name, m) in self.mems.named() {
+            write_row_major(&mut w, name, &truncate_rows(m, top))?;
+        }
         w.finish()?;
         Ok(())
     }

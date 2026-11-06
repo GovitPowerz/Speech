@@ -812,20 +812,6 @@ pub fn mat_var_matrix(bytes: &[u8], name: &str) -> Option<Array2<f64>> {
         .map(|(_, r, c, data)| Array2::from_shape_fn((r, c), |(i, j)| data[j * r + i]))
 }
 
-/// The four per-epoch arrays under their `.mat` variable names, in the writer's
-/// order: the loop shape the goldens take over the `<run>_<name>.bin` fixtures
-/// (issue #134: read off `CorpusProcessor::epoch_mems`, not the file).
-pub fn named_epoch_mems(
-    m: &speech::engine::corpus_processor::EpochMems,
-) -> [(&'static str, &Array2<f64>); 4] {
-    [
-        ("CostMem", &m.cost),
-        ("BadClassifMem", &m.bad_classif),
-        ("CostLIDMem", &m.cost_lid),
-        ("BadClassifLIDMem", &m.bad_classif_lid),
-    ]
-}
-
 pub fn mat_var_order(bytes: &[u8]) -> Vec<String> {
     mat_vars(bytes).into_iter().map(|(n, _, _, _)| n).collect()
 }

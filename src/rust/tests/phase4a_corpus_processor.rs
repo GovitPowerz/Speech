@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use indexmap::IndexMap;
 
-use common::{mat_var_dims, mat_var_order, named_epoch_mems};
+use common::{mat_var_dims, mat_var_order};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::channel_result::ChannelResult;
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -358,10 +358,11 @@ fn grad_check_synthetic() {
 
     // Orchestration mechanics: exactly 10 per-weight triples produced by the sweep.
     assert_eq!(report.per_weight.len(), 10, "10 weights checked");
-    // Issue #134: the gradient check resets the four epoch arrays to `1 x nb_conf`
-    // zeros (legacy :239-242) and its sweep never saves a row, so the accessor
-    // reads those zeros afterwards.
-    for (name, got) in named_epoch_mems(cp.epoch_mems()) {
+    // Issue #134: the sweep never saves a row (its `run_epoch(1, ..)` calls sit past
+    // `_TrainingEpochs = 0`), so the four epoch arrays stay `1 x nb_conf` zeros. The
+    // reset itself (legacy :239-242) is invisible here, the ctor having seeded the
+    // same zeros; `epoch_mems_shape_and_fill` pins it from a filled state.
+    for (name, got) in cp.epoch_mems().named() {
         assert_eq!(
             got.dim(),
             (1, 1),
@@ -476,16 +477,19 @@ fn synthetic_signal_corpus_config(dir: &Path) -> IndexMap<String, String> {
     m
 }
 
-// `mat_var_order`/`mat_var_dims`/`mat_var_matrix` are shared via `common`
+// `mat_var_order`/`mat_var_dims` are shared via `common`
 // (hoisted from four copy-pasted phase4a test files; see `tests/common/mod.rs`).
 
 // === epoch_mems_shape_and_fill ===============================================
 // Issue #134: the four per-epoch arrays have an in-memory surface. Shape: the
 // ctor seeds `1 x nb_conf`; a solo run keeps 1 row; a train run of N epochs holds
-// (N+2) rows, every one written (the final epoch is N+1). Fill: a scored TDC run
-// leaves a nonzero row (the values themselves are the goldens' business, pinned
-// against the `.bin` fixtures; the bit-identity with the written `.mat` is the
-// seam bridge test's, `tests/pyo3/test_seam_replay.py`).
+// (N+2) rows, every one written (the final epoch is N+1). Fill: TDC trains no
+// weights, so every epoch rescores the same hypothesis and a written row is
+// nonzero in at least one array (the values themselves are the goldens' business,
+// pinned against the `.bin` fixtures; the bit-identity with the written `.mat` is
+// the seam bridge test's, `tests/pyo3/test_seam_replay.py`). Reset: a gradient
+// check then zeroes them back to `1 x nb_conf` (legacy :239-242); TDC has no
+// backprop net, so its sweep is empty and only the reset runs.
 #[test]
 fn epoch_mems_shape_and_fill() {
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -494,14 +498,26 @@ fn epoch_mems_shape_and_fill() {
         let cfg = tdc_corpus_config(dir.path(), 1, epochs);
         let _cwd = CwdGuard::enter(dir.path());
         let mut cp = CorpusProcessor::new(vec![cfg], mode(kind)).unwrap();
-        assert_eq!(cp.epoch_mems().cost.dim(), (1, 1), "ctor seed 1 x nb_conf");
+        for (name, got) in cp.epoch_mems().named() {
+            assert_eq!(got.dim(), (1, 1), "{name} ctor seed 1 x nb_conf");
+        }
         cp.run().unwrap();
 
-        let mut any_nonzero = false;
-        for (name, got) in named_epoch_mems(cp.epoch_mems()) {
+        let mems = cp.epoch_mems().named();
+        for (name, got) in mems {
             assert_eq!(got.dim(), (rows, 1), "{name} after {epochs} epochs");
-            any_nonzero |= got.iter().any(|v| *v != 0.0);
         }
-        assert!(any_nonzero, "a scored TDC run fills at least one array");
+        for r in 0..rows {
+            assert!(
+                mems.iter().any(|(_, m)| m[[r, 0]] != 0.0),
+                "row {r} of {rows} written after {epochs} epochs"
+            );
+        }
+
+        assert!(cp.grad_check(1e-5, 1).unwrap().is_empty(), "TDC: no net");
+        for (name, got) in cp.epoch_mems().named() {
+            assert_eq!(got.dim(), (1, 1), "{name} reset to 1 x nb_conf");
+            assert!(got.iter().all(|v| *v == 0.0), "{name} reset to zeros");
+        }
     }
 }
