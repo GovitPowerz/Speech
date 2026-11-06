@@ -175,6 +175,20 @@ def test_fold_run_leaves_an_empty_path_value_empty(tmp_path: Path, monkeypatch: 
     assert handed["Dump_Directory"] == ""
 
 
+def test_fold_run_reads_a_path_value_trimmed_as_the_engine_does(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The engine trims every string value (issue #87), so a blank value is the empty sentinel
+    and a padded one names the trimmed path: resolving the untrimmed text would hand the engine
+    the workdir itself (a dump into the run dir) or a path with a space in it."""
+    seen = _fake_seam(monkeypatch)
+    base = _base()
+    base["Dump_Directory"] = "  "
+    base["BLSTM_weightsFile"] = " sad.bin "
+    FoldRun(base, tmp_path, backprop=True).run()
+    (handed,) = seen["maps"]
+    assert handed["Dump_Directory"] == "  "
+    assert handed["BLSTM_weightsFile"] == str(tmp_path / "sad.bin")
+
+
 def test_fold_run_rejects_a_pack_count_that_does_not_match_the_nets(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A `[sad]`-only list on the Twin would index past the packs in the bag (and before #62
     scored the config's own LID pack on fast in silence, the #29 failure mode); it is refused

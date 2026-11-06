@@ -1,0 +1,430 @@
+//! Every config reader in the crate goes through the shared `legacy_config` family. Issue
+//! #50: every f64 and list read, so a non-finite value (`nan`, `inf`, `1e400`) on any of its
+//! keys errors naming the key instead of flowing into the engine, and every list takes the one
+//! grammar (the trailing comma, the `*` repeater). Issue #87: every i32 / bool / String /
+//! usize read, so a parseable prefix with trailing junk (`1O`, `True`) errors naming the key
+//! instead of reading the prefix as the legacy `ss >> val` did (the #32 tightening), and a
+//! padded value trims (an in-memory map, or a quoted TOML string; the `.config` parser
+//! trims). One pin per migrated module, driven through that module's public constructor on
+//! a committed fixture; the parsers themselves are unit-pinned in
+//! `legacy_config::{f64_reader_tests, token_reader_tests}`.
+
+use indexmap::IndexMap;
+use speech::config::NnetSpec;
+use speech::engine::bag_of_processors::BagOfProcessors;
+use speech::engine::corpus::Corpus;
+use speech::fast::driver::{FastTwinLid, build_aligned_spec};
+use speech::fast::stream::StreamingSession;
+use speech::features::pipeline::FeatureConfig;
+use speech::legacy_config::parse_legacy_config;
+use speech::nn::blstm::BlstmConfig;
+use speech::tasks::lid::TwinBlstmSpectralLid;
+use speech::tasks::sad::TdcSegmenter;
+use speech::tasks::segmenter::{DriverConfig, SegmenterConfig};
+use speech::tasks::vrcts::VrctsPart;
+
+fn load(rel: &str) -> IndexMap<String, String> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data")
+        .join(rel);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?}: {e}"));
+    parse_legacy_config(&text)
+}
+
+fn with(mut m: IndexMap<String, String>, key: &str, value: &str) -> IndexMap<String, String> {
+    m.insert(key.to_string(), value.to_string());
+    m
+}
+
+/// The full anyhow chain of an `Err`; the driver types are not `Debug`, so no `unwrap_err`.
+fn err_of<T>(r: anyhow::Result<T>, what: &str) -> String {
+    match r {
+        Ok(_) => panic!("{what}: must not build"),
+        Err(e) => format!("{e:#}"),
+    }
+}
+
+fn tdc_bag_config() -> IndexMap<String, String> {
+    let m = load("phase2b/tdc.config");
+    let m = with(m, "numOuterThreads", "1");
+    let m = with(m, "Algo_choice", "1");
+    with(m, "TDC_lags", "-0.002,0.016")
+}
+
+#[test]
+fn bag_of_processors_rejects_non_finite_audio_offset() {
+    let mut cfg = with(tdc_bag_config(), "Audio_offset", "nan");
+    let err = err_of(
+        BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)),
+        "Audio_offset nan",
+    );
+    assert!(err.contains("Audio_offset") && err.contains("nan"), "{err}");
+}
+
+/// Issue #87: the bag's i32 / bool / String reads take the family's token parser.
+#[test]
+fn bag_of_processors_rejects_trailing_junk_on_scalar_keys() {
+    for (key, bad) in [
+        ("File_Type", "1O"),
+        ("numOuterThreads", "1 2"),
+        ("exclude_nontrans", "True"),
+        ("Algo_choice", "1.0"),
+    ] {
+        let mut cfg = with(tdc_bag_config(), key, bad);
+        let err = err_of(
+            BagOfProcessors::from_configs(std::slice::from_mut(&mut cfg)),
+            key,
+        );
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
+}
+
+#[test]
+fn feature_config_rejects_non_finite_scalar_and_lag() {
+    let base = load("phase4a/tier2_spectral.config");
+    let err = err_of(
+        FeatureConfig::from_legacy(&with(base.clone(), "BLSTM_spectrum_shift", "inf"), "BLSTM"),
+        "BLSTM_spectrum_shift inf",
+    );
+    assert!(
+        err.contains("BLSTM_spectrum_shift") && err.contains("inf"),
+        "{err}"
+    );
+    // The pitch second pass's lag list (read only under `TDCwindow != 0`) is the shared
+    // list grammar: a trailing comma reads, a non-finite entry errors naming the key.
+    let m = with(base, "BLSTM_TDCwindow", "0.02");
+    let m = with(m, "BLSTM_TDCshift", "0.01");
+    let lags =
+        FeatureConfig::from_legacy(&with(m.clone(), "BLSTM_TDC_lags", "0.001,0.002,"), "BLSTM")
+            .unwrap()
+            .tdc
+            .unwrap()
+            .lags;
+    assert_eq!(lags, vec![0.001, 0.002]);
+    let err = err_of(
+        FeatureConfig::from_legacy(&with(m, "BLSTM_TDC_lags", "0.001,nan"), "BLSTM"),
+        "BLSTM_TDC_lags nan",
+    );
+    assert!(
+        err.contains("BLSTM_TDC_lags") && err.contains("nan"),
+        "{err}"
+    );
+}
+
+#[test]
+fn tdc_segmenter_rejects_non_finite_balance_and_reads_the_list_grammar() {
+    let base = tdc_bag_config();
+    let err = err_of(
+        TdcSegmenter::from_legacy(&with(base.clone(), "TDC_balance", "1e400")),
+        "TDC_balance 1e400",
+    );
+    assert!(
+        err.contains("TDC_balance") && err.contains("1e400"),
+        "{err}"
+    );
+    assert!(TdcSegmenter::from_legacy(&with(base.clone(), "TDC_lags", "-0.002,0.016,")).is_ok());
+    let err = err_of(
+        TdcSegmenter::from_legacy(&with(base, "TDC_lags", "0.016*x")),
+        "TDC_lags 0.016*x",
+    );
+    assert!(err.contains("TDC_lags") && err.contains("0.016*x"), "{err}");
+}
+
+#[test]
+fn segmenter_and_driver_configs_reject_non_finite_values() {
+    let base = tdc_bag_config();
+    let err = SegmenterConfig::from_config(
+        &with(base.clone(), "TDC_decision_thresh_rising", "nan"),
+        "TDC",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        err.contains("TDC_decision_thresh_rising") && err.contains("nan"),
+        "{err}"
+    );
+    let err =
+        SegmenterConfig::from_config(&with(base.clone(), "TDC_min_speech", "0.1,inf,0.1"), "TDC")
+            .unwrap_err()
+            .to_string();
+    assert!(
+        err.contains("TDC_min_speech") && err.contains("inf"),
+        "{err}"
+    );
+    // The issue's concrete case: `BackPropWER nan` used to evaluate `nan >= 0` as false and
+    // carry on here while `cost.rs` errored on the same key.
+    let err = err_of(
+        DriverConfig::from_config(&with(base, "TDC_BackPropWER", "nan"), "TDC"),
+        "TDC_BackPropWER nan",
+    );
+    assert!(
+        err.contains("TDC_BackPropWER") && err.contains("nan"),
+        "{err}"
+    );
+}
+
+#[test]
+fn twin_lid_drivers_reject_non_finite_window() {
+    let exact = with(load("phase4b/twin_mode0.config"), "BLSTM_LID_window", "nan");
+    let err = err_of(
+        TwinBlstmSpectralLid::from_legacy(&exact, None, None),
+        "exact BLSTM_LID_window nan",
+    );
+    assert!(
+        err.contains("BLSTM_LID_window") && err.contains("nan"),
+        "{err}"
+    );
+    let fast = with(
+        load("phase4b/twin_mode7.config"),
+        "BLSTM_LID_NoiseMagnitude",
+        "-inf",
+    );
+    let err = err_of(
+        FastTwinLid::from_legacy(&fast, None, None),
+        "fast BLSTM_LID_NoiseMagnitude -inf",
+    );
+    assert!(
+        err.contains("BLSTM_LID_NoiseMagnitude") && err.contains("-inf"),
+        "{err}"
+    );
+}
+
+#[test]
+fn streaming_session_rejects_non_finite_fixed_gain() {
+    let m = with(
+        load("phase4a/tier2_spectral.config"),
+        "Audio_fixed_gain",
+        "nan",
+    );
+    let err = err_of(StreamingSession::new(&m, 8000.0, 1), "Audio_fixed_gain nan");
+    assert!(
+        err.contains("Audio_fixed_gain") && err.contains("nan"),
+        "{err}"
+    );
+}
+
+#[test]
+fn nnet_spec_reads_the_list_grammar() {
+    let base = load("phase4a/tier2_spectral.config");
+    // The fixture declares `23,24,24`; the repeat form spells the same list.
+    let plain = NnetSpec::from_legacy(&base, "BLSTM").unwrap();
+    assert_eq!(plain.lstm_neuron_nb, vec![23, 24, 24]);
+    let repeated = with(base.clone(), "BLSTM_LSTMNeuronNb", "23,24*2,");
+    assert_eq!(
+        NnetSpec::from_legacy(&repeated, "BLSTM")
+            .unwrap()
+            .lstm_neuron_nb,
+        plain.lstm_neuron_nb
+    );
+    let err = NnetSpec::from_legacy(&with(base.clone(), "BLSTM_OutputNeuronNb", "2*x"), "BLSTM")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("BLSTM_OutputNeuronNb") && err.contains("2*x"),
+        "{err}"
+    );
+    let err = NnetSpec::from_legacy(&with(base, "BLSTM_NNetInputSize", "23x"), "BLSTM")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("BLSTM_NNetInputSize") && err.contains("23x"),
+        "{err}"
+    );
+}
+
+/// Issue #87: `BlstmConfig`'s i16 / bool / i32 reads, the `_Cell_Type` / `_Direction` enums
+/// (through `FromStr`, so the error names the key) and the port-only geometry keys take the
+/// family's token parser, the geometry minimum still enforced on top.
+#[test]
+fn blstm_config_rejects_trailing_junk_on_scalar_keys() {
+    let base = load("phase4a/tier2_spectral.config");
+    for (key, bad) in [
+        ("BLSTM_InputNormalizationType", "1O"),
+        ("BLSTM_TwoSweeps", "True"),
+        ("BLSTM_TargetEnforcementStep", "0.0"),
+        ("BLSTM_Forward_IsCellsPeepholesActive", "yes"),
+        ("BLSTM_Cell_Type", "gru"),
+        ("BLSTM_Direction", "backward"),
+        ("Mamba_D_State", "16x"),
+    ] {
+        let err = BlstmConfig::from_legacy(&with(base.clone(), key, bad), "BLSTM")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
+    let err = BlstmConfig::from_legacy(&with(base, "Transformer_Heads", "0"), "BLSTM")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("'Transformer_Heads' must be >= 1"), "{err}");
+}
+
+/// The fast spec injects the absent `NNetInputSize` from the PARSED `LSTMNeuronNb[0]`,
+/// so a repeat form in the first element reads as the exact `BlstmConfig` reads it.
+#[test]
+fn fast_spec_injects_the_parsed_input_width() {
+    let m = with(
+        load("phase4b/twin_mode7.config"),
+        "BLSTM_LID_LSTMNeuronNb",
+        "36*1,24",
+    );
+    assert_eq!(build_aligned_spec(&m, "BLSTM_LID").unwrap().input_size, 36);
+}
+
+/// Issue #87: `DriverConfig`'s usize and String reads take the family's token parser; a
+/// padded in-memory value trims.
+#[test]
+fn driver_config_reads_scalars_through_the_family() {
+    let base = tdc_bag_config();
+    let err = err_of(
+        DriverConfig::from_config(
+            &with(base.clone(), "TDC_convolution_window_size", "3x"),
+            "TDC",
+        ),
+        "TDC_convolution_window_size 3x",
+    );
+    assert!(
+        err.contains("cannot read '3x' as usize") && err.contains("TDC_convolution_window_size"),
+        "{err}"
+    );
+    let cfg = DriverConfig::from_config(&with(base, "Dump_Directory", " d "), "TDC").unwrap();
+    assert_eq!(cfg.dump_dir, "d");
+}
+
+/// Issue #87: the TDC segmenter's bool / i32 / String reads take the family's token parser.
+#[test]
+fn tdc_segmenter_rejects_trailing_junk_on_scalar_keys() {
+    let base = tdc_bag_config();
+    for (key, bad) in [("TDC_noise_seed", "1O"), ("TDC_flag_DCOffset", "True")] {
+        let err = err_of(
+            TdcSegmenter::from_legacy(&with(base.clone(), key, bad)),
+            key,
+        );
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
+}
+
+/// Issue #87: the Twin's defaulted i32 / bool reads, exact and fast, take the family's token
+/// parser (the pair of private copies in `tasks/lid.rs` and `fast/plan.rs` is gone).
+#[test]
+fn twin_lid_drivers_reject_trailing_junk_on_scalar_keys() {
+    let exact = load("phase4b/twin_mode0.config");
+    for (key, bad) in [
+        ("BLSTM_LID_Mode", "0x"),
+        ("BLSTM_LID_DumpInternals", "True"),
+    ] {
+        let err = err_of(
+            TwinBlstmSpectralLid::from_legacy(&with(exact.clone(), key, bad), None, None),
+            key,
+        );
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "exact {key}: {err}"
+        );
+    }
+    let fast = with(load("phase4b/twin_mode7.config"), "BLSTM_LID_Mode", "7x");
+    let err = err_of(
+        FastTwinLid::from_legacy(&fast, None, None),
+        "fast BLSTM_LID_Mode 7x",
+    );
+    assert!(
+        err.contains("cannot read '7x' as i32") && err.contains("BLSTM_LID_Mode"),
+        "{err}"
+    );
+}
+
+/// Issue #87: `FeatureConfig`'s i64 / i32 / bool / String reads take the family's token
+/// parser, and trim: the module's getters were untrimmed (with `nn/blstm.rs`'s `get_bool` /
+/// `get_i16` and the string readers), so a padded in-memory value now reads as every other
+/// key's does.
+#[test]
+fn feature_config_reads_scalars_through_the_family() {
+    let base = load("phase4a/tier2_spectral.config");
+    for (key, bad) in [
+        ("BLSTM_nb_bins", "4O"),
+        ("BLSTM_is_log_mel", "True"),
+        ("BLSTM_spectrum_order", "1O"),
+    ] {
+        let err = err_of(
+            FeatureConfig::from_legacy(&with(base.clone(), key, bad), "BLSTM"),
+            key,
+        );
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
+    let plain = FeatureConfig::from_legacy(&base, "BLSTM").unwrap();
+    let padded = format!(" {} ", base["BLSTM_nb_bins"]);
+    let trimmed =
+        FeatureConfig::from_legacy(&with(base, "BLSTM_nb_bins", &padded), "BLSTM").unwrap();
+    assert_eq!(trimmed.nb_bins, plain.nb_bins);
+}
+
+/// Issue #87: the VRCTS adapter's two required bool reads take the family's token parser.
+#[test]
+fn vrcts_part_rejects_trailing_junk_on_bool_keys() {
+    let base = with(load("phase4c/genome_algo0.config"), "VRCTS_isFast", "true");
+    let err = err_of(
+        VrctsPart::from_legacy(&with(base, "VRCTS_force", "falsey")),
+        "VRCTS_force falsey",
+    );
+    assert!(
+        err.contains("cannot read 'falsey' as bool") && err.contains("VRCTS_force"),
+        "{err}"
+    );
+}
+
+/// Issue #87: the corpus's two defaulted String reads take the family's token parser, so a
+/// padded in-memory `fileslisting` trims to the absence sentinel and the comma-list branch
+/// runs (it used to be opened as a path).
+#[test]
+fn corpus_reads_the_listing_key_through_the_family() {
+    let dir = tempfile::tempdir().unwrap();
+    let mapping = dir.path().join("language2classmapping.csv");
+    std::fs::write(&mapping, "unk;unk;0\n").unwrap();
+    let m = with(
+        IndexMap::new(),
+        "language2classmapping",
+        mapping.to_str().unwrap(),
+    );
+    let m = with(m, "fileslisting", "  ");
+    let m = with(m, "files", "a.wav,b.wav");
+    assert_eq!(Corpus::from_config(&m).unwrap().nb_of_files(), 2);
+}
+
+/// Issue #87: the last three one-off parses -- `NnetSpec`'s peephole flags and
+/// `NNetInputSize`, and the fast plans' `Algo_choice` -- read through the family too.
+#[test]
+fn nnet_spec_and_fast_plan_read_their_one_off_scalars_through_the_family() {
+    let base = load("phase4a/tier2_spectral.config");
+    for (key, bad) in [
+        ("BLSTM_Forward_IsCellsPeepholesActive", "True"),
+        ("BLSTM_NNetInputSize", "23x"),
+    ] {
+        let err = NnetSpec::from_legacy(&with(base.clone(), key, bad), "BLSTM")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
+            "{key}: {err}"
+        );
+    }
+    let fast = with(load("phase4b/twin_mode7.config"), "Algo_choice", "6x");
+    let err = err_of(
+        FastTwinLid::from_legacy(&fast, None, None),
+        "Algo_choice 6x",
+    );
+    assert!(
+        err.contains("cannot read '6x' as i32 for 'Algo_choice'"),
+        "{err}"
+    );
+}

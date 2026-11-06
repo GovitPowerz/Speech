@@ -42,14 +42,14 @@
 //! - `assemble_input_sequence` priority: DCT -> filterbank -> `ln(block + 1e-24)`
 //!   (band-limit ONLY on the raw path); then hcat the LTSV column as the LAST column.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::audio::{Audio, compute_segment_periodogram_estimates, windowing_coefficients};
 use crate::features::ltsv_tdc::get_ltsv;
 use crate::features::mel::MelFilterBank;
-use crate::legacy_config::{get_f64, get_f64_default, get_f64_list};
+use crate::legacy_config::{get, get_f64, get_f64_default, get_f64_list};
 
 /// Time-domain-correlation window/lag/balance parameters.
 ///
@@ -111,52 +111,24 @@ pub struct FeatureConfig {
     pub tdc: Option<TdcConfig>,
 }
 
-/// `conf.get<T>(name)` (no default): missing key -> the legacy `check()` aborts;
-/// here that maps to an `Err` (README parity note: missing required key = process
-/// exit in legacy = `Err` in Rust).
-fn get_str<'a>(map: &'a IndexMap<String, String>, key: &str) -> Result<&'a str> {
-    map.get(key)
-        .map(String::as_str)
-        .with_context(|| format!("param '{key}' not found in config"))
-}
-
-fn get_i64(map: &IndexMap<String, String>, key: &str) -> Result<i64> {
-    let s = get_str(map, key)?;
-    s.parse::<i64>()
-        .with_context(|| format!("cannot read '{s}' as i64 for '{key}'"))
-}
-
-fn get_i32(map: &IndexMap<String, String>, key: &str) -> Result<i32> {
-    let s = get_str(map, key)?;
-    s.parse::<i32>()
-        .with_context(|| format!("cannot read '{s}' as i32 for '{key}'"))
-}
-
-fn get_bool(map: &IndexMap<String, String>, key: &str) -> Result<bool> {
-    // legacy `read<bool>` uses std::boolalpha: the strings "true"/"false".
-    let s = get_str(map, key)?;
-    s.parse::<bool>()
-        .with_context(|| format!("cannot read '{s}' as bool for '{key}'"))
-}
-
 impl FeatureConfig {
     /// Read + sanitize the feature config under `<prefix>_*` keys.
     pub fn from_legacy(map: &IndexMap<String, String>, prefix: &str) -> Result<FeatureConfig> {
         let k = |suffix: &str| format!("{prefix}{suffix}");
 
         // LongTermSpectralVariation::buildFromConf reads (no defaults).
-        let order = get_i64(map, &k("_spectrum_order"))?;
+        let order = get::<i64>(map, &k("_spectrum_order"))?;
         let shift_sec = get_f64(map, &k("_spectrum_shift"))?;
-        let conv_size = get_i64(map, &k("_spectrum_temporal_convolution_size"))?;
-        let conv_type = get_str(map, &k("_spectrum_temporal_convolution_type"))?.to_string();
+        let conv_size = get::<i64>(map, &k("_spectrum_temporal_convolution_size"))?;
+        let conv_type = get::<String>(map, &k("_spectrum_temporal_convolution_type"))?;
         let mut min_mel = get_f64(map, &k("_minMelFreq"))?;
         let mut max_mel = get_f64(map, &k("_maxMelFreq"))?;
-        let nb_bins = get_i32(map, &k("_nb_bins"))?;
-        let is_log = get_bool(map, &k("_is_log_mel"))?;
-        let nb_dct = get_i32(map, &k("_nb_DCT"))?;
-        let ignore_first = get_bool(map, &k("_IgnoreFirstDCT"))?;
-        let deltas_nb = get_i32(map, &k("_ComputeDeltasNb"))?;
-        let dd_nb = get_i32(map, &k("_ComputeDeltaDeltasNb"))?;
+        let nb_bins = get::<i32>(map, &k("_nb_bins"))?;
+        let is_log = get::<bool>(map, &k("_is_log_mel"))?;
+        let nb_dct = get::<i32>(map, &k("_nb_DCT"))?;
+        let ignore_first = get::<bool>(map, &k("_IgnoreFirstDCT"))?;
+        let deltas_nb = get::<i32>(map, &k("_ComputeDeltasNb"))?;
+        let dd_nb = get::<i32>(map, &k("_ComputeDeltaDeltasNb"))?;
 
         // minFreq/maxFreq: negatives -> 0 BEFORE the swap (:56-59).
         let mut min_freq = get_f64(map, &k("_minFreq"))?;
@@ -187,11 +159,11 @@ impl FeatureConfig {
         }
 
         // Segmenter::buildFromConf reads used downstream (Segmenter.cpp:94-102).
-        let win_type = get_str(map, &k("_windowing_type"))?.to_string();
+        let win_type = get::<String>(map, &k("_windowing_type"))?;
         let win_param = get_f64(map, &k("_windowing_param"))?;
-        let flag_dc_offset = get_bool(map, &k("_flag_DCOffset"))?;
+        let flag_dc_offset = get::<bool>(map, &k("_flag_DCOffset"))?;
         let preemph_ratio = get_f64(map, &k("_preemph_ratio"))?;
-        let noise_seed = get_i32(map, &k("_noise_seed"))?;
+        let noise_seed = get::<i32>(map, &k("_noise_seed"))?;
         let noise_ratio = get_f64(map, &k("_noise_ratio"))?;
 
         // BLSTMSpectralSegmenter LTSV reads (:48-55). LTSVwindow defaults to 0;
@@ -227,7 +199,7 @@ impl FeatureConfig {
                 }
             }
             let balance = get_f64(map, &k("_TDC_balance"))?;
-            let windowing_type = get_str(map, &k("_TDC_windowing_type"))?.to_string();
+            let windowing_type = get::<String>(map, &k("_TDC_windowing_type"))?;
             let windowing_param = get_f64(map, &k("_TDC_windowing_param"))?;
             Some(TdcConfig {
                 shift,

@@ -2,9 +2,14 @@
 //!
 //! Ported from legacy C++: ConfigFile.cpp. KEY value, last-wins, # comments.
 //! The 0a keys do not use the _-continuation rule, so a simple split suffices.
-//! Also hosts the shared `conf.get<T>` / `get_list<T>` readers (issues #32, #47, #50):
-//! the f64 scalar family over [`parse_finite_f64`], and the one list grammar
-//! ([`split_list`]) every comma-separated config list goes through.
+//! Also hosts the shared `conf.get<T>` / `get_list<T>` readers (issues #32, #47, #50, #87):
+//! the generic scalar trio [`get`] / [`get_default`] over [`parse_token`] (every i32 / bool /
+//! String / usize / i16 / i64 read in the crate), the f64 scalar family over
+//! [`parse_finite_f64`], and the one list grammar ([`split_list`]) every comma-separated
+//! config list goes through.
+
+use std::fmt::Display;
+use std::str::FromStr;
 
 use anyhow::{Result, anyhow, bail};
 use indexmap::IndexMap;
@@ -20,13 +25,61 @@ pub(crate) fn parse_finite_f64(s: &str, key: &str) -> Result<f64> {
     }
 }
 
-/// `read<size_type>` on one config token: a whole-string (trimmed) `usize`, or an error
-/// naming the key and the text. `pub` for the `speech_rs.blstm_config` seam's optional
-/// `NNetInputSize` read (issue #90), so the seam parses the key with the engine's grammar.
+/// The short name of `T` for an error message (`i32`, `bool`, `String`, `usize`).
+fn type_name_short<T>() -> &'static str {
+    let name = std::any::type_name::<T>();
+    &name[name.rfind("::").map_or(0, |i| i + 2)..]
+}
+
+/// The legacy `read<T>` (`Helpers.hpp:1602-1608`, `ss << boolalpha << data; ss >> val`) on
+/// one config token, port-truth strict (issue #32): the WHOLE trimmed text must parse, so a
+/// parseable prefix with trailing junk (`1O`, `false # c`) errors where the legacy read the
+/// prefix. `bool` is exactly `true`/`false` (`boolalpha`); a `String` is the whole trimmed
+/// value, `""` included (the legacy `ss >> val` took the first whitespace token and exited on
+/// an empty value; `engine/corpus.rs::read_string` keeps that rule for string LIST elements);
+/// an integer outside its width errors as the legacy extraction fails. Every error names
+/// the type, the key and the text (issue #87: the one scalar parser and the one wording).
+pub(crate) fn parse_token<T: FromStr>(s: &str, key: &str) -> Result<T>
+where
+    T::Err: Display,
+{
+    s.trim().parse::<T>().map_err(|e| {
+        anyhow!(
+            "cannot read '{s}' as {} for '{key}': {e}",
+            type_name_short::<T>()
+        )
+    })
+}
+
+/// `read<size_type>` on one config token: [`parse_token::<usize>`]. `pub` for the
+/// `speech_rs.blstm_config` seam's optional `NNetInputSize` read (issue #90), so the seam
+/// parses the key with the engine's grammar.
 pub fn parse_usize(s: &str, key: &str) -> Result<usize> {
-    s.trim()
-        .parse::<usize>()
-        .map_err(|e| anyhow!("cannot read '{s}' as usize for '{key}': {e}"))
+    parse_token(s, key)
+}
+
+/// `conf.get<T>(name)` (required): missing key -> error naming the key; present but
+/// malformed -> error naming the key and the text ([`parse_token`]).
+pub(crate) fn get<T: FromStr>(map: &IndexMap<String, String>, key: &str) -> Result<T>
+where
+    T::Err: Display,
+{
+    map.get(key)
+        .ok_or_else(|| anyhow!("param '{key}' not found in config"))
+        .and_then(|s| parse_token(s, key))
+}
+
+/// `conf.get<T>(name, default)`: missing key -> `default`; present but malformed -> error
+/// (the issue #32 rule, every scalar type since #87).
+pub(crate) fn get_default<T: FromStr>(
+    map: &IndexMap<String, String>,
+    key: &str,
+    default: T,
+) -> Result<T>
+where
+    T::Err: Display,
+{
+    map.get(key).map_or(Ok(default), |s| parse_token(s, key))
 }
 
 /// `conf.get<double>(name)` (required): missing key -> error naming the key; present but
@@ -248,5 +301,90 @@ mod f64_reader_tests {
             let err = get_usize_list(&map("K", bad), "K").unwrap_err().to_string();
             assert!(err.contains("K"), "{bad:?}: {err}");
         }
+    }
+}
+
+#[cfg(test)]
+mod token_reader_tests {
+    use super::*;
+
+    fn map(key: &str, value: &str) -> IndexMap<String, String> {
+        let mut m = IndexMap::new();
+        m.insert(key.to_string(), value.to_string());
+        m
+    }
+
+    /// Issue #87: one token parser for every scalar type -- trimmed, whole-string (a parseable
+    /// prefix with trailing junk errors, the #32 tightening), `bool` exactly `true`/`false`, a
+    /// `String` the whole trimmed value with `""` accepted, an integer outside its width an
+    /// error; every error names the type, the key and the text in the f64 family's wording.
+    #[test]
+    fn parse_token_per_type() {
+        assert_eq!(parse_token::<i32>(" -2 ", "K").unwrap(), -2);
+        assert_eq!(parse_token::<usize>("3", "K").unwrap(), 3);
+        assert_eq!(parse_token::<i16>("-1", "K").unwrap(), -1);
+        assert_eq!(parse_token::<i64>("7", "K").unwrap(), 7);
+        assert!(parse_token::<bool>(" true", "K").unwrap());
+        assert!(!parse_token::<bool>("false ", "K").unwrap());
+        assert_eq!(parse_token::<String>(" a b ", "K").unwrap(), "a b");
+        assert_eq!(parse_token::<String>("", "K").unwrap(), "");
+        let err = parse_token::<i32>("1O", "K").unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "cannot read '1O' as i32 for 'K': invalid digit found in string"
+        );
+        for (bad, ty) in [
+            ("True", "bool"),
+            ("yes", "bool"),
+            ("1", "bool"),
+            ("false # c", "bool"),
+        ] {
+            let err = parse_token::<bool>(bad, "K").unwrap_err().to_string();
+            assert!(
+                err.starts_with(&format!("cannot read '{bad}' as {ty} for 'K':")),
+                "{err}"
+            );
+        }
+        for bad in ["1.0", "-1", "", "2 3"] {
+            let err = parse_token::<usize>(bad, "K").unwrap_err().to_string();
+            assert!(
+                err.starts_with(&format!("cannot read '{bad}' as usize for 'K':")),
+                "{err}"
+            );
+        }
+        let err = parse_token::<i16>("40000", "K").unwrap_err().to_string();
+        assert!(
+            err.starts_with("cannot read '40000' as i16 for 'K':"),
+            "{err}"
+        );
+        assert_eq!(parse_usize(" 4 ", "K").unwrap(), 4);
+    }
+
+    /// Issue #87: `get` is the required read (a missing key errors in the one crate-wide
+    /// wording), `get_default` the defaulting one (missing -> default, present but malformed ->
+    /// error, the #32 rule); both over `parse_token`.
+    #[test]
+    fn get_and_get_default() {
+        let m = map("K", " 5 ");
+        assert_eq!(get::<i32>(&m, "K").unwrap(), 5);
+        assert_eq!(get::<String>(&m, "K").unwrap(), "5");
+        let err = get::<i32>(&m, "absent").unwrap_err().to_string();
+        assert_eq!(err, "param 'absent' not found in config");
+        assert_eq!(get_default::<i32>(&m, "absent", 9).unwrap(), 9);
+        assert_eq!(get_default::<i32>(&m, "K", 9).unwrap(), 5);
+        assert!(get_default::<bool>(&m, "absent", true).unwrap());
+        assert_eq!(
+            get_default::<String>(&m, "absent", "log".into()).unwrap(),
+            "log"
+        );
+        let err = get_default::<bool>(&map("K", "True"), "K", true)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            err,
+            "cannot read 'True' as bool for 'K': provided string was not `true` or `false`"
+        );
+        let err = get::<i32>(&map("K", "1O"), "K").unwrap_err().to_string();
+        assert!(err.contains("K") && err.contains("1O"), "{err}");
     }
 }

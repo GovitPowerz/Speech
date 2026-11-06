@@ -14,7 +14,7 @@
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
-use crate::legacy_config::{get_f64_default, parse_finite_f64, split_list};
+use crate::legacy_config::{get_default, get_f64_default, parse_finite_f64, split_list};
 
 fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
     x.max(lo).min(hi)
@@ -213,9 +213,9 @@ pub struct CostLaw {
 /// `conf.get<string>(name, "log")` for a regime's law: an unknown name errors (the legacy
 /// ctor `exit(1)`s) instead of reaching the panic in `below_law`.
 fn get_law(m: &IndexMap<String, String>, key: &str) -> Result<String> {
-    let name = m.get(key).map_or("log", |s| s.trim());
-    match name {
-        "log" | "linear" | "square" | "cubic" | "sqrt" => Ok(name.to_string()),
+    let name = get_default::<String>(m, key, "log".into())?;
+    match name.as_str() {
+        "log" | "linear" | "square" | "cubic" | "sqrt" => Ok(name),
         _ => bail!("cost law '{name}' is not valid for '{key}'"),
     }
 }

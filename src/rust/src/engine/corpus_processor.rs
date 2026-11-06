@@ -35,14 +35,12 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::cli::{Mode, ModeKind};
-use crate::engine::bag_of_processors::{
-    BagOfProcessors, CostPair, get_i32_default, training_policy,
-};
+use crate::engine::bag_of_processors::{BagOfProcessors, CostPair, training_policy};
 use crate::engine::channel_result::ChannelResult;
 use crate::engine::corpus::Corpus;
 use crate::features::stats::InputStatistics;
 use crate::io::matfile::MatWriter;
-use crate::legacy_config::get_f64_default;
+use crate::legacy_config::{get_default, get_f64_default};
 
 /// Result of the corpus-level gradient check (`gradCheck`, `:237-340`). The legacy
 /// only prints per-weight lines + the two means; this struct RETURNS them so Task
@@ -131,10 +129,11 @@ impl CorpusProcessor {
         let corpus = Corpus::from_config(&configs[0])?;
         // legacy: :52 _OutputFileName default MultiConfigResults.mat -- read BEFORE
         // the bag ctor clears no keys relevant to it.
-        let output_file_name = configs[0]
-            .get("multiConfigResultsOutputFile")
-            .cloned()
-            .unwrap_or_else(|| "MultiConfigResults.mat".to_string());
+        let output_file_name = get_default::<String>(
+            &configs[0],
+            "multiConfigResultsOutputFile",
+            "MultiConfigResults.mat".into(),
+        )?;
         // legacy: :51 _Processors = BagOfProcessors(configs, _Mode). The bag ctor
         // mutates each config map (key clears :21-23).
         let processors = BagOfProcessors::from_configs(&mut configs)?;
@@ -150,7 +149,7 @@ impl CorpusProcessor {
         // legacy: :60-62 epochs clamp (< 0 -> 0). get<T>(name, default) exits(1) on
         // a present-but-unparseable value -- ported as Err, not a silent fallback.
         let training_epochs =
-            get_i32_default(&configs[0], "Neural_Networks_BackPropagation_Epochs", 0)?.max(0)
+            get_default::<i32>(&configs[0], "Neural_Networks_BackPropagation_Epochs", 0)?.max(0)
                 as usize;
         // legacy: :63 epsilon default 0.0, same present-but-malformed -> Err semantics.
         let epsilon = get_f64_default(&configs[0], "Neural_Networks_Gradient_Check_Epsilon", 0.0)?;
@@ -1223,7 +1222,7 @@ mod tests {
     /// legacy `get<T>(name, default)` exits(1) on a PRESENT but unparseable value
     /// (not a silent fallback to the default): a malformed
     /// `Neural_Networks_BackPropagation_Epochs` must surface as `Err`, matching
-    /// `bag_of_processors::get_i32_default`'s erroring semantics.
+    /// `legacy_config::get_default`'s erroring semantics.
     #[test]
     fn malformed_epochs_errors() {
         let dir = tempfile::tempdir().unwrap();

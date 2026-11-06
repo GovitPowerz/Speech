@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87)
 
 ## Context
 
@@ -32,7 +32,7 @@ and list config read in the exact tree -- `features/pipeline.rs`, `tasks/sad.rs`
 non-finite value errors naming the key everywhere and every list takes the legacy
 `split_with_repeat` grammar (one trailing comma dropped, the `*` repeater) with three deliberate
 tightenings, a bad repeat count, a third `*` part and whitespace inside a repeat form, all
-errors where the legacy aborted, silently dropped or truncated, issue #50; the typed channel
+errors where the legacy aborted, silently dropped or truncated, issue #50, and then every i32 / bool / String / usize / i16 / i64 scalar read -- the 24 private copies in `engine/bag_of_processors.rs`, `nn/blstm.rs`, `tasks/segmenter.rs`, `tasks/sad.rs`, `tasks/lid.rs`, `fast/plan.rs`, `features/pipeline.rs`, `tasks/vrcts.rs`, `engine/corpus.rs`, `config.rs`, `cost.rs` -- through the one generic `legacy_config::get<T>` / `get_default<T>` over `parse_token<T>` (trimmed, whole-string, one error wording naming the type, the key and the text), the one visible contract change being that the untrimmed copies now TRIM (`features/pipeline.rs`'s four getters, `nn/blstm.rs`'s `get_bool` / `get_i16` and its `_weightsFile` / `_Cell_Type` / `_Direction` reads (the last two through `FromStr` on `CellType` / `Direction`), the `_weightsFile` copy in `fast/plan.rs`, the string readers in the bag, `tasks/segmenter.rs`, `tasks/sad.rs`, `engine/corpus.rs` and `engine/corpus_processor.rs`'s `multiConfigResultsOutputFile`), observable only on a padded value through the in-memory `Engine.from_map` seam or a padded quoted string in a `.toml` (`parse_legacy_config` trims every `.config` value; `toml_to_map` copies a TOML string as written), behaviour-free on every committed config, issue #87; the typed channel
 result: the result row's 18+N layout owned by one `engine/` type, `engine/channel_result.rs`,
 with `to_row()` the only writer and the in-band LID target decoded once at the bag, proven
 byte-identical by the `.mat` goldens and the seam cross-pin, issue #23; the pack-count guard: `engine/bag_of_processors.rs::set_weights` sizes the list against the arm's pack count (the driver's `pack_count` since issue #25) before indexing it, so a short list is a refusal naming both counts instead of a panic and a long one is no longer truncated in silence, algo 0/1/2 inert at any length, issue #60; the stepwise hoist: a per-step loop body moved into a

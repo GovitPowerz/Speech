@@ -120,8 +120,9 @@ class FoldRun:
         """`config` with the path keys resolved against the workdir: the map the seam gets."""
         out = dict(self.config)
         for key in _PATH_KEYS:
-            if out.get(key):  # an empty value is a sentinel (`Dump_Directory ""` = no dump), not a path
-                out[key] = str(self.workdir / out[key])
+            value = out.get(key, "").strip()  # the engine trims every string value (issue #87)
+            if value:  # an empty value is a sentinel (`Dump_Directory ""` = no dump), not a path
+                out[key] = str(self.workdir / value)
         out.setdefault("multiConfigResultsOutputFile", str(self.workdir / "MultiConfigResults.mat"))
         return out
 

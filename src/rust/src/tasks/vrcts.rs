@@ -5,10 +5,11 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use indexmap::IndexMap;
 
 use crate::audio::Audio;
+use crate::legacy_config::get;
 use crate::tasks::segmentation::Segmentation;
 use crate::tasks::segmentation_io::{compute_errors, load_vrcts};
 use crate::tasks::segmenter::{ChannelMembers, DriverConfig, Segmenter, SegmenterConfig};
@@ -16,15 +17,6 @@ use crate::tasks::segmenter::{ChannelMembers, DriverConfig, Segmenter, Segmenter
 /// legacy: hard-coded absolute path (`VRCTSpart.cpp:44,46`), not read from config.
 /// IMPROVEMENTS [phase4b]: hard-coded VRCTS binary path.
 const VRCTS_BINARY: &str = "/usr/local/vrcts/vrcts_1_5_9/bin/vrcts_part";
-
-fn parse_bool(m: &IndexMap<String, String>, key: &str) -> Result<bool> {
-    // legacy `conf.get<bool>` uses std::boolalpha: the strings "true"/"false".
-    m.get(key)
-        .ok_or_else(|| anyhow!("param '{key}' not found in config"))?
-        .trim()
-        .parse::<bool>()
-        .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}"))
-}
 
 /// External-tool VRCTS SAD adapter (Algo 0; `VRCTSpart.{h,cpp}`). Unlike Algo
 /// 1-4, this driver has NO in-process detection logic: `getSegmentation` shells
@@ -68,8 +60,8 @@ impl VrctsPart {
         let seg_cfg = SegmenterConfig::from_config(map, "VRCTS")?;
         let driver_cfg = DriverConfig::from_config(map, "VRCTS")?;
 
-        let is_fast = parse_bool(map, "VRCTS_isFast")?;
-        let force = parse_bool(map, "VRCTS_force")?;
+        let is_fast = get::<bool>(map, "VRCTS_isFast")?;
+        let force = get::<bool>(map, "VRCTS_force")?;
         Ok(VrctsPart {
             seg_cfg,
             driver_cfg,

@@ -7,10 +7,10 @@ diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_
 index 5ed88ed..9c9d105 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -426,7 +426,7 @@ impl BagOfProcessors {
+@@ -394,7 +394,7 @@ impl BagOfProcessors {
              if use_fast {
-                 let bp_sad = get_bool_default(map, "BLSTM_BackPropagationActivated", false)?;
-                 let bp_lid = get_bool_default(map, "BLSTM_LID_BackPropagationActivated", false)?;
+                 let bp_sad = get_default::<bool>(map, "BLSTM_BackPropagationActivated", false)?;
+                 let bp_lid = get_default::<bool>(map, "BLSTM_LID_BackPropagationActivated", false)?;
 -                refuse_fast_training(i64::from(epochs), epsilon, (bp_sad, bp_lid))?;
 +                refuse_fast_training(i64::from(epochs), epsilon, (false, false))?;
                  let processor = match algo {

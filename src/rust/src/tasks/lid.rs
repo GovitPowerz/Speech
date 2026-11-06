@@ -57,7 +57,7 @@ use crate::constants::random_gauss;
 use crate::features::ltsv_tdc::ltsv_classify_sequence;
 use crate::features::mel::MelFilterBank;
 use crate::features::pipeline::{FeatureConfig, SpectralParams, build_input_sequence_parts};
-use crate::legacy_config::{get_f64, get_f64_default};
+use crate::legacy_config::{get_default, get_f64, get_f64_default};
 use crate::nn::activations::inv_logistic_fn;
 use crate::nn::blstm::{BlstmConfig, BlstmNetwork};
 use crate::tasks::sad::{SpectralAxis, SpectralCarry, apply_input_gates, non_wav_ssif};
@@ -941,26 +941,6 @@ impl Segmenter for BlstmSpectralLid {
 // Twin/Siamese LID driver (Algo 6; `TwinBLSTMSpectralLID.{h,cpp}`).
 // ===========================================================================
 
-fn twin_i32_default(m: &IndexMap<String, String>, key: &str, default: i32) -> Result<i32> {
-    match m.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<i32>()
-            .map_err(|e| anyhow!("`{key}`: cannot parse: {e}")),
-    }
-}
-
-fn twin_bool_default(m: &IndexMap<String, String>, key: &str, default: bool) -> Result<bool> {
-    match m.get(key) {
-        None => Ok(default),
-        Some(s) => s
-            .trim()
-            .parse::<bool>()
-            .map_err(|e| anyhow!("`{key}`: cannot parse as bool: {e}")),
-    }
-}
-
 /// Port of `TwinBLSTMSpectralLID.cpp:906-913`'s `_DumpDir.size() > 0` branch (the only
 /// branch reachable here, since the call site already guards on `!dump_dir.is_empty()`):
 ///
@@ -1123,11 +1103,11 @@ impl TwinBlstmSpectralLid {
         get_f64_default(map, "BLSTM_LID_TrainingPruningThreshold", -1.0)?;
         let lid_decision_thresh_rising = get_f64(map, "BLSTM_LID_decision_thresh_rising")?;
         let lid_decision_thresh_falling = get_f64(map, "BLSTM_LID_decision_thresh_falling")?;
-        let mode = twin_i32_default(map, "BLSTM_LID_Mode", 0)?;
-        let post_process_mode = twin_i32_default(map, "BLSTM_LID_PostProcessMode", 0)?;
-        let min_nb_of_frames = twin_i32_default(map, "BLSTM_LID_MinNbOfFrames", 0)?;
+        let mode = get_default::<i32>(map, "BLSTM_LID_Mode", 0)?;
+        let post_process_mode = get_default::<i32>(map, "BLSTM_LID_PostProcessMode", 0)?;
+        let min_nb_of_frames = get_default::<i32>(map, "BLSTM_LID_MinNbOfFrames", 0)?;
         let noise_magnitude = get_f64_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
-        let dump_lid_internals = twin_bool_default(map, "BLSTM_LID_DumpInternals", false)?;
+        let dump_lid_internals = get_default::<bool>(map, "BLSTM_LID_DumpInternals", false)?;
 
         let carry = SpectralCarry::new(feature_cfg.shift_sec, driver_cfg.window_shift_sec);
 

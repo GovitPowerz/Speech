@@ -47,8 +47,8 @@ use anyhow::{Result, bail};
 
 use crate::audio::read_audio;
 use crate::cli::load_config;
-use crate::engine::bag_of_processors::get_i32_default;
 use crate::fast::stream_lid::{StreamingLidSession, UtteranceScore};
+use crate::legacy_config::get_default;
 
 /// Write one `UTT` line and flush it.
 fn print_utt(out: &mut impl Write, idx: usize, sc: &UtteranceScore) -> Result<()> {
@@ -89,7 +89,7 @@ pub fn run_stream_lid(config: &str, input: &str, lang: i32) -> Result<()> {
     // legacy: `engine::bag_of_processors`'s own `File_Type` read + default (`:384`);
     // mirrored here so a config with no explicit `File_Type` fails the SAME way the
     // full engine would, rather than silently guessing phSeq or cep.
-    let file_type = get_i32_default(&map, "File_Type", 0)?;
+    let file_type = get_default::<i32>(&map, "File_Type", 0)?;
     if file_type != 1 && file_type != 2 {
         bail!(
             "stream-lid: File_Type {file_type} not supported (only 1=phSeq, 2=cep carry \
