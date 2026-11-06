@@ -307,6 +307,21 @@ impl Engine {
         self.inner.results_matrix().to_pyarray(py)
     }
 
+    /// The four per-epoch result arrays (issue #134): one dict keyed by the `.mat`
+    /// variable names (`CostMem`, `BadClassifMem`, `CostLIDMem`, `BadClassifLIDMem`),
+    /// each `epochs x configs` -- `1 x n` before the first `run()` and after a solo
+    /// run, `(N + 2) x n` after a training run of `N` epochs. COPY: `ToPyArray` clones
+    /// each row-major `Array2` into a fresh C-contiguous numpy array.
+    fn epoch_mems<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let m = self.inner.epoch_mems();
+        let d = PyDict::new(py);
+        d.set_item("CostMem", m.cost.to_pyarray(py))?;
+        d.set_item("BadClassifMem", m.bad_classif.to_pyarray(py))?;
+        d.set_item("CostLIDMem", m.cost_lid.to_pyarray(py))?;
+        d.set_item("BadClassifLIDMem", m.bad_classif_lid.to_pyarray(py))?;
+        Ok(d)
+    }
+
     /// The channel results by name (issue #23): one dict, one numpy array per
     /// field, one entry per (file, config, channel) in ascending order -- the
     /// typed view `results_matrix()` is rendered from, minus the WER tallies
