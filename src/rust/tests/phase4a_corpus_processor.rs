@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use indexmap::IndexMap;
 
-use common::{mat_var_dims, mat_var_matrix, mat_var_order};
+use common::{mat_var_dims, mat_var_order};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::channel_result::ChannelResult;
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -250,8 +250,7 @@ fn lanes_n1_equals_sequential() {
     // to 1). Capture ResultsE.
     let mut cp = CorpusProcessor::new(vec![cfg.clone()], mode(ModeKind::Solo)).unwrap();
     cp.run().unwrap();
-    let engine_bytes = std::fs::read("MultiConfigResults.mat").unwrap();
-    let engine_results = mat_var_matrix(&engine_bytes, "MultiConfigResults").unwrap();
+    let engine_results = cp.results_matrix();
 
     // The hand-sequential oracle (`run_epoch_sequential_oracle`): build ONE bag and
     // walk every file j in ascending order through segmentation_function on that
@@ -359,6 +358,21 @@ fn grad_check_synthetic() {
 
     // Orchestration mechanics: exactly 10 per-weight triples produced by the sweep.
     assert_eq!(report.per_weight.len(), 10, "10 weights checked");
+    // Issue #134: the sweep never saves a row (its `run_epoch(1, ..)` calls sit past
+    // `_TrainingEpochs = 0`), so the four epoch arrays stay `1 x nb_conf` zeros. The
+    // reset itself (legacy :239-242) is invisible here, the ctor having seeded the
+    // same zeros; `epoch_mems_shape_and_fill` pins it from a filled state.
+    for (name, got) in cp.epoch_mems().named() {
+        assert_eq!(
+            got.dim(),
+            (1, 1),
+            "{name} reset to 1 x nb_conf by the grad check"
+        );
+        assert!(
+            got.iter().all(|v| *v == 0.0),
+            "{name} stays zero through the sweep"
+        );
+    }
     // The cost path is now LIVE (Task 7b targets): the analytic normalized deriv and
     // the numerical central difference are finite and agree. Assert the Task 7 bound.
     assert!(
@@ -463,5 +477,47 @@ fn synthetic_signal_corpus_config(dir: &Path) -> IndexMap<String, String> {
     m
 }
 
-// `mat_var_order`/`mat_var_dims`/`mat_var_matrix` are shared via `common`
+// `mat_var_order`/`mat_var_dims` are shared via `common`
 // (hoisted from four copy-pasted phase4a test files; see `tests/common/mod.rs`).
+
+// === epoch_mems_shape_and_fill ===============================================
+// Issue #134: the four per-epoch arrays have an in-memory surface. Shape: the
+// ctor seeds `1 x nb_conf`; a solo run keeps 1 row; a train run of N epochs holds
+// (N+2) rows, every one written (the final epoch is N+1). Fill: TDC trains no
+// weights, so every epoch rescores the same hypothesis and a written row is
+// nonzero in at least one array (the values themselves are the goldens' business,
+// pinned against the `.bin` fixtures; the bit-identity with the written `.mat` is
+// the seam bridge test's, `tests/pyo3/test_seam_replay.py`). Reset: a gradient
+// check then zeroes them back to `1 x nb_conf` (legacy :239-242); TDC has no
+// backprop net, so its sweep is empty and only the reset runs.
+#[test]
+fn epoch_mems_shape_and_fill() {
+    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    for (epochs, kind, rows) in [(0, ModeKind::Solo, 1), (2, ModeKind::Multi, 4)] {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = tdc_corpus_config(dir.path(), 1, epochs);
+        let _cwd = CwdGuard::enter(dir.path());
+        let mut cp = CorpusProcessor::new(vec![cfg], mode(kind)).unwrap();
+        for (name, got) in cp.epoch_mems().named() {
+            assert_eq!(got.dim(), (1, 1), "{name} ctor seed 1 x nb_conf");
+        }
+        cp.run().unwrap();
+
+        let mems = cp.epoch_mems().named();
+        for (name, got) in mems {
+            assert_eq!(got.dim(), (rows, 1), "{name} after {epochs} epochs");
+        }
+        for r in 0..rows {
+            assert!(
+                mems.iter().any(|(_, m)| m[[r, 0]] != 0.0),
+                "row {r} of {rows} written after {epochs} epochs"
+            );
+        }
+
+        assert!(cp.grad_check(1e-5, 1).unwrap().is_empty(), "TDC: no net");
+        for (name, got) in cp.epoch_mems().named() {
+            assert_eq!(got.dim(), (1, 1), "{name} reset to 1 x nb_conf");
+            assert!(got.iter().all(|v| *v == 0.0), "{name} reset to zeros");
+        }
+    }
+}

@@ -812,12 +812,6 @@ pub fn mat_var_matrix(bytes: &[u8], name: &str) -> Option<Array2<f64>> {
         .map(|(_, r, c, data)| Array2::from_shape_fn((r, c), |(i, j)| data[j * r + i]))
 }
 
-/// `mat_var_matrix`, panicking with the variable name if absent (the common
-/// call shape across the phase4a e2e/golden tests).
-pub fn read_mat_var(bytes: &[u8], name: &str) -> Array2<f64> {
-    mat_var_matrix(bytes, name).unwrap_or_else(|| panic!("variable {name} not in .mat"))
-}
-
 pub fn mat_var_order(bytes: &[u8]) -> Vec<String> {
     mat_vars(bytes).into_iter().map(|(n, _, _, _)| n).collect()
 }

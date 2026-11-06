@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issue #134)
 
 ## Context
 
@@ -107,7 +107,13 @@ byte-green and `phase7_parity_lid` / `phase8_stream_lid` passing with their asse
 (one doc comment in the latter renamed to the moved symbol), with the corollary
 the `issue83` battery measures: once both trees run the one accumulator, the fast-vs-exact
 parity legs are self-consistent for it and its arithmetic is owned by the exact LID goldens
-alone, issue #83).
+alone, issue #83; and a read-only accessor over existing state, 2026-11-06: the four per-epoch
+result arrays `CorpusProcessor` already held become one value, `engine/corpus_processor.rs::EpochMems`,
+sized and filled where they were and handed out by `epoch_mems()` (the `speech_rs.Engine.epoch_mems()`
+dict reads it under the `.mat` variable names), no exact-path number moved, proven by the seven
+in-process goldens re-pointed from the `.mat` to it staying byte-green against the unchanged `.bin`
+fixtures and by the bridge test pinning the accessor bit-identical to the `.mat` the same run
+wrote, issue #134).
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),

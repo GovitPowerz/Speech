@@ -218,8 +218,9 @@ def _assert_gradcheck_report(report: dict[str, Any], golden: NDArray[np.float64]
 
 def test_tier2_spectral_train_replay(tmp_path: Path) -> None:
     """Algo 3 (spectral), 2-file corpus, 3 training epochs (Multi mode): the
-    final weights and the 5 `.mat` result variables must match the committed
-    tier-2 train fixtures (timing column masked, id columns strict)."""
+    final weights, the result matrix and the four epoch arrays (issue #134) must
+    match the committed tier-2 train fixtures (timing column masked, id columns
+    strict)."""
     _seed_tier2_spectral(tmp_path)
     with chdir(tmp_path):
         eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
@@ -228,12 +229,12 @@ def test_tier2_spectral_train_replay(tmp_path: Path) -> None:
         assert len(weights) == 1, "algo 3 -> a single flat net"
         _assert_weight_vector(weights[0], PHASE4A / "tier2_weights_epoch4.bin", "tier2 final weights")
 
-        mat_path = Path("tier2_spectral.mat")
-        got_mcr = _mat_var(mat_path, "MultiConfigResults")
+        got_mcr = eng.results_matrix()
         want_mcr = _load_bin_matrix(PHASE4A / "tier2_spectral_MultiConfigResults.bin")
         _assert_matrix(got_mcr, want_mcr, (0, 1, 2), (6,), "tier2 MultiConfigResults")
+        mems = eng.epoch_mems()
         for name in ("CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"):
-            got = _mat_var(mat_path, name)
+            got = mems[name]
             want = _load_bin_matrix(PHASE4A / f"tier2_spectral_{name}.bin")
             _assert_matrix(got, want, (), (), f"tier2 {name}")
 
@@ -244,8 +245,9 @@ def test_tier2_spectral_train_replay(tmp_path: Path) -> None:
 
 def test_twin_train_replay(tmp_path: Path) -> None:
     """Algo 6 (Twin SAD+LID), Mode 7 phSeq, 2-file corpus, 6 training epochs +
-    solo + final (8 saveAndUpdate rows): BOTH nets' final weights and the 5
-    `.mat` result variables must match the committed twin-train fixtures."""
+    solo + final (8 saveAndUpdate rows): BOTH nets' final weights, the result
+    matrix and the four epoch arrays (issue #134) must match the committed
+    twin-train fixtures."""
     _seed_twin_train(tmp_path)
     with chdir(tmp_path):
         eng = speech_rs.Engine(["twin_train.config"], "-m")
@@ -255,19 +257,38 @@ def test_twin_train_replay(tmp_path: Path) -> None:
         _assert_weight_vector(weights[0], PHASE4B / "twin_train_sad_epoch7.bin", "twin sad final weights")
         _assert_weight_vector(weights[1], PHASE4B / "twin_train_lid_epoch7.bin", "twin lid final weights")
 
-        mat_path = Path("twin_train.mat")
-        got_mcr = _mat_var(mat_path, "MultiConfigResults")
+        got_mcr = eng.results_matrix()
         want_mcr = _load_bin_matrix(PHASE4B / "twin_train_MultiConfigResults.bin")
         assert got_mcr.shape[1] == 23, "3 id cols + the 20-col algo-6 row"
         _assert_matrix(got_mcr, want_mcr, (0, 1, 2), (6,), "twin_train MultiConfigResults")
+        mems = eng.epoch_mems()
         for name in ("CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"):
-            got = _mat_var(mat_path, name)
+            got = mems[name]
             want = _load_bin_matrix(PHASE4B / f"twin_train_{name}.bin")
             _assert_matrix(got, want, (), (), f"twin_train {name}")
 
     manifest = cast(dict[str, Any], json.loads((PHASE4B / "manifest.json").read_text()))
     epochs = cast(int, manifest["corpus_lid"]["measured"]["train"]["twin_train"]["epochs"])
     assert epochs == 8, "epoch indices 0..7, final = epoch7"
+
+
+def test_epoch_mems_bridge_matches_mat(tmp_path: Path) -> None:
+    """Issue #134 bridge: `Engine.epoch_mems()` is a dict of the four per-epoch
+    arrays under their `.mat` variable names, each bit-identical to what the
+    engine wrote to the `.mat` in the same run. The one pytest test that still
+    reads an engine-written `.mat` (the Rust writer's own tests are the others);
+    it goes with the writer (#135)."""
+    _seed_tier2_spectral(tmp_path)
+    with chdir(tmp_path):
+        eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
+        eng.run()
+        mems = eng.epoch_mems()
+        assert set(mems) == {"CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"}
+        for name, got in mems.items():
+            want = _mat_var(Path("tier2_spectral.mat"), name)
+            assert got.dtype == np.float64 and got.shape == want.shape, f"{name}: {got.shape} != {want.shape}"
+            assert np.array_equal(got.view(np.uint64), want.view(np.uint64)), f"{name}: not bit-identical to the .mat variable"
+        assert mems["CostMem"].shape == (5, 1), "3 epochs -> solo + 3 + final = 5 rows, 1 config"
 
 
 def test_grad_check_seam(tmp_path_factory: pytest.TempPathFactory) -> None:
