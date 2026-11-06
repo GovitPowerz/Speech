@@ -72,6 +72,18 @@ def test_write_weighted_listing_no_suffix_appended(tmp_path: Path) -> None:
     assert not (tmp_path / "custom_name_no_ext.lst").is_file()
 
 
+def test_listing_writers_write_fields_verbatim_not_as_fprintf_template(tmp_path: Path) -> None:
+    """Both legacy writers hand the assembled rows to `fprintf(fileID,text)` as the TEMPLATE
+    (`WriteListing.m:8`, `WriteWeightedListing.m:8`), so Octave expands a backslash escape and
+    stops at the first `%` conversion with no data, dropping the rest of the file. The port
+    writes every field verbatim and keeps the following row (IMPROVEMENTS.md, [4d] fprintf entry)."""
+    item = {"filename": r"C:\new\x%d.wav", "refseg": "50%%.xml", "lang": "eng", "dial": "us"}
+    write_listing(tmp_path / "odd", [item, PLAIN_ITEMS[0]])
+    assert (tmp_path / "odd.flst").read_text() == "C:\\new\\x%d.wav;50%%.xml;eng;us;\naudio_01.wav;ref_01.xml;lang_01;dial_01;\n"
+    write_weighted_listing(tmp_path / "odd.lst", [item, WEIGHTED_ITEMS[0]], WEIGHTED_VALUES[:2])
+    assert (tmp_path / "odd.lst").read_text() == "C:\\new\\x%d.wav;50%%.xml;eng;us;1;30;\nwfile_01.wav;wseg_01.xml;eng;us;0.5;123457;\n"
+
+
 # --- %g formatting: targeted boundary checks (redundant with the golden above, but pin
 # each style-switch boundary by name) ---------------------------------------------------
 

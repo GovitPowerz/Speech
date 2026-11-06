@@ -3962,8 +3962,13 @@ production-reachable and its only bit-pin runs through the table, so the issue's
 not one) and the two phase 0b-ii scorers (`update_segmentation_oracle`, `compute_errors_pass2_oracle`,
 which generate the JSON cases the Rust segmenter and scorer goldens replay). The Octave stage
 `stage_writelisting.m` still drives the vendored `WriteListing.m` whole; only `plain.flst` is
-committed.
+committed. The review of the branch found one Phase 4d divergence nothing recorded: both
+legacy listing writers print their rows through `fprintf(fileID,text)` as a format template,
+so a `%` or backslash in a path is read as a directive (Octave stops at the first `%d` with no
+data), while the port writes the fields verbatim. It is now an IMPROVEMENTS.md FIXED-BY-DESIGN
+entry with one pin, `test_listing_writers_write_fields_verbatim_not_as_fprintf_template`.
 
-Measured 2026-11-06: pytest 1225 -> 1209 passed non-slow (plus the one standing skip; the 16 retired tests: 1 cmaes, 4 rprop, 7
-check_grad, 4 shard), 0 failures; `uv run python tests/mutations/run.py --check`: 185 mutations,
-0 problems; the close run `--changed-since origin/main` is recorded in the pull request.
+Measured 2026-11-06: pytest 1225 -> 1210 passed non-slow (plus the one standing skip; the 16
+retired tests: 1 cmaes, 4 rprop, 7 check_grad, 4 shard; the one added: the fprintf pin), 0 failures;
+`uv run python tests/mutations/run.py --check`: 185 mutations, 0 problems; the close run
+`--changed-since origin/main` is recorded in the pull request.

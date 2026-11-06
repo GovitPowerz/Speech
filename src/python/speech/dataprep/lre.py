@@ -233,9 +233,8 @@ def derive_sad_listings(corpus_root: Path, out_dir: Path, seed: int) -> SadSplit
     70/15/15 train/valid/test split (`np.random.default_rng(seed).permutation`)
     recorded BOTH in the emitted listings' filenames (`sad_train.flst`/
     `sad_valid.flst`/`sad_test.flst`, written via `write_listing`) AND in a
-    `split.json` sidecar (seed, ratios,
-    per-split counts, orphan counts, and each split's file list -- reproducible
-    audit independent of re-parsing the listings).
+    `split.json` sidecar (seed, ratios, per-split counts, orphan counts, and each
+    split's file list -- reproducible audit independent of re-parsing the listings).
 
     SAD has no per-file language target: `lang`/`dial` are written `"unk"`/`"unk"`
     for every row -- language is the LID arm's concern, carried instead by the

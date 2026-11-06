@@ -4091,6 +4091,27 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   the two nearly-identical sibling functions is easy to "fix" by accident when porting
   by analogy. *Pinned by:* `test_write_weighted_listing_no_suffix_appended`
   (`tests/test_phase4d_listing_writers.py`).
+- **[4d] Both listing writers print their rows through `fprintf(fileID,text)`, so a `%` or a
+  backslash in a field is read as a format directive -- NOT reproduced, FIXED-BY-DESIGN
+  (issue #103, no code change)** (`WriteListing.m:5-8`, `WriteWeightedListing.m:5-8`;
+  `batching.write_listing` / `write_weighted_listing`): each row is first built with
+  `sprintf('%s;%s;...;\n', ...)`, which substitutes the filename, refseg, lang and dial
+  values into `text`, and `text` is then passed to `fprintf` as the TEMPLATE, with no data
+  arguments. Measured on Octave 11.3 (the harness oracle): a known escape is expanded (`\t`
+  becomes a tab, `\n` a newline), an unknown one drops its backslash with a warning (`\d` ->
+  `d`), `\x` with no hex digits becomes a NUL byte, `%%` becomes `%`, and the first conversion
+  with no data (`%d` probed) ends the output there, so every later row of the listing is
+  silently lost. A path such as `C:\new\x%d.wav` comes out as `C:`, a newline, `ew`, a NUL, and
+  nothing after. The port has written every field verbatim since Phase 4d and keeps the rows
+  that follow. The divergence is invisible on the committed goldens (their names hold neither
+  character) and was unrecorded until issue #103. The legacy behaviour is a bug, not a format:
+  a mangled row names a different file, and the rows after a `%` conversion are gone. RED and
+  mutation do not apply (the port never reproduced it; the same doc-only flip as F4). MATLAB's
+  `fprintf` also expands the template's escapes and conversions; its exact output on these
+  cases was not probed. *Pinned by:*
+  `test_listing_writers_write_fields_verbatim_not_as_fprintf_template`
+  (`tests/test_phase4d_listing_writers.py`: a `C:\new\x%d.wav` / `50%%.xml` row followed by a
+  plain row, both writers, the output byte-equal to the fields as given).
 - **[4d] Octave's `sprintf('%g', ...)` matches Python's `f"{x:g}"` byte-for-byte at every
   probed style-switch boundary -- no port-side surprise found, but the surprise was
   worth checking before trusting it** (`write_weighted_listing`'s two numeric fields):
@@ -4512,8 +4533,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `uv run python tests/mutations/run.py phase4d`). Item 7 is retired: it weakened the test-side
   comparator of `tests/test_phase4d_parity.py::test_vrcts_structural_and_boundaries`, removed in
   6c6acdf with the 2015-parity gates. Item 5 is retired in issue #103 with the shard branch it
-  mutated (`_worker_positions` and its three catchers are gone). Every edit is the literal one, recovered from the Task 14
-  session transcript; item 1 changes all six collar sites, the output-inert `:157` one included.
+  mutated (`_worker_positions` and its three catchers are gone). Every edit is the literal one,
+  recovered from the Task 14 session transcript; item 1 changes all six collar sites, the
+  output-inert `:157` one included.
   Item 2's "case4 fixture golden" is `test_convert_tab_file_matches_hand_computed_fixture[case4]`;
   item 5's two unnamed legs are the two `test_write_listing_worker_shards_*` tests the Task 14
   report names.

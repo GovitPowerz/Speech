@@ -744,7 +744,7 @@ def extract_listing_fixtures() -> None:
             "#103). `weighted.lst` pins WriteWeightedListing's "
             "two %g fields across the C-style style-switch boundaries (exponent<-4, or "
             ">=precision 6) plus a rounding-carry-across-the-boundary case and a "
-            "negative-zero case; its commented-out worker-shard block (:10-21) is dead "
+            "negative-zero case; its commented-out worker-shard block (:11-22) is dead "
             "code in the legacy source and is not ported on either side. Run twice per "
             "extraction to confirm determinism."
         ),

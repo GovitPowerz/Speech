@@ -571,10 +571,8 @@ def main() -> None:
         manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 
     print(
-        f"OK: phase4c fixtures (octave {octave_version}; smorms3 M=7 steps=12 lrate cap@step8, "
-        f"rt offset nonzero; "
-        f"batching single/multi_nb/sub/clobber/degenerate + getWorstAndBest; "
-        f"masking pass=0 fail=1; "
+        f"OK: phase4c fixtures (octave {octave_version}; smorms3 M=7 steps=12 lrate cap@step8, rt offset nonzero; "
+        "batching single/multi_nb/sub/clobber/degenerate + getWorstAndBest; masking pass=0 fail=1; "
         f"qpso D=3 ps=4 me=3 cursor_end={cursor_line} min_gap={min_gap:.3g}), "
         f"manifest -> {manifest_path.relative_to(REPO_ROOT)}"
     )
