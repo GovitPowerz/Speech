@@ -3972,3 +3972,44 @@ Measured 2026-11-06: pytest 1225 -> 1210 passed non-slow (plus the one standing 
 retired tests: 1 cmaes, 4 rprop, 7 check_grad, 4 shard; the one added: the fprintf pin), 0 failures;
 `uv run python tests/mutations/run.py --check`: 185 mutations, 0 problems; the close run
 `--changed-since origin/main` is recorded in the pull request.
+
+## Issue #136 -- the best-weight save retired, its gate kept: the mutation battery
+
+**Live:** `tests/mutations/issue136/` (1 patch). Five older patches moved with the deleted save and
+were re-targeted in the same branch: `phase4a/1` and `phase4a/6` on new context, `issue25/1` on the
+prefix-free `training_policy` table, `phase4a/2` on `best_cost_gate`'s `>` (its tie catcher now
+reading the in-memory fire count), and `issue25/2`, whose site (the `LID_` save prefix) is gone: by
+the issue's decision 4 the id is re-targeted, not retired, and now drops every best pack after the
+first at the capture. Its row in the #25 scorecard above is dated history for the old site.
+
+Branch `feature/issue-136-retire-engine-weight-save`, off `main@cc611f4` (#134 merged). Every exact
+NN run, `Epochs 0` included, wrote a `bestNNWeight_<n>_` trio per trainable net at each fire of the
+best-cost gate (the pack and the folded derivatives in the `.bin` codec, the input statistics in a
+MAT v5 file), and nothing read them. The decision stays: `best_cost_gate` keeps the per-algo
+criterion, the strict `>` and its place before the `costLID` override and the update. Its files
+go, with `io::prefix_basename`, the `LID_` prefix column and `run_epoch`'s input-statistics fold
+(which fed only the stats file). Under `test-support` a fire captures each net's pre-update pack and
+folded derivatives (`BestPack`); in a production build the gate's only effect is `bestCost`. Proof
+of the move (ADR-0002, "a file side effect removed"): the two training goldens compare the capture
+with the same legacy `saveWeights` fixtures they read the files against, byte-green, and both now
+assert their `-m` run leaves no `bestNNWeight` file.
+
+`uv run python tests/mutations/run.py --changed-since origin/main` on macOS after the review fix:
+109 verdicts, 0 differ from expected.
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `save_and_update` captures the best pack AFTER `update_weights` | `phase4a_save_update::best_pack_is_the_pre_update_pack_and_the_fold`, `phase4a_train_golden::tier2_train_epoch_weights_golden`, `phase4b_corpus_lid::twin_train_epoch_weights_golden` | CAUGHT by all three: `the pack is the pre-update one`, `best pack weight 0` (0.6790... vs the legacy 0.6430...), `net 1 weight 23` |
+| `phase4a/2` (re-targeted) | `best_cost_gate`'s `>` -> `>=` | `phase4b_backlog::best_cost_gate_skips_on_exact_tie` (CAUGHT), `tier2_train_epoch_weights_golden` and `best_cost_gate_fires_and_skips` (MISSED, as before: no tie) | CAUGHT: `a tie must not fire the gate (fires stays 1)` |
+| `issue25/2` (re-targeted) | the capture keeps only the first net's pack | `twin_train_epoch_weights_golden` | CAUGHT: `net 1: no best pack` |
+
+What the battery measured: the capture is a `test-support` fact, so row 1 and `issue25/2` pin the
+hook against the legacy artifacts (the pre-update pack, keyed by net index), not a production
+behaviour. The production half of the decision is the gate itself: its `>` (`phase4a/2`), its
+criteria (`issue25/3`, `training_policy_is_the_legacy_branch_per_algo`) and the `costLID` order
+(`phase4a/6`).
+
+Measured 2026-11-06: cargo 1413 -> 1411 passed (`--features test-support`, `--no-fail-fast`; the
+two `prefix_basename` unit tests and `save_weights_writes_three_artifacts` retired,
+`best_pack_is_the_pre_update_pack_and_the_fold` added), pytest 1210 passed non-slow, unchanged;
+`run.py --check`: 186 mutations, 0 problems.
