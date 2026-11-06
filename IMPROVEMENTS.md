@@ -2820,6 +2820,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   delete the dead `:5` line after parity. **Mutation:** restoring `:5` as the live delta0 (deleting
   `:6`) makes the init-branch `deltaweight = -sign(deriv)*delta0` random -> `rprop_sequence_bit_exact`
   fails on step 1.
+  (Issue #103: `rprop_step`, its test and its Octave pin are retired -- the engine's iRPROP- is
+  `nn/train.rs::Rprop`, pinned to the C++ oracle, and nothing in the port called the Python one.
+  The legacy observation above stands; the mutation no longer has a site.)
 
 - **[phase4c] Octave-compat: SMORMS3 empty-varargin lvalue cs-list miscount**
   (`tools/octave_harness/{smorms3_f_df,stage_smorms3}.m`; the .m source `SMORMS3.m:313` is
@@ -3528,6 +3531,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   no-op `figure`/`subplot`/`semilogy`/`hold`/`grid` stand-ins (verified empirically: the real
   calls error even with `--no-gui`, and the no-ops let the unmodified function run to completion).
   Both shadows live only in `checkgrad_shadow/`, added to the Octave path AFTER `functions_dir`.
+  (Issue #103: `stage_checkgrad.m` and `checkgrad_shadow/` are retired with the `check_grad` pin
+  they produced; the accommodation is recorded here as history.)
 
 - **[phase4c] Genuine legacy bug surfaced by driving the real `CheckGrad.m`: `weights2nnet.m`
   never writes back the normalize mean/std tail `nnet2MatFile.m` appends to `weights`, so
@@ -3582,6 +3587,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   now proven by the Rust goldens `src/rust/tests/phase0_packer.rs` / `phase4d_packer_golden.rs`
   and by every committed seed pack regenerating byte-identical through `speech_rs.weight_layout`,
   whose `tail` stack carries `mean` and `std` -- `tests/test_seed_pack_regeneration.py`.)
+  (Issue #103: `speech.scoring.check_grad` and `test_check_grad_normalize_tail_quirk_documented_not_reproduced`
+  are retired -- the port's gradient check is the engine's own `Engine.grad_check`, pinned through the
+  seam, which never had the round trip to drop the tail in. The legacy bug stays recorded here.)
 
 - **[phase5] The QPSO genome no longer carries network weights -- a DELIBERATE DESIGN BREAK
   from the legacy genome (Task 9), NOT a fix flip** (`genome.weight_block_mask`/`_MaskTraceWalk`,
@@ -4070,6 +4078,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `test_worker_positions_hand_derived` (`tests/test_phase4d_listing_writers.py`), byte-
   exact against `tests/reference_data/phase4d/listing/plain_worker_{1,2,3}.flst`
   (Octave TIER-1 goldens, `scripts/extract_phase4d_fixtures.py --listing-fixtures`).
+  (Issue #103: the shard branch, `_worker_positions`, those three tests and goldens and the
+  `phase4d/5` mutation are retired -- the engine reads one listing and no driver sharded; the
+  stage still drives the vendored function whole and only `plain.flst` is committed.)
 - **[4d] `WriteWeightedListing.m`'s worker-shard block is dead code -- COMMENTED OUT in
   the vendored source, not ported** (`legacy/Optimizer_V6.2.2/functions/
   WriteWeightedListing.m:11-22`): unlike `WriteListing.m`, whose worker-shard loop is
