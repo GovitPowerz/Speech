@@ -2,9 +2,9 @@
 
 Ported from legacy MATLAB: confusion*.m, MaskingValidation.m. See design spec section 6.
 (The CheckGrad.m port, `check_grad`, was retired in issue #103: the port's gradient check
-is the engine's own `Engine.grad_check`, pinned through the seam. The numpy oracles of the
-segmenter decision and of `compute_errors` Pass 2 moved to `tests/oracles/scoring.py` in
-issue #133.)
+is the engine's own `Engine.grad_check`, pinned through the seam.) The numpy oracles of the
+segmenter decision and of `compute_errors` Pass 2 are `tests/oracles/scoring.py` since
+issue #133.
 """
 
 from __future__ import annotations

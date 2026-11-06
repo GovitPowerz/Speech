@@ -1,10 +1,5 @@
-"""The QPSO oracle's table reader (issue #133: test-only, out of the shipped package).
-
-`TableRng` satisfies `speech.optimizers.RandSource`: BOTH the Octave modified-copy oracle
-(`tools/octave_harness/qpso_modified/`) and the port read the SAME committed table
-(`tests/reference_data/phase4c/qpso_random_table.bin`) through an identical cursor, so the
-QPSO trajectory is bit-pinned. Production passes a numpy `Generator`.
-"""
+"""The QPSO oracle's table reader, a `speech.optimizers.RandSource` (issue #133: test-only,
+out of the shipped package; production passes a numpy `Generator`)."""
 
 from __future__ import annotations
 

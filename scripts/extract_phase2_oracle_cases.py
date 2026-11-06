@@ -25,11 +25,11 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
 
 from tests.oracles.nn_reference import dense_forward_oracle, lstm_forward_oracle  # noqa: E402
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
 PHASE2_DIR = REPO_ROOT / "tests" / "reference_data" / "phase2"
 
 # (I, O) shapes; T grid; flag grid (cells, gates, gates_rec).
