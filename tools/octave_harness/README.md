@@ -25,12 +25,13 @@ here `addpath` the vendored sources and **call** them, never modify them.
 |------|------|
 | `run_stage.m` | Dispatcher: `run_stage(stage, out_dir)` -- adds this dir + the vendored `functions/` dir to the path, then runs the named stage into `out_dir`. |
 | `stage_smorms3.m` | Drives the REAL `SMORMS3.m` classdef over scripted gradient sequences; dumps per-step `theta/MMS/stepRate/delta/lrate` + the round-trip variant. |
-| `stage_rprop.m` | Drives the REAL `Rprop.m` function over a crafted derivative/cost sequence; dumps per-step `weights/delta/deltaweight/derivatives`. |
 | `smorms3_f_df.m` | The injected SMORMS3 objective (scripted gradient + `theta_out` round-trip offset). |
 | `stage_vec2struct.m` | Drives the REAL `vec2struct.m` (+ `printConfig.m`) over six algo/mask/PS cases; dumps the genome<->config bijection goldens. |
+| `stage_batching.m` + `batching_shadow/` + `getworstandbest_transcribed.m` | **TIER 1** `CreateBatches.m` + `GetNewBatch.m` unmodified, `randperm` shadowed by a fixed reverse-order permutation (`batching_shadow/randperm.m`); `getCases.m`'s private `getWorstAndBest` is a FALLBACK-TIER verbatim transcription. Dumps the five CreateBatches cases + rotation traces. |
+| `stage_masking.m` | **TIER 1**: drives the REAL `MaskingValidation.m` + `vec2struct.m` over a PASS and a FAIL mask case; dumps `hasFailed`, `count` and the genome vector per case. |
 | `stage_computecost.m` | **FALLBACK-TIER** transcription of the `ComputeCost.m` cost-assembly lines (`:354-652`); drives the balance-law 0/3/4/5/10 error + cost, deriv averaging, and L2 over the committed 4a/4b MultiConfigResults fixtures + crafted variants. |
 | `stage_qpso.m` + `qpso_modified/` | **SUBSTITUTION-COPY TIER** (Phase 4c Task 11): drives a MODIFIED-COPY of `QuantumPSO.m` (`qpso_modified/QuantumPSO.m`) whose rand/randperm/stblrnd are substituted by reads of a shared committed random table (`tbl_rand`/`tbl_randperm`/`tbl_stblrnd`, a stage-global cursor) and whose `CostFunction` is the quadratic `qpso_surrogate.m`; the wall-clock reseed (`:91`) is removed. Every substitution is a `% HARNESS-SUB` comment quoting the original line. Dumps the post-init state + per-epoch pos/pbest/gbest trajectory + a standalone Levy sample; the Python `speech.optimizers.quantum_pso` replays the SAME table (`tests/reference_data/phase4c/qpso_random_table.bin`). |
-| `stage_writelisting.m` (Phase 4d Task 8) | **TIER 1**: drives the REAL, unmodified `WriteListing.m`/`WriteWeightedListing.m` -- 7-file/3-worker `fliplr` shard interleave (plain) plus 8 crafted `%g`-boundary values (weighted). Both write plain text directly (no `.mat` conversion step, unlike every other stage). |
+| `stage_writelisting.m` (Phase 4d Task 8) | **TIER 1**: drives the REAL, unmodified `WriteListing.m`/`WriteWeightedListing.m` -- a 7-file base listing (plain; the 3 worker shards the vendored source also writes are not committed, the shard branch being unported since issue #103) plus 8 crafted `%g`-boundary values (weighted). Both write plain text directly (no `.mat` conversion step, unlike every other stage). |
 | `stage_scr.m` (Phase 4d Task 11) | **HYBRID TIER**: `PS.Corpora.Train.langMapConf`/`.listing` come from a REAL Tier-1 call to `processListing.m` (so the alphabetical class-key order is never hand-simulated); `Test_BLSTM.m:251-269`'s `.scr`-writer loop body is FALLBACK-TIER transcription (`Test_BLSTM.m` is a top-level script wired to a `CostFunction.m` engine shell-out, no callable function boundary exists), with every builtin/vendored call inside the loop (`textscan`, `sortrows`, `keys`, `num2str`, `fprintf`) real and unmodified. |
 
 Run a stage by hand:
@@ -40,7 +41,7 @@ octave-cli --no-gui --quiet --path tools/octave_harness \
   --eval "run_stage('smorms3', '/tmp/out')"
 ```
 
-The extractors (`scripts/extract_phase4c_fixtures.py` for smorms3/rprop,
+The extractors (`scripts/extract_phase4c_fixtures.py` for smorms3/batching/masking/qpso,
 `scripts/extract_phase4c_genome_fixtures.py` for vec2struct,
 `scripts/extract_phase4c_computecost_fixtures.py` for computecost) run the stages into a
 tempdir, convert the `.mat` dumps to `.bin` (dropping the MAT-v7 timestamp header, so
@@ -49,9 +50,11 @@ prior-phase (and prior-phase4c) fixtures, and commit the `.bin` + `manifest.json
 
 ## Fidelity tiers
 
-The smorms3/rprop/vec2struct stages are **TIER 1**: the real vendored classdef/function is
-exercised unchanged (real ctor, real `optimization_step`, real `f_df_wrapper`, real update
-math for SMORMS3; the real function for Rprop; the real `vec2struct`/`printConfig`).
+The smorms3/vec2struct/masking/writelisting stages are **TIER 1**: the real vendored
+classdef/function is exercised unchanged (real ctor, real `optimization_step`, real
+`f_df_wrapper`, real update math for SMORMS3; the real `vec2struct`/`printConfig`,
+`MaskingValidation`, `WriteListing`/`WriteWeightedListing`). The batching stage is TIER 1
+for `CreateBatches`/`GetNewBatch` behind the shadowed `randperm`.
 
 `stage_computecost.m` is the **FALLBACK TIER** (the MATLAB analog of the C++ harness's
 "reimpl-swap"): `ComputeCost.m`'s top half shells out to the engine

@@ -18,11 +18,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-from speech.batching import _worker_positions, write_listing, write_weighted_listing
+from speech.batching import write_listing, write_weighted_listing
 
 LISTING_DIR = Path(__file__).resolve().parent / "reference_data" / "phase4d" / "listing"
 
-# --- plain: mirrors stage_writelisting.m's 7-file / 3-worker case ---
+# --- plain: mirrors stage_writelisting.m's 7-file case (its 3 worker shards are not ported, #103) ---
 PLAIN_ITEMS = [
     {
         "filename": f"audio_{i:02d}.wav",
@@ -32,7 +32,6 @@ PLAIN_ITEMS = [
     }
     for i in range(1, 8)
 ]
-PLAIN_NB_WORKERS = 3
 
 # --- weighted: mirrors stage_writelisting.m's 8-file %g-boundary probe case ---
 _WEIGHTED_LANG_DIAL = [("eng", "us"), ("fra", "ca")] * 4
@@ -48,48 +47,10 @@ WEIGHTED_VALUES = np.array(list(zip(WEIGHTED_WEIGHTS, WEIGHTED_DURATIONS, strict
 
 def test_write_listing_plain_matches_golden(tmp_path: Path) -> None:
     base = tmp_path / "plain"
-    write_listing(base, PLAIN_ITEMS, PLAIN_NB_WORKERS)
+    write_listing(base, PLAIN_ITEMS)
     got = (tmp_path / "plain.flst").read_bytes()
     want = (LISTING_DIR / "plain.flst").read_bytes()
     assert got == want
-
-
-def test_write_listing_worker_shards_match_golden(tmp_path: Path) -> None:
-    base = tmp_path / "plain"
-    write_listing(base, PLAIN_ITEMS, PLAIN_NB_WORKERS)
-    for jj in (1, 2, 3):
-        got = (tmp_path / f"plain_worker_{jj}.flst").read_bytes()
-        want = (LISTING_DIR / f"plain_worker_{jj}.flst").read_bytes()
-        assert got == want, f"worker {jj} shard mismatch"
-
-
-def test_write_listing_worker_shards_partition_all_items_exactly_once() -> None:
-    """Non-vacuity: 7 items / 3 workers (7=3+2+2) -- every item must appear in exactly
-    one shard, proving the fliplr interleave is a genuine partition, not an artifact of
-    a degenerate small case."""
-    seen: list[int] = []
-    for jj in (1, 2, 3):
-        seen.extend(_worker_positions(len(PLAIN_ITEMS), jj, PLAIN_NB_WORKERS))
-    assert sorted(seen) == list(range(len(PLAIN_ITEMS)))
-
-
-def test_worker_positions_hand_derived() -> None:
-    """Pins the brief's by-hand derivation directly: jj=1 -> [1,4,7], jj=2 -> [3,6],
-    jj=3 -> [2,5] (1-based MATLAB positions), 0-based here."""
-    assert _worker_positions(7, 1, 3) == [0, 3, 6]
-    assert _worker_positions(7, 2, 3) == [2, 5]
-    assert _worker_positions(7, 3, 3) == [1, 4]
-
-
-def test_write_listing_nb_workers_capped_at_item_count(tmp_path: Path) -> None:
-    """`PS.VP.nbworker = min(PS.VP.nbworker, length(index))` -- requesting more workers
-    than items must not create empty/out-of-range shard files."""
-    base = tmp_path / "small"
-    items = PLAIN_ITEMS[:2]
-    write_listing(base, items, nb_workers=5)
-    assert (tmp_path / "small_worker_1.flst").is_file()
-    assert (tmp_path / "small_worker_2.flst").is_file()
-    assert not (tmp_path / "small_worker_3.flst").is_file()
 
 
 def test_write_weighted_listing_matches_golden(tmp_path: Path) -> None:
@@ -109,6 +70,18 @@ def test_write_weighted_listing_no_suffix_appended(tmp_path: Path) -> None:
     assert path.is_file()
     assert not (tmp_path / "custom_name_no_ext.flst").is_file()
     assert not (tmp_path / "custom_name_no_ext.lst").is_file()
+
+
+def test_listing_writers_write_fields_verbatim_not_as_fprintf_template(tmp_path: Path) -> None:
+    """Both legacy writers hand the assembled rows to `fprintf(fileID,text)` as the TEMPLATE
+    (`WriteListing.m:8`, `WriteWeightedListing.m:8`), so Octave expands a backslash escape and
+    stops at the first `%` conversion with no data, dropping the rest of the file. The port
+    writes every field verbatim and keeps the following row (IMPROVEMENTS.md, [4d] fprintf entry)."""
+    item = {"filename": r"C:\new\x%d.wav", "refseg": "50%%.xml", "lang": "eng", "dial": "us"}
+    write_listing(tmp_path / "odd", [item, PLAIN_ITEMS[0]])
+    assert (tmp_path / "odd.flst").read_text() == "C:\\new\\x%d.wav;50%%.xml;eng;us;\naudio_01.wav;ref_01.xml;lang_01;dial_01;\n"
+    write_weighted_listing(tmp_path / "odd.lst", [item, WEIGHTED_ITEMS[0]], WEIGHTED_VALUES[:2])
+    assert (tmp_path / "odd.lst").read_text() == "C:\\new\\x%d.wav;50%%.xml;eng;us;1;30;\nwfile_01.wav;wseg_01.xml;eng;us;0.5;123457;\n"
 
 
 # --- %g formatting: targeted boundary checks (redundant with the golden above, but pin

@@ -3941,3 +3941,34 @@ The first patch is the seam proof: one parser mutated, one pin per migrated modu
 corpus pin is its declared MISSED (a `String` has no junk to read past) and the catcher of the
 second patch instead, where the bag's `1 2` pin is the declared MISSED (an inner space is junk
 with or without the trim).
+
+## Issue #103 -- production-unreachable ports: four retired, three kept as named oracles
+
+**Live:** no new patches; `tests/mutations/phase4d/5.patch` retired (ADR-0011: the site is gone).
+
+The review behind the issue listed the Python functions nothing in production reaches. Re-measured
+on `main` at `3aea0a9`, the inventory split on one question, ADR-0001's: is the port compared
+against it? Retired, each with its tests, fixtures, Octave stage and extractor section in one
+commit: `cmaes_optimize` (an unpinned wrap of the `cma` package, a different lineage than the
+vendored `cmaes.m`, no driver wiring; the core dependency goes with it), `rprop_step` (a bit-pin of
+`Rprop.m` that no port code called or was checked against -- the engine's iRPROP- is
+`nn/train.rs::Rprop`, pinned to the C++ oracle by `real_net_one_irprop_step`), `check_grad`
+(superseded by the seam's `Engine.grad_check`, pinned in `tests/pyo3/test_phase9_seam.py`; the
+`weights2nnet.m` normalize-tail bug it surfaced stays in IMPROVEMENTS.md as legacy history), and
+`write_listing`'s worker-shard branch (`_worker_positions`, the `nb_workers` argument; the engine
+reads one listing and the one caller, `dataprep/lre.py`, passed `0` to skip it). Kept, each README
+row now naming what it pins: `TableRng` (the QPSO oracle's table reader -- `quantum_pso` is
+production-reachable and its only bit-pin runs through the table, so the issue's "candidate" was
+not one) and the two phase 0b-ii scorers (`update_segmentation_oracle`, `compute_errors_pass2_oracle`,
+which generate the JSON cases the Rust segmenter and scorer goldens replay). The Octave stage
+`stage_writelisting.m` still drives the vendored `WriteListing.m` whole; only `plain.flst` is
+committed. The review of the branch found one Phase 4d divergence nothing recorded: both
+legacy listing writers print their rows through `fprintf(fileID,text)` as a format template,
+so a `%` or backslash in a path is read as a directive (Octave stops at the first `%d` with no
+data), while the port writes the fields verbatim. It is now an IMPROVEMENTS.md FIXED-BY-DESIGN
+entry with one pin, `test_listing_writers_write_fields_verbatim_not_as_fprintf_template`.
+
+Measured 2026-11-06: pytest 1225 -> 1210 passed non-slow (plus the one standing skip; the 16
+retired tests: 1 cmaes, 4 rprop, 7 check_grad, 4 shard; the one added: the fprintf pin), 0 failures;
+`uv run python tests/mutations/run.py --check`: 185 mutations, 0 problems; the close run
+`--changed-since origin/main` is recorded in the pull request.

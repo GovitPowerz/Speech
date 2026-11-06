@@ -2820,6 +2820,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   delete the dead `:5` line after parity. **Mutation:** restoring `:5` as the live delta0 (deleting
   `:6`) makes the init-branch `deltaweight = -sign(deriv)*delta0` random -> `rprop_sequence_bit_exact`
   fails on step 1.
+  (Issue #103: `rprop_step`, its test and its Octave pin are retired -- the engine's iRPROP- is
+  `nn/train.rs::Rprop`, pinned to the C++ oracle, and nothing in the port called the Python one.
+  The legacy observation above stands; the mutation no longer has a site.)
 
 - **[phase4c] Octave-compat: SMORMS3 empty-varargin lvalue cs-list miscount**
   (`tools/octave_harness/{smorms3_f_df,stage_smorms3}.m`; the .m source `SMORMS3.m:313` is
@@ -3528,6 +3531,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   no-op `figure`/`subplot`/`semilogy`/`hold`/`grid` stand-ins (verified empirically: the real
   calls error even with `--no-gui`, and the no-ops let the unmodified function run to completion).
   Both shadows live only in `checkgrad_shadow/`, added to the Octave path AFTER `functions_dir`.
+  (Issue #103: `stage_checkgrad.m` and `checkgrad_shadow/` are retired with the `check_grad` pin
+  they produced; the accommodation is recorded here as history.)
 
 - **[phase4c] Genuine legacy bug surfaced by driving the real `CheckGrad.m`: `weights2nnet.m`
   never writes back the normalize mean/std tail `nnet2MatFile.m` appends to `weights`, so
@@ -3582,6 +3587,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   now proven by the Rust goldens `src/rust/tests/phase0_packer.rs` / `phase4d_packer_golden.rs`
   and by every committed seed pack regenerating byte-identical through `speech_rs.weight_layout`,
   whose `tail` stack carries `mean` and `std` -- `tests/test_seed_pack_regeneration.py`.)
+  (Issue #103: `speech.scoring.check_grad` and `test_check_grad_normalize_tail_quirk_documented_not_reproduced`
+  are retired -- the port's gradient check is the engine's own `Engine.grad_check`, pinned through the
+  seam, which never had the round trip to drop the tail in. The legacy bug stays recorded here.)
 
 - **[phase5] The QPSO genome no longer carries network weights -- a DELIBERATE DESIGN BREAK
   from the legacy genome (Task 9), NOT a fix flip** (`genome.weight_block_mask`/`_MaskTraceWalk`,
@@ -4070,6 +4078,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `test_worker_positions_hand_derived` (`tests/test_phase4d_listing_writers.py`), byte-
   exact against `tests/reference_data/phase4d/listing/plain_worker_{1,2,3}.flst`
   (Octave TIER-1 goldens, `scripts/extract_phase4d_fixtures.py --listing-fixtures`).
+  (Issue #103: the shard branch, `_worker_positions`, those three tests and goldens and the
+  `phase4d/5` mutation are retired -- the engine reads one listing and no driver sharded; the
+  stage still drives the vendored function whole and only `plain.flst` is committed.)
 - **[4d] `WriteWeightedListing.m`'s worker-shard block is dead code -- COMMENTED OUT in
   the vendored source, not ported** (`legacy/Optimizer_V6.2.2/functions/
   WriteWeightedListing.m:11-22`): unlike `WriteListing.m`, whose worker-shard loop is
@@ -4080,6 +4091,27 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   the two nearly-identical sibling functions is easy to "fix" by accident when porting
   by analogy. *Pinned by:* `test_write_weighted_listing_no_suffix_appended`
   (`tests/test_phase4d_listing_writers.py`).
+- **[4d] Both listing writers print their rows through `fprintf(fileID,text)`, so a `%` or a
+  backslash in a field is read as a format directive -- NOT reproduced, FIXED-BY-DESIGN
+  (issue #103, no code change)** (`WriteListing.m:5-8`, `WriteWeightedListing.m:5-8`;
+  `batching.write_listing` / `write_weighted_listing`): each row is first built with
+  `sprintf('%s;%s;...;\n', ...)`, which substitutes the filename, refseg, lang and dial
+  values into `text`, and `text` is then passed to `fprintf` as the TEMPLATE, with no data
+  arguments. Measured on Octave 11.3 (the harness oracle): a known escape is expanded (`\t`
+  becomes a tab, `\n` a newline), an unknown one drops its backslash with a warning (`\d` ->
+  `d`), `\x` with no hex digits becomes a NUL byte, `%%` becomes `%`, and the first conversion
+  with no data (`%d` probed) ends the output there, so every later row of the listing is
+  silently lost. A path such as `C:\new\x%d.wav` comes out as `C:`, a newline, `ew`, a NUL, and
+  nothing after. The port has written every field verbatim since Phase 4d and keeps the rows
+  that follow. The divergence is invisible on the committed goldens (their names hold neither
+  character) and was unrecorded until issue #103. The legacy behaviour is a bug, not a format:
+  a mangled row names a different file, and the rows after a `%` conversion are gone. RED and
+  mutation do not apply (the port never reproduced it; the same doc-only flip as F4). MATLAB's
+  `fprintf` also expands the template's escapes and conversions; its exact output on these
+  cases was not probed. *Pinned by:*
+  `test_listing_writers_write_fields_verbatim_not_as_fprintf_template`
+  (`tests/test_phase4d_listing_writers.py`: a `C:\new\x%d.wav` / `50%%.xml` row followed by a
+  plain row, both writers, the output byte-equal to the fields as given).
 - **[4d] Octave's `sprintf('%g', ...)` matches Python's `f"{x:g}"` byte-for-byte at every
   probed style-switch boundary -- no port-side surprise found, but the surprise was
   worth checking before trusting it** (`write_weighted_listing`'s two numeric fields):
@@ -4497,11 +4529,13 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   ran once at the end, all green (see the Task 14 report,
   `.superpowers/sdd/task-14-report.md`, for exact commands/logs).
 
-  **Live since issue #76:** `tests/mutations/phase4d/` (7 patches, ids `1` to `6` and `8`;
+  **Live since issue #76:** `tests/mutations/phase4d/` (6 patches, ids `1` to `4`, `6` and `8`;
   `uv run python tests/mutations/run.py phase4d`). Item 7 is retired: it weakened the test-side
   comparator of `tests/test_phase4d_parity.py::test_vrcts_structural_and_boundaries`, removed in
-  6c6acdf with the 2015-parity gates. Every edit is the literal one, recovered from the Task 14
-  session transcript; item 1 changes all six collar sites, the output-inert `:157` one included.
+  6c6acdf with the 2015-parity gates. Item 5 is retired in issue #103 with the shard branch it
+  mutated (`_worker_positions` and its three catchers are gone). Every edit is the literal one,
+  recovered from the Task 14 session transcript; item 1 changes all six collar sites, the
+  output-inert `:157` one included.
   Item 2's "case4 fixture golden" is `test_convert_tab_file_matches_hand_computed_fixture[case4]`;
   item 5's two unnamed legs are the two `test_write_listing_worker_shards_*` tests the Task 14
   report names.

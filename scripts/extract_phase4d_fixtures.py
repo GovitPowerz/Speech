@@ -204,7 +204,9 @@ STM_DIR = PHASE4D_DIR / "stm"
 OCTAVE_HARNESS_DIR = REPO_ROOT / "tools" / "octave_harness"
 LISTING_DIR = PHASE4D_DIR / "listing"
 LISTING_STAGE_LINE_RE = re.compile(r"^OCTAVE_STAGE writelisting n=(?P<n>\d+) nbworker=(?P<nbworker>\d+) wn=(?P<wn>\d+)$", re.MULTILINE)
-LISTING_EXPECTED_FILES = ["plain.flst", "plain_worker_1.flst", "plain_worker_2.flst", "plain_worker_3.flst", "weighted.lst"]
+# WriteListing.m also writes plain_worker_{1,2,3}.flst; the shard branch is not ported
+# (issue #103), so those are left in the tempdir.
+LISTING_EXPECTED_FILES = ["plain.flst", "weighted.lst"]
 
 # --- Task 11: .scr score-file writer live Octave byte-oracle fixtures ----------------
 SCR_DIR = PHASE4D_DIR / "scr"
@@ -736,13 +738,13 @@ def extract_listing_fixtures() -> None:
         "text": (
             "Task 8: live Octave TIER-1 byte-oracle for the two listing writers, driving "
             "the REAL vendored WriteListing.m / WriteWeightedListing.m unchanged via "
-            "tools/octave_harness/stage_writelisting.m. `plain*` pins WriteListing's "
-            "worker-shard fliplr(length(index)-jj+1:-nbworker:1) interleave over 7 files "
-            "/ 3 workers (7=3+2+2, every position covered in exactly one shard, a "
-            "non-trivial overlap-free split). `weighted.lst` pins WriteWeightedListing's "
+            "tools/octave_harness/stage_writelisting.m. `plain.flst` pins WriteListing's "
+            "base listing over 7 files (the stage's 3 worker shards are written by the "
+            "vendored source but not committed: the shard branch is not ported, issue "
+            "#103). `weighted.lst` pins WriteWeightedListing's "
             "two %g fields across the C-style style-switch boundaries (exponent<-4, or "
             ">=precision 6) plus a rounding-carry-across-the-boundary case and a "
-            "negative-zero case; its commented-out worker-shard block (:10-21) is dead "
+            "negative-zero case; its commented-out worker-shard block (:11-22) is dead "
             "code in the legacy source and is not ported on either side. Run twice per "
             "extraction to confirm determinism."
         ),

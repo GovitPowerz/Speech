@@ -1,7 +1,8 @@
-"""LID confusion matrices, EER cutoff, gradient checks, masking sanity.
+"""LID confusion matrices, EER cutoff, masking sanity.
 
-Ported from legacy MATLAB: confusion*.m, CheckGrad.m, MaskingValidation.m.
-See design spec section 6.
+Ported from legacy MATLAB: confusion*.m, MaskingValidation.m. See design spec section 6.
+(The CheckGrad.m port, `check_grad`, was retired in issue #103: the port's gradient check
+is the engine's own `Engine.grad_check`, pinned through the seam.)
 
 Also hosts the numpy differential oracle for the Rust segmenter decision
 (`update_segmentation_oracle`), used only in tests to cross-check Rust ==
@@ -9,9 +10,6 @@ Python bit-for-bit on random inputs.
 """
 
 from __future__ import annotations
-
-from collections.abc import Callable
-from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import NDArray
@@ -95,56 +93,6 @@ def confusion_matrix(lid_target: NDArray[np.int64], lid_scores: NDArray[np.float
             confusion[class_nb + 1, pos_best_not_target] += 1.0
 
     return confusion
-
-
-@dataclass
-class CheckGradReport:
-    """Per-weight analytic-vs-numeric gradient table + the worst offender. DIAGNOSTIC
-    contract (mirrors `CheckGrad.m`): there is no pass/fail threshold here, the caller
-    inspects `max_error`/`max_error_index` (and the full tables) itself."""
-
-    analytic: NDArray[np.float64]
-    numeric: NDArray[np.float64]
-    max_error: float
-    max_error_index: int
-
-
-def check_grad(
-    cost_fn: Callable[[NDArray[np.float64]], tuple[float, NDArray[np.float64]]],
-    weights: NDArray[np.float64],
-    epsilon: float = 1e-5,
-    denom_floor: float = 0.0,
-) -> CheckGradReport:
-    """Generic gradient checker, mirroring `CheckGrad.m`'s central-diff diagnostic
-    (`Optimizer_V6.2.2/functions/CheckGrad.m`): analytic gradient via ONE
-    `cost_fn` call (:36), then a per-weight central difference (:84)
-    `(cost(w+eps) - cost(w-eps)) / denom`.
-
-    Unlike the legacy (which perturbs NN weights indirectly through a
-    `vec2struct`/`nnet2MatFile`/`weights2nnet`/`network2config` round trip -- see
-    `tools/octave_harness/checkgrad_shadow/CostFunction.m` for why that matters), this
-    port perturbs `weights` DIRECTLY: `cost_fn` is any callable returning
-    `(cost, analytic_gradient)` for a given weight vector. `denom_floor` reproduces the
-    legacy's LID-branch divisor guard (`max(1e-24, 2*epsilon)`, :148); the SAD branch
-    uses the plain `2*epsilon` (:84), i.e. `denom_floor=0.0` (the default).
-    """
-    weights = np.asarray(weights, dtype=np.float64)
-    _, analytic = cost_fn(weights)
-    analytic = np.asarray(analytic, dtype=np.float64)
-    k = weights.shape[0]
-    numeric = np.zeros(k, dtype=np.float64)
-    denom = max(denom_floor, 2.0 * epsilon)
-    for kk in range(k):
-        plus = weights.copy()
-        plus[kk] += epsilon
-        minus = weights.copy()
-        minus[kk] -= epsilon
-        cost_plus, _ = cost_fn(plus)
-        cost_minus, _ = cost_fn(minus)
-        numeric[kk] = (cost_plus - cost_minus) / denom
-    err = np.abs(analytic - numeric)
-    idx = int(np.argmax(err)) if err.size else 0
-    return CheckGradReport(analytic=analytic, numeric=numeric, max_error=float(err[idx]) if err.size else 0.0, max_error_index=idx)
 
 
 def _is_numeric_field(value: str) -> float | None:

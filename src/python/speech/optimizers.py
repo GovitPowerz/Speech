@@ -1,18 +1,18 @@
 """Optimizer zoo for NN training and DSP-hyperparameter search.
 
-Ported from legacy MATLAB: SMORMS3.m (wired), Rprop.m (wired), QuantumPSO.m (wired --
-bespoke hand-port, do NOT swap for pymoo), cmaes.m (via the `cma` package, alternative
-branch). Adam.m/RMSprop.m/sfo.m/pso_Trelea_vectorized.m are EXCLUDED (never wired in
-legacy, YAGNI per the Phase 4c spec); BackPropagation.m's inner-loop contract is
-implemented by `drivers/train.py::_backprop_inner`. See design spec section 6.
+Ported from legacy MATLAB: SMORMS3.m (wired), QuantumPSO.m (wired -- bespoke hand-port,
+do NOT swap for pymoo). Adam.m/RMSprop.m/sfo.m/pso_Trelea_vectorized.m are EXCLUDED (never
+wired in legacy, YAGNI per the Phase 4c spec); the Rprop.m port and cmaes.m's `cma`-package
+stand-in were retired in issue #103 (the engine's iRPROP- is `nn/train.rs::Rprop`, pinned
+to the C++ oracle; nothing in the port called either); BackPropagation.m's inner-loop
+contract is implemented by `drivers/train.py::_backprop_inner`. See design spec section 6.
 
-SMORMS3/Rprop are bit-pinned against GNU Octave running the vendored .m sources unchanged
+SMORMS3 is bit-pinned against GNU Octave running the vendored .m source unchanged
 (Phase 4c Task 6). QuantumPSO is bit-pinned against a MODIFIED-COPY of QuantumPSO.m
 (`tools/octave_harness/qpso_modified/`) whose rand/randperm/stblrnd are substituted by
 reads of a shared committed random table -- the legacy path reseeds from the wall clock,
 so no single legacy RUN is reproducible; the table makes the OPERATOR STRUCTURE pinnable.
-cmaes_optimize is NOT bit-pinned (a different `cma`-package lineage). Goldens under
-`tests/reference_data/phase4c/`.
+Goldens under `tests/reference_data/phase4c/`.
 """
 
 from __future__ import annotations
@@ -102,72 +102,6 @@ class Smorms3:
         for _ in range(self.eval_count, num_steps + 1):
             self.optimization_step()
         return self._unflatten(self.theta)
-
-
-@dataclass
-class RpropState:
-    """iRPROP- per-weight state carried call-to-call (Rprop.m's out-args fed back as
-    in-args). `previous_derivatives` is None before the first step (the init branch,
-    Rprop.m:10); `prev_cost` is last step's cost (the backtrack gate at :24)."""
-
-    weights: NDArray[np.float64]
-    delta: NDArray[np.float64]
-    deltaweight: NDArray[np.float64]
-    previous_derivatives: NDArray[np.float64] | None
-    prev_cost: float
-
-
-def rprop_step(state: RpropState, grad: NDArray[np.float64], cost: float) -> RpropState:
-    """One iRPROP- step -- a faithful port of the vendored `Rprop.m` (38 LOC).
-
-    etap 1.2 / etam 0.5 / delta0 0.01 (the `:5` rand is DEAD, overwritten at `:6` -- see
-    IMPROVEMENTS) / deltamin 1e-9 / deltamax 1.0. Sign-step with a cost-gated backtrack:
-    on a derivative sign flip the delta shrinks, the weight is rolled back iff the cost
-    rose (prev_cost < cost), and the derivative is zeroed (so next step hits the ==0
-    branch). Pure arithmetic -- no libm.
-    """
-    # legacy: Rprop.m:3-8
-    etap = 1.2
-    etam = 0.5
-    delta0 = 0.01
-    deltamin = 1e-9
-    deltamax = 1.0
-
-    weights = np.array(state.weights, dtype=np.float64, copy=True)
-    derivatives = np.array(grad, dtype=np.float64, copy=True)
-    prev = state.previous_derivatives
-
-    if prev is None or prev.size == 0:
-        # legacy: Rprop.m:10-15 (init branch)
-        delta = delta0 * np.ones_like(weights)
-        deltaweight = -np.sign(derivatives) * delta
-        weights = weights + deltaweight
-    else:
-        # legacy: Rprop.m:16-33
-        delta = np.array(state.delta, dtype=np.float64, copy=True)
-        deltaweight = np.array(state.deltaweight, dtype=np.float64, copy=True)
-        for nn in range(weights.size):
-            product = derivatives[nn] * prev[nn]
-            if product > 0:
-                delta[nn] = min(delta[nn] * etap, deltamax)
-                deltaweight[nn] = -np.sign(derivatives[nn]) * delta[nn]
-                weights[nn] = weights[nn] + deltaweight[nn]
-            elif product < 0:
-                delta[nn] = max(delta[nn] * etam, deltamin)
-                if state.prev_cost < cost:
-                    weights[nn] = weights[nn] - deltaweight[nn]
-                derivatives[nn] = 0.0
-            else:
-                deltaweight[nn] = -np.sign(derivatives[nn]) * delta[nn]
-                weights[nn] = weights[nn] + deltaweight[nn]
-
-    return RpropState(
-        weights=weights,
-        delta=delta,
-        deltaweight=deltaweight,
-        previous_derivatives=derivatives,
-        prev_cost=cost,
-    )
 
 
 # ============================================================================
@@ -612,49 +546,4 @@ def quantum_pso(
         gbest_traj=gbest_traj,
         gbestval_traj=gbestval_traj,
         out=out_final,
-    )
-
-
-@dataclass
-class CmaesResult:
-    """Best-so-far solution from `cmaes_optimize` (a thin `cma`-package wrap, NOT bit-pinned)."""
-
-    x: NDArray[np.float64]
-    fun: float
-    evals: int
-    stop: dict[str, object]
-
-
-def cmaes_optimize(
-    cost_fn: QpsoObjective,
-    x0: NDArray[np.float64],
-    sigma0: float,
-    opts: dict[str, object] | None = None,
-) -> CmaesResult:
-    """CMA-ES via the `cma` pip package -- the alternative outer-optimizer branch of
-    Train_BLSTM.m:1147 (`[X,F,E,STOP,OUT] = cmaes(functname, adim/2*ones(dims,1), adim/3,
-    OPTS, PS, 1)` with `OPTS.EvalParallel='yes'`).
-
-    NOT bit-pinned, and a DIFFERENT lineage than the vendored `cmaes.m`: the legacy `cmaes.m`
-    is Hansen's older MATLAB reference implementation; the `cma` package is Hansen's maintained
-    Python port. Their sampling/recombination RNG and default stop criteria differ, so this
-    wrap targets the same INVOCATION SHAPE and search behaviour, not bit equality. Kept thin;
-    validated by a smoke test, not a golden.
-
-    `EvalParallel='yes'` is honoured by handing the whole `ask()` population to `cost_fn` as a
-    (lambda x D) matrix per generation (one candidate per row)."""
-    import cma  # type: ignore[import-untyped]  # lazy: core dep, but only this branch needs it
-
-    x0_list = np.asarray(x0, dtype=np.float64).reshape(-1).tolist()
-    es = cma.CMAEvolutionStrategy(x0_list, float(sigma0), opts or {})
-    while not es.stop():
-        solutions = es.ask()
-        costs, _ = cost_fn(np.asarray(solutions, dtype=np.float64), 0)  # EvalParallel: whole population
-        es.tell(solutions, [float(c) for c in np.asarray(costs).reshape(-1)])
-    res = es.result
-    return CmaesResult(
-        x=np.asarray(res.xbest, dtype=np.float64),
-        fun=float(res.fbest),
-        evals=int(res.evaluations),
-        stop=dict(es.stop()),
     )

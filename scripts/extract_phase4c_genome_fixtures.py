@@ -150,7 +150,7 @@ def main() -> None:
     octave = _find_octave()
     octave_version = _octave_version(octave)
 
-    # Guard prior phases AND the existing phase4c fixtures (smorms3/rprop/manifest) -- we only
+    # Guard prior phases AND every existing phase4c fixture but ours -- we only
     # write genome_*/fmt_scalar_boundaries files here.
     PHASE4C_SKIP = ("genome_", "fmt_scalar_boundaries")
     before = {ph: _hash_tree(REF_DIR / ph) for ph in PRIOR_PHASES}
