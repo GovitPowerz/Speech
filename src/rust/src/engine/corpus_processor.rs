@@ -129,10 +129,11 @@ impl CorpusProcessor {
         let corpus = Corpus::from_config(&configs[0])?;
         // legacy: :52 _OutputFileName default MultiConfigResults.mat -- read BEFORE
         // the bag ctor clears no keys relevant to it.
-        let output_file_name = configs[0]
-            .get("multiConfigResultsOutputFile")
-            .cloned()
-            .unwrap_or_else(|| "MultiConfigResults.mat".to_string());
+        let output_file_name = get_default::<String>(
+            &configs[0],
+            "multiConfigResultsOutputFile",
+            "MultiConfigResults.mat".into(),
+        )?;
         // legacy: :51 _Processors = BagOfProcessors(configs, _Mode). The bag ctor
         // mutates each config map (key clears :21-23).
         let processors = BagOfProcessors::from_configs(&mut configs)?;

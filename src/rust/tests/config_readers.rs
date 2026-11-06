@@ -4,9 +4,10 @@
 //! grammar (the trailing comma, the `*` repeater). Issue #87: every i32 / bool / String /
 //! usize read, so a parseable prefix with trailing junk (`1O`, `True`) errors naming the key
 //! instead of reading the prefix as the legacy `ss >> val` did (the #32 tightening), and a
-//! padded value trims (an in-memory map, or a quoted TOML string; the `.config` parser trims). One pin per migrated module, driven
-//! through that module's public constructor on a committed fixture; the parsers themselves
-//! are unit-pinned in `legacy_config::{f64_reader_tests, token_reader_tests}`.
+//! padded value trims (an in-memory map, or a quoted TOML string; the `.config` parser
+//! trims). One pin per migrated module, driven through that module's public constructor on
+//! a committed fixture; the parsers themselves are unit-pinned in
+//! `legacy_config::{f64_reader_tests, token_reader_tests}`.
 
 use indexmap::IndexMap;
 use speech::config::NnetSpec;
@@ -234,8 +235,9 @@ fn nnet_spec_reads_the_list_grammar() {
     );
 }
 
-/// Issue #87: `BlstmConfig`'s i16 / bool / i32 reads and the port-only geometry keys take
-/// the family's token parser, the geometry minimum still enforced on top.
+/// Issue #87: `BlstmConfig`'s i16 / bool / i32 reads, the `_Cell_Type` / `_Direction` enums
+/// (through `FromStr`, so the error names the key) and the port-only geometry keys take the
+/// family's token parser, the geometry minimum still enforced on top.
 #[test]
 fn blstm_config_rejects_trailing_junk_on_scalar_keys() {
     let base = load("phase4a/tier2_spectral.config");
@@ -244,6 +246,8 @@ fn blstm_config_rejects_trailing_junk_on_scalar_keys() {
         ("BLSTM_TwoSweeps", "True"),
         ("BLSTM_TargetEnforcementStep", "0.0"),
         ("BLSTM_Forward_IsCellsPeepholesActive", "yes"),
+        ("BLSTM_Cell_Type", "gru"),
+        ("BLSTM_Direction", "backward"),
         ("Mamba_D_State", "16x"),
     ] {
         let err = BlstmConfig::from_legacy(&with(base.clone(), key, bad), "BLSTM")
@@ -339,7 +343,8 @@ fn twin_lid_drivers_reject_trailing_junk_on_scalar_keys() {
 
 /// Issue #87: `FeatureConfig`'s i64 / i32 / bool / String reads take the family's token
 /// parser, and trim: the module's getters were untrimmed (with `nn/blstm.rs`'s `get_bool` /
-/// `get_i16` and the string readers), so a padded in-memory value now reads as every other key's does.
+/// `get_i16` and the string readers), so a padded in-memory value now reads as every other
+/// key's does.
 #[test]
 fn feature_config_reads_scalars_through_the_family() {
     let base = load("phase4a/tier2_spectral.config");

@@ -116,8 +116,10 @@ pub enum CellType {
     Transformer,
 }
 
-impl CellType {
-    fn parse(s: &str) -> Result<CellType> {
+impl std::str::FromStr for CellType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<CellType> {
         match s {
             "lstm" => Ok(CellType::Lstm),
             "slstm" => Ok(CellType::Slstm),
@@ -130,7 +132,9 @@ impl CellType {
             ),
         }
     }
+}
 
+impl CellType {
     /// The config-text spelling. `pub` so the fast/streaming trees can NAME the cell
     /// in their refusals (`fast::stream::StreamingSession::new`, the Twin's regime rule).
     pub fn as_str(self) -> &'static str {
@@ -177,8 +181,12 @@ impl Direction {
             Direction::Forward => "forward",
         }
     }
+}
 
-    fn parse(s: &str) -> Result<Direction> {
+impl std::str::FromStr for Direction {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Direction> {
         match s {
             "bidirectional" => Ok(Direction::Bidirectional),
             "forward" => Ok(Direction::Forward),
@@ -443,14 +451,8 @@ impl BlstmConfig {
 
         // Port-only structural keys (spec S6). Absent means the legacy shape, so
         // every committed config decodes exactly as before.
-        let cell_type = match map.get(&k("_Cell_Type")) {
-            Some(v) => CellType::parse(v.trim())?,
-            None => CellType::Lstm,
-        };
-        let direction = match map.get(&k("_Direction")) {
-            Some(v) => Direction::parse(v.trim())?,
-            None => Direction::Bidirectional,
-        };
+        let cell_type = get_default(map, &k("_Cell_Type"), CellType::Lstm)?;
+        let direction = get_default(map, &k("_Direction"), Direction::Bidirectional)?;
         // UNPREFIXED by design (spec S6: one mamba geometry per config). Read
         // unconditionally so a malformed value is caught even on a non-mamba config;
         // the parsed struct is inert unless the cell type asks for it.
