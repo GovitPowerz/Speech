@@ -1,16 +1,16 @@
-mutation: training_policy algo 6 saves the Twin's LID net without the LID_ prefix (phase4b item 4 too)
+mutation: the best-pack capture hands every net the first net's folded derivatives, so the Twin's LID pack takes the SAD fold (before #136: training_policy saved the LID net without the LID_ prefix; phase4b item 4 too)
 catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
-index a83e263..9e11f9a 100644
+index 6535193..916aa6d 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -216,7 +216,7 @@ pub(crate) fn training_policy(
-         // the LID pair.
-         6 => Some((
-             SaveCriterion::CostPlusCostLid,
--            &[(CostPair::Seg, ""), (CostPair::Lid, "LID_")],
-+            &[(CostPair::Seg, ""), (CostPair::Lid, "")],
-         )),
-         _ => None,
-     }
+@@ -663,7 +663,7 @@ impl BagOfProcessors {
+             .enumerate()
+             .map(|(i, net)| BestPack {
+                 weights: net.get_weights(),
+-                derivs: derivs[&pos][i].clone(),
++                derivs: derivs[&pos][0].clone(),
+                 fires,
+             })
+             .collect();
