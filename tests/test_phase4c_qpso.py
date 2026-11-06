@@ -25,10 +25,11 @@ from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
-from speech.optimizers import QpsoObjective, QpsoParams, QpsoResult, TableRng, levy_stable_cms, quantum_pso
+from speech.optimizers import QpsoObjective, QpsoParams, QpsoResult, levy_stable_cms, quantum_pso
 from speech.weight_bridge import read_bin
 
 from tests._libm_gate import assert_f64_close
+from tests.oracles.optimizers import TableRng
 
 PHASE4C = Path(__file__).resolve().parent / "reference_data" / "phase4c"
 MANIFEST = PHASE4C / "manifest.json"

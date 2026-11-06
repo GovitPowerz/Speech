@@ -11,7 +11,10 @@ import math
 from pathlib import Path
 
 import numpy as np
-from speech.features_oracle import (
+from speech.weight_bridge import read_bin
+
+from tests._libm_gate import assert_f32_close as _assert_f32_close
+from tests.oracles.features_oracle import (
     fmath_log_oracle,
     ltsv_oracle,
     regression_deltas_oracle,
@@ -19,9 +22,6 @@ from speech.features_oracle import (
     stats_merge_oracle,
     tdc_oracle,
 )
-from speech.weight_bridge import read_bin
-
-from tests._libm_gate import assert_f32_close as _assert_f32_close
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "reference_data" / "phase1"
 

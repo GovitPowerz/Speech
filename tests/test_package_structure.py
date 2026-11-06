@@ -13,7 +13,6 @@ MODULES = [
     "speech.optimizers",
     "speech.scoring",
     "speech.batching",
-    "speech.nn_reference",
     "speech.drivers.init",
     "speech.drivers.train",
     "speech.drivers.retrain",

@@ -34,10 +34,11 @@ from speech.batching import (
     WorstCaseGroup,
     create_batches,
     get_new_batch,
-    get_worst_and_best,
     read_listing,
 )
 from speech.weight_bridge import read_bin
+
+from tests.oracles.batching import get_worst_and_best
 
 PHASE4C = Path(__file__).resolve().parent / "reference_data" / "phase4c"
 MANIFEST = PHASE4C / "manifest.json"

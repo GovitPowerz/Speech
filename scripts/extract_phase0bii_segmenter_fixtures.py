@@ -16,9 +16,12 @@ Usage: uv run python scripts/extract_phase0bii_segmenter_fixtures.py
 """
 
 import json
+import sys
 from pathlib import Path
 
-from speech.scoring import update_segmentation_oracle
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests.oracles.scoring import update_segmentation_oracle  # noqa: E402
 
 OUT = Path("tests/reference_data/phase0bii/update_seg_cases.json")
 
