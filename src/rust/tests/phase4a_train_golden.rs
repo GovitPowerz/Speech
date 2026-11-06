@@ -11,7 +11,7 @@
 //!
 //!   - the per-epoch 33,671-weight vectors (`tier2_weights_epoch{0..4}.bin`) --
 //!     canary-gated per element (the NN chain is libm-bearing);
-//!   - the 5 `.mat` variables vs the converted fixtures (id/count columns strict,
+//!   - the result matrix and the four epoch arrays vs the converted fixtures (id/count columns strict,
 //!     timing col 6 masked);
 //!   - the `bestNNWeight` artifact split (weights Nx1 + derivs Nx2, io::binary);
 //!   - the tier-2 VRCTS bytes (final epoch's segmentation);
@@ -36,7 +36,7 @@ use ndarray::Array2;
 
 use common::{
     assert_matrix, assert_oracle_eq_f64, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a,
-    mat_var_matrix,
+    named_epoch_mems,
 };
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -119,13 +119,13 @@ fn manifest_non_vacuity() -> (i64, i64, i64) {
     )
 }
 
-// `mat_var_matrix`/`assert_matrix` are shared via `common` (hoisted from four
+// `named_epoch_mems`/`assert_matrix` are shared via `common` (hoisted from four
 // copy-pasted phase4a test files; see `tests/common/mod.rs`).
 
 // === tier2_train_epoch_weights_golden ========================================
 // The whole tier-2 train replay: run, then compare every observable against the
 // committed fixtures. One test (one expensive run, ~15s) covering the epoch
-// weights, the .mat, the bestNNWeight artifacts, the VRCTS bytes, and the
+// weights, the result matrix and epoch arrays, the bestNNWeight artifacts, the VRCTS bytes, and the
 // non-vacuity trajectory.
 #[test]
 fn tier2_train_epoch_weights_golden() {
@@ -200,17 +200,16 @@ fn tier2_train_epoch_weights_golden() {
     );
     assert!(fired >= 1 && skipped >= 1, "gate must fire AND skip");
 
-    // --- The 5 .mat variables vs the converted fixtures. -----------------------
+    // --- The result matrix and the four epoch arrays (the `.mat` variables, read
+    // off the engine since issue #134) vs the converted fixtures. ---------------
     // MultiConfigResults: id cols 0-2 + word/classif counts strict-ish -- id cols
     // strict, timing col 6 masked, the rest canary-gated (the NN cost chain).
-    let bytes = std::fs::read("tier2_spectral.mat").unwrap();
-    let got = mat_var_matrix(&bytes, "MultiConfigResults").unwrap();
+    let got = cp.results_matrix();
     let want = load_bin_phase4a("tier2_spectral_MultiConfigResults.bin");
-    assert_matrix(&got, &want, &[0, 1, 2], &[6], "MultiConfigResults");
-    for name in ["CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"] {
-        let got = mat_var_matrix(&bytes, name).unwrap();
+    assert_matrix(got, &want, &[0, 1, 2], &[6], "MultiConfigResults");
+    for (name, got) in named_epoch_mems(cp.epoch_mems()) {
         let want = load_bin_phase4a(&format!("tier2_spectral_{name}.bin"));
-        assert_matrix(&got, &want, &[], &[], name);
+        assert_matrix(got, &want, &[], &[], name);
     }
 
     // --- bestNNWeight artifact split (the LAST gate fire = the final eval): the

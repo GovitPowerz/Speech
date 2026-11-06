@@ -250,8 +250,7 @@ fn lanes_n1_equals_sequential() {
     // to 1). Capture ResultsE.
     let mut cp = CorpusProcessor::new(vec![cfg.clone()], mode(ModeKind::Solo)).unwrap();
     cp.run().unwrap();
-    let engine_bytes = std::fs::read("MultiConfigResults.mat").unwrap();
-    let engine_results = mat_var_matrix(&engine_bytes, "MultiConfigResults").unwrap();
+    let engine_results = cp.results_matrix();
 
     // The hand-sequential oracle (`run_epoch_sequential_oracle`): build ONE bag and
     // walk every file j in ascending order through segmentation_function on that

@@ -11,7 +11,7 @@
 //!
 //! - `twin_train_*`: the Mode-7 phSeq 2-file TRAIN replay (algo 6) -- BOTH nets'
 //!   per-epoch post-saveAndUpdate weights, the cost+costLID best-cost gate
-//!   fire/skip trajectory (measured, manifest-pinned), the 5 `.mat` variables,
+//!   fire/skip trajectory (measured, manifest-pinned), the result matrix and the four epoch arrays,
 //!   the bestNNWeight artifact split incl. saveWeightsLID's `LID_` prefix, and
 //!   the save_and_update confusion capture (errorPercLID, display-only in the
 //!   legacy).
@@ -38,6 +38,7 @@ use ndarray::Array2;
 
 use common::{
     assert_matrix, assert_oracle_eq_f64, fixture_phase4b, load_bin_phase4b, mat_var_matrix,
+    named_epoch_mems,
 };
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -149,7 +150,7 @@ fn parse_bin(b: &[u8]) -> Array2<f64> {
 // === twin_train_epoch_weights_golden =========================================
 // The whole Mode-7 train replay at N=1: run, then compare every observable
 // against the committed fixtures. One test (one run) covering BOTH nets' epoch
-// weights, the measured gate trajectory, the .mat, the bestNNWeight artifacts
+// weights, the measured gate trajectory, the result matrix and epoch arrays, the bestNNWeight artifacts
 // (incl. the LID_ prefix), and the confusion capture.
 #[test]
 fn twin_train_epoch_weights_golden() {
@@ -217,25 +218,24 @@ fn twin_train_epoch_weights_golden() {
         assert_oracle_eq_f64(bc[e], want.as_f64().unwrap(), &format!("best_cost[{e}]"));
     }
 
-    // --- The 5 .mat variables vs the converted fixtures (ids strict, timing
-    // col 6 masked, everything else canary-gated). The algo-6 row width is
+    // --- The result matrix and the four epoch arrays (the `.mat` variables, read
+    // off the engine since issue #134) vs the converted fixtures (ids strict,
+    // timing col 6 masked, everything else canary-gated). The algo-6 row width is
     // 18 + classNb(2) = 20 -> 23 ResultsE cols; the CONFUSION columns (19/20)
     // are value-compared like every other column. ------------------------------
-    let bytes = std::fs::read("twin_train.mat").unwrap();
-    let got = mat_var_matrix(&bytes, "MultiConfigResults").unwrap();
+    let got = cp.results_matrix();
     let want = load_bin_phase4b("twin_train_MultiConfigResults.bin");
     assert_eq!(got.ncols(), 23, "3 id cols + the 20-col algo-6 row");
     assert_matrix(
-        &got,
+        got,
         &want,
         &[0, 1, 2],
         &[6],
         "twin_train MultiConfigResults",
     );
-    for name in ["CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"] {
-        let got = mat_var_matrix(&bytes, name).unwrap();
+    for (name, got) in named_epoch_mems(cp.epoch_mems()) {
         let want = load_bin_phase4b(&format!("twin_train_{name}.bin"));
-        assert_matrix(&got, &want, &[], &[], name);
+        assert_matrix(got, &want, &[], &[], name);
     }
 
     // --- bestNNWeight artifact split, BOTH nets: the LID pair carries
@@ -331,9 +331,7 @@ fn twin_train_ns_costlid_gate_live() {
 
     // The mems hold the PRE-gate costLID (written at :457-460, BEFORE :465):
     // real values, not -1.0. The stdout-measured post-gate values were -1.0.
-    let bytes = std::fs::read("twin_train_ns.mat").unwrap();
-    let cost_lid_mem = mat_var_matrix(&bytes, "CostLIDMem").unwrap();
-    for v in cost_lid_mem.iter() {
+    for v in cp.epoch_mems().cost_lid.iter() {
         assert!(
             *v != -1.0,
             "CostLIDMem must carry the PRE-gate costLID (order :457-460 then :465)"

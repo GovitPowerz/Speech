@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 use indexmap::IndexMap;
 
-use common::{assert_matrix, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a, read_mat_var};
+use common::{assert_matrix, assert_vrcts_eq, fixture_phase4a, load_bin_phase4a, named_epoch_mems};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus::Corpus;
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -94,13 +94,13 @@ fn mode(kind: ModeKind) -> Mode {
     }
 }
 
-// `read_mat_var`/`assert_matrix` are shared via `common` (hoisted from four
+// `named_epoch_mems`/`assert_matrix` are shared via `common` (hoisted from four
 // copy-pasted phase4a test files; see `tests/common/mod.rs`).
 
 // === solo_tdc_matches ========================================================
-// CorpusProcessor::new(tier1_tdc.config with epochs->0, Mode::Solo).run(); read back
-// our .mat and compare MultiConfigResults (mask col 6), CostMem/BadClassifMem vs the
-// converted fixtures. TDC is libm-bearing -> canary-gated compare; the id columns
+// CorpusProcessor::new(tier1_tdc.config with epochs->0, Mode::Solo).run(); read the
+// result matrix and the epoch arrays off the engine (issue #134) and compare
+// MultiConfigResults (mask col 6), CostMem/BadClassifMem vs the converted fixtures. TDC is libm-bearing -> canary-gated compare; the id columns
 // (file/conf/chan = cols 0/1/2) are strict.
 #[test]
 fn solo_tdc_matches() {
@@ -125,22 +125,20 @@ fn solo_tdc_matches() {
     let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::Solo)).unwrap();
     cp.run().unwrap();
 
-    let bytes = std::fs::read("solo_tdc.mat").unwrap();
-    let got_mcr = read_mat_var(&bytes, "MultiConfigResults");
+    let got_mcr = cp.results_matrix();
     let want_mcr = load_bin_phase4a("solo_tdc_MultiConfigResults.bin");
     // cols 0/1/2 = file/conf/chan ids (strict); col 6 = timing (masked).
     assert_matrix(
-        &got_mcr,
+        got_mcr,
         &want_mcr,
         &[0, 1, 2],
         &[6],
         "solo MultiConfigResults",
     );
 
-    for var in ["CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"] {
-        let got = read_mat_var(&bytes, var);
+    for (var, got) in named_epoch_mems(cp.epoch_mems()) {
         let want = load_bin_phase4a(&format!("solo_tdc_{var}.bin"));
-        assert_matrix(&got, &want, &[], &[], &format!("solo {var}"));
+        assert_matrix(got, &want, &[], &[], &format!("solo {var}"));
     }
 
     // Non-vacuity: 3 files x 2 channels = 6 rows.
@@ -148,9 +146,9 @@ fn solo_tdc_matches() {
 }
 
 // === train_ltsv_two_epochs_matches ===========================================
-// epochs=2 -> train() writes topRows(epoch+1) each epoch; the final epoch is 3 so the
-// last saveResults writes topRows(4). CostMem/BadClassifMem are (epochs+2)x1 = 4x1;
-// all rows compared. Non-vacuity: LTSV has NO weight updates, so the mem rows are
+// epochs=2 -> train() fills one mem row per epoch; the final epoch is 3, so
+// CostMem/BadClassifMem are (epochs+2)x1 = 4x1 with every row written; all rows
+// compared. Non-vacuity: LTSV has NO weight updates, so the mem rows are
 // EXPECTED IDENTICAL across epochs -- asserted explicitly below (tier-1 pins the
 // loop/aggregation plumbing; weight evolution is tier-2/Task 9).
 #[test]
@@ -172,31 +170,32 @@ fn train_ltsv_two_epochs_matches() {
     let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::Multi)).unwrap();
     cp.run().unwrap();
 
-    let bytes = std::fs::read("train_ltsv.mat").unwrap();
-
-    let got_mcr = read_mat_var(&bytes, "MultiConfigResults");
+    let got_mcr = cp.results_matrix();
     let want_mcr = load_bin_phase4a("train_ltsv_MultiConfigResults.bin");
     assert_matrix(
-        &got_mcr,
+        got_mcr,
         &want_mcr,
         &[0, 1, 2],
         &[6],
         "train MultiConfigResults",
     );
 
-    let got_cost = read_mat_var(&bytes, "CostMem");
+    let mems = cp.epoch_mems();
+    let got_cost = &mems.cost;
     let want_cost = load_bin_phase4a("train_ltsv_CostMem.bin");
     assert_eq!(got_cost.dim(), (4, 1), "train CostMem (epochs+2)x1 = 4x1");
-    assert_matrix(&got_cost, &want_cost, &[], &[], "train CostMem");
+    assert_matrix(got_cost, &want_cost, &[], &[], "train CostMem");
 
-    let got_bad = read_mat_var(&bytes, "BadClassifMem");
+    let got_bad = &mems.bad_classif;
     let want_bad = load_bin_phase4a("train_ltsv_BadClassifMem.bin");
-    assert_matrix(&got_bad, &want_bad, &[], &[], "train BadClassifMem");
+    assert_matrix(got_bad, &want_bad, &[], &[], "train BadClassifMem");
 
-    for var in ["CostLIDMem", "BadClassifLIDMem"] {
-        let got = read_mat_var(&bytes, var);
+    for (var, got) in [
+        ("CostLIDMem", &mems.cost_lid),
+        ("BadClassifLIDMem", &mems.bad_classif_lid),
+    ] {
         let want = load_bin_phase4a(&format!("train_ltsv_{var}.bin"));
-        assert_matrix(&got, &want, &[], &[], &format!("train {var}"));
+        assert_matrix(got, &want, &[], &[], &format!("train {var}"));
     }
 
     // Non-vacuity (Phase 3 standard): LTSV (Algo 2) is NN-free -- no weight updates
@@ -256,12 +255,11 @@ fn multiconfig_matches() {
     let mut cp = CorpusProcessor::new(vec![cfg_tdc, cfg_ltsv], mode(ModeKind::Multi)).unwrap();
     cp.run().unwrap();
 
-    let bytes = std::fs::read("multiconfig.mat").unwrap();
-    let got_mcr = read_mat_var(&bytes, "MultiConfigResults");
+    let got_mcr = cp.results_matrix();
     let want_mcr = load_bin_phase4a("multiconfig_MultiConfigResults.bin");
     assert_eq!(got_mcr.dim(), (12, 21), "3 files x 2 confs x 2 channels");
     assert_matrix(
-        &got_mcr,
+        got_mcr,
         &want_mcr,
         &[0, 1, 2],
         &[6],
@@ -286,12 +284,11 @@ fn multiconfig_matches() {
         );
     }
 
-    for var in ["CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"] {
-        let got = read_mat_var(&bytes, var);
+    for (var, got) in named_epoch_mems(cp.epoch_mems()) {
         let want = load_bin_phase4a(&format!("multiconfig_{var}.bin"));
         // 1 epoch x 2 confs.
         assert_eq!(got.dim(), (1, 2), "multiconfig {var} 1x2");
-        assert_matrix(&got, &want, &[], &[], &format!("multiconfig {var}"));
+        assert_matrix(got, &want, &[], &[], &format!("multiconfig {var}"));
     }
 }
 
