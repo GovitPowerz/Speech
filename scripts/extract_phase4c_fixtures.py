@@ -1,4 +1,4 @@
-"""Run the Phase 4c Octave harness stages and write the SMORMS3 + Rprop + batching +
+"""Run the Phase 4c Octave harness stages and write the SMORMS3 + batching +
 CheckGrad + MaskingValidation bit-pin fixtures.
 
 This is the MATLAB-side analog of `scripts/extract_phase4b_fixtures.py` (which drives
@@ -22,9 +22,6 @@ one Octave-compat accommodation -- the SMORMS3 empty-varargin lvalue miscount):
             step-1 MMS ~ eps=1e-16 (same order, not rounding noise), genuinely
             exercising the two `+eps` guards (SMORMS3.m:335) that the main/round-trip
             sequences leave inactive (MMS >> eps there).
-  rprop   : Rprop.m (function) per-step state over a crafted derivative/cost sequence
-            exercising every branch (grow / shrink+backtrack / plain) -- pure arithmetic,
-            STRICT bits everywhere.
   batching: CreateBatches.m + GetNewBatch.m (TIER 1) + the FALLBACK-TIER
             getworstandbest_transcribed.m (verbatim transcription of getCases.m's private
             getWorstAndBest subfunction -- unreachable standalone). randperm is SHADOWED
@@ -112,15 +109,6 @@ SMORMS3_SHAPES = {
 # "genuinely active" band the non-vacuity check below requires step-1 MMS to fall in.
 SMORMS3_EPS = 1e-16
 EPS_GUARD_RATIO_BAND = (1e-2, 1e2)  # within 2 orders of magnitude of SMORMS3_EPS
-RPROP_SHAPES = {
-    "deriv_script": (5, 6),
-    "cost_script": (1, 6),
-    "weights0": (5, 1),
-    "weights_traj": (5, 6),
-    "delta_traj": (5, 6),
-    "deltaweight_traj": (5, 6),
-    "derivout_traj": (5, 6),
-}
 BATCHING_SHAPES = {
     "single_index": (6, 1),
     "single_worst_index": (1, 1),
@@ -205,7 +193,6 @@ STAGE_LINE_RE = re.compile(
     r"eps_M=(?P<epsM>\d+) eps_num_steps=(?P<epsns>\d+)$",
     re.MULTILINE,
 )
-RPROP_LINE_RE = re.compile(r"^OCTAVE_STAGE rprop N=(?P<N>\d+) K=(?P<K>\d+)$", re.MULTILINE)
 BATCHING_LINE_RE = re.compile(
     r"^OCTAVE_STAGE batching single_n=(?P<single_n>\d+) multi_nb_n=(?P<multi_nb_n>\d+) "
     r"sub_n=(?P<sub_n>\d+) degenerate_batch_len=(?P<deg_len>\d+)$",
@@ -312,7 +299,6 @@ def main() -> None:
         qpso_table = np.random.default_rng(QPSO_TABLE_SEED).random(QPSO_TABLE_N)
         _write_bin(tmp_dir / "qpso_random_table.bin", qpso_table.reshape(QPSO_TABLE_N, 1))
         smorms3_stdout = _run_stage(octave, "smorms3", tmp_dir)
-        rprop_stdout = _run_stage(octave, "rprop", tmp_dir)
         batching_stdout = _run_stage(octave, "batching", tmp_dir)
         checkgrad_stdout = _run_stage(octave, "checkgrad", tmp_dir)
         masking_stdout = _run_stage(octave, "masking", tmp_dir)
@@ -321,9 +307,6 @@ def main() -> None:
         sm = STAGE_LINE_RE.search(smorms3_stdout)
         if not sm:
             raise SystemExit("OCTAVE_STAGE smorms3 line missing from stdout")
-        rm = RPROP_LINE_RE.search(rprop_stdout)
-        if not rm:
-            raise SystemExit("OCTAVE_STAGE rprop line missing from stdout")
         bm = BATCHING_LINE_RE.search(batching_stdout)
         if not bm:
             raise SystemExit("OCTAVE_STAGE batching line missing from stdout")
@@ -341,13 +324,10 @@ def main() -> None:
         sm_dims = (int(sm["M"]), int(sm["ns"]), int(sm["rtM"]), int(sm["rtns"]), int(sm["epsM"]), int(sm["epsns"]))
         if sm_dims != (7, 12, 3, 4, 1, 3):
             raise SystemExit(f"smorms3 stage dims {sm_dims} != (7,12,3,4,1,3)")
-        if (int(rm["N"]), int(rm["K"])) != (5, 6):
-            raise SystemExit(f"rprop stage dims {(rm['N'], rm['K'])} != (5,6)")
         if (int(cgm["n"]), int(cgm["Kw"])) != (107, 53):
             raise SystemExit(f"checkgrad stage dims {(cgm['n'], cgm['Kw'])} != (107,53)")
 
         _convert_stage(tmp_dir / "smorms3.mat", "smorms3", SMORMS3_SHAPES, tmp_dir)
-        _convert_stage(tmp_dir / "rprop.mat", "rprop", RPROP_SHAPES, tmp_dir)
         _convert_stage(tmp_dir / "batching.mat", "batching", BATCHING_SHAPES, tmp_dir)
         _convert_stage(tmp_dir / "checkgrad.mat", "checkgrad", CHECKGRAD_SHAPES, tmp_dir)
         _convert_stage(tmp_dir / "masking.mat", "masking", MASKING_SHAPES, tmp_dir)
@@ -384,16 +364,6 @@ def main() -> None:
                 f"smorms3 eps-guard step-1 MMS={eps_step1_mms} not within 2 orders of magnitude of "
                 f"eps={SMORMS3_EPS} (ratio={eps_ratio}) -- eps-guard fixture would be vacuous"
             )
-
-        # RPROP: both the etap-grow (>0.01) and etam-shrink (<0.01) branches fired, and the
-        # sign-flip derivative-zeroing produced a 0 where the input derivative was nonzero.
-        dr, dc, delta = _read_bin(tmp_dir / "rprop_delta_traj.bin")
-        if not (max(delta) > 0.01 and min(delta) < 0.01):
-            raise SystemExit(f"rprop delta_traj [{min(delta)}, {max(delta)}] did not span the 0.01 delta0 both ways")
-        _, _, deriv_in = _read_bin(tmp_dir / "rprop_deriv_script.bin")
-        _, _, deriv_out = _read_bin(tmp_dir / "rprop_derivout_traj.bin")
-        if not any(o == 0.0 and i != 0.0 for i, o in zip(deriv_in, deriv_out, strict=True)):
-            raise SystemExit("rprop derivout never zeroed a nonzero derivative -- the <0 sign-flip branch never fired")
 
         # BATCHING: the clobber case really did lose class-0's aggregate (Cases(3) ends up
         # holding class-2's data, [6,5] 1-based -- NOT class-0's [2,1]).
@@ -477,12 +447,12 @@ def main() -> None:
 
         manifest = {
             "text": (
-                "Phase 4c Task 6: the Octave harness foundation + the SMORMS3/Rprop bit-pins. "
-                "GNU Octave executes the VENDORED legacy .m sources (legacy/Optimizer_V6.2.2/"
-                "functions/{SMORMS3,Rprop}.m) to dump per-step optimizer state trajectories -- the "
-                "MATLAB-side analog of the C++ oracle harness. LOCAL-ONLY dep (brew install octave); "
-                "CI consumes only these committed fixtures. TIER 1 (real classdef / real function) for "
-                "BOTH stages; the sole Octave accommodation is one value-neutral dummy varargin passed "
+                "Phase 4c Task 6: the Octave harness foundation + the SMORMS3 bit-pin (the Rprop.m "
+                "pin that shared it was retired in issue #103). GNU Octave executes the VENDORED legacy "
+                ".m source (legacy/Optimizer_V6.2.2/functions/SMORMS3.m) to dump per-step optimizer "
+                "state trajectories -- the MATLAB-side analog of the C++ oracle harness. LOCAL-ONLY dep "
+                "(brew install octave); CI consumes only these committed fixtures. TIER 1 (real "
+                "classdef); the sole Octave accommodation is one value-neutral dummy varargin passed "
                 "to SMORMS3 (the empty-cell lvalue cs-list miscount at SMORMS3.m:313; the gradient "
                 "depends only on eval_count and the update math is untouched)."
             ),
@@ -526,21 +496,6 @@ def main() -> None:
                     "M": int(sm["epsM"]),
                     "num_steps": int(sm["epsns"]),
                 },
-            },
-            "rprop": {
-                "text": (
-                    "Rprop.m (iRPROP-, 38 LOC) per-step state over a crafted 5-weight x 6-step "
-                    "derivative/cost sequence. etap 1.2 / etam 0.5 / delta0 0.01 (the :5 rand is DEAD "
-                    "-- overwritten at :6, see IMPROVEMENTS) / deltamin 1e-9 / deltamax 1.0. All "
-                    "branches exercised: same-sign delta*=etap grow (delta_traj max 0.020736 = "
-                    "0.01*1.2^4), sign-flip delta*=etam shrink (delta_traj min 0.0025 = 0.01*0.5^2) "
-                    "+ the cost-gated backtrack (prev_cost<cost) + derivative-zeroing (derivout has "
-                    "0 where deriv_script was nonzero), and the plain ==0 step. PURE arithmetic (sign, "
-                    "min/max, mul, add -- no libm) -> STRICT bits on every platform."
-                ),
-                "N": int(rm["N"]),
-                "K": int(rm["K"]),
-                "shapes": {f"rprop_{v}.bin": list(s) for v, s in RPROP_SHAPES.items()},
             },
             "batching": {
                 "text": (
@@ -660,7 +615,6 @@ def main() -> None:
         # Commit: every check passed -> copy the .bin fixtures into PHASE4C_DIR.
         for stage, shapes in (
             ("smorms3", SMORMS3_SHAPES),
-            ("rprop", RPROP_SHAPES),
             ("batching", BATCHING_SHAPES),
             ("checkgrad", CHECKGRAD_SHAPES),
             ("masking", MASKING_SHAPES),
@@ -676,7 +630,7 @@ def main() -> None:
 
     print(
         f"OK: phase4c fixtures (octave {octave_version}; smorms3 M=7 steps=12 lrate cap@step8, "
-        f"rt offset nonzero; rprop 5x6 delta span [{min(delta)}, {max(delta)}]; "
+        f"rt offset nonzero; "
         f"batching single/multi_nb/sub/clobber/degenerate + getWorstAndBest; "
         f"checkgrad Kw=53 (2 normalize-tail entries always 0); masking pass=0 fail=1; "
         f"qpso D=3 ps=4 me=3 cursor_end={cursor_line} min_gap={min_gap:.3g}), "

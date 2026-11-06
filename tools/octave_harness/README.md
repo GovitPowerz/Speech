@@ -25,7 +25,6 @@ here `addpath` the vendored sources and **call** them, never modify them.
 |------|------|
 | `run_stage.m` | Dispatcher: `run_stage(stage, out_dir)` -- adds this dir + the vendored `functions/` dir to the path, then runs the named stage into `out_dir`. |
 | `stage_smorms3.m` | Drives the REAL `SMORMS3.m` classdef over scripted gradient sequences; dumps per-step `theta/MMS/stepRate/delta/lrate` + the round-trip variant. |
-| `stage_rprop.m` | Drives the REAL `Rprop.m` function over a crafted derivative/cost sequence; dumps per-step `weights/delta/deltaweight/derivatives`. |
 | `smorms3_f_df.m` | The injected SMORMS3 objective (scripted gradient + `theta_out` round-trip offset). |
 | `stage_vec2struct.m` | Drives the REAL `vec2struct.m` (+ `printConfig.m`) over six algo/mask/PS cases; dumps the genome<->config bijection goldens. |
 | `stage_computecost.m` | **FALLBACK-TIER** transcription of the `ComputeCost.m` cost-assembly lines (`:354-652`); drives the balance-law 0/3/4/5/10 error + cost, deriv averaging, and L2 over the committed 4a/4b MultiConfigResults fixtures + crafted variants. |
@@ -40,7 +39,7 @@ octave-cli --no-gui --quiet --path tools/octave_harness \
   --eval "run_stage('smorms3', '/tmp/out')"
 ```
 
-The extractors (`scripts/extract_phase4c_fixtures.py` for smorms3/rprop,
+The extractors (`scripts/extract_phase4c_fixtures.py` for smorms3,
 `scripts/extract_phase4c_genome_fixtures.py` for vec2struct,
 `scripts/extract_phase4c_computecost_fixtures.py` for computecost) run the stages into a
 tempdir, convert the `.mat` dumps to `.bin` (dropping the MAT-v7 timestamp header, so
@@ -49,9 +48,9 @@ prior-phase (and prior-phase4c) fixtures, and commit the `.bin` + `manifest.json
 
 ## Fidelity tiers
 
-The smorms3/rprop/vec2struct stages are **TIER 1**: the real vendored classdef/function is
+The smorms3/vec2struct stages are **TIER 1**: the real vendored classdef/function is
 exercised unchanged (real ctor, real `optimization_step`, real `f_df_wrapper`, real update
-math for SMORMS3; the real function for Rprop; the real `vec2struct`/`printConfig`).
+math for SMORMS3; the real `vec2struct`/`printConfig`).
 
 `stage_computecost.m` is the **FALLBACK TIER** (the MATLAB analog of the C++ harness's
 "reimpl-swap"): `ComputeCost.m`'s top half shells out to the engine

@@ -1,16 +1,16 @@
-"""Phase 4c Task 6: SMORMS3 + Rprop bit-pins against the Octave-executed vendored .m.
+"""Phase 4c Task 6: the SMORMS3 bit-pin against the Octave-executed vendored .m.
 
 The goldens (`tests/reference_data/phase4c/`) are per-step optimizer state trajectories
-dumped by GNU Octave running the REAL `legacy/Optimizer_V6.2.2/functions/{SMORMS3,Rprop}.m`
+dumped by GNU Octave running the REAL `legacy/Optimizer_V6.2.2/functions/SMORMS3.m`
 (see `scripts/extract_phase4c_fixtures.py`). These tests replay the identical scripted
-gradient/derivative sequences through the Python port and compare per-step state.
+gradient sequences through the Python port and compare per-step state. (The Rprop.m pin
+that shared this file was retired in issue #103.)
 
 Per-field libm status (the CROSS-LIBM rule, `tests/_libm_gate.py`):
   - SMORMS3 `mms`/`step_rate`/`delta`/`lrate`: PURE arithmetic (EMA + mul + add + min/max),
     STRICT bits on every platform.
   - SMORMS3 `theta`/`dtheta`: traverse `sqrt(MMS)` (SMORMS3.m:335), so compared with the
     canary-gated `assert_f64_close` (exact on the oracle env; <=4 ULP off it).
-  - Rprop: PURE arithmetic (sign, min/max, mul, add), STRICT bits everywhere.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
-from speech.optimizers import RpropState, Smorms3, rprop_step
+from speech.optimizers import Smorms3
 from speech.weight_bridge import read_bin
 
 from tests._libm_gate import assert_f64_close
@@ -229,34 +229,3 @@ def test_smorms3_optimize_returns_original_cell_format() -> None:
     for got, want, name in ((result[0], cell0_g, "cell0"), (result[1], cell1_g, "cell1")):
         for idx in range(got.size):
             assert_f64_close(float(got.flatten(order="F")[idx]), float(want.flatten(order="F")[idx]), f"{name}[{idx}]")
-
-
-def test_rprop_sequence_bit_exact() -> None:
-    """Rprop.m per-step weights/delta/deltaweight/derivatives over the crafted 5x6 sequence.
-    STRICT bits everywhere (pure arithmetic). Exercises grow (delta*=etap), shrink+backtrack
-    (delta*=etam, prev_cost<cost -> weight backtrack, derivative zeroing), and the plain step."""
-    deriv = _load("rprop_deriv_script")  # (5, 6)
-    cost = _load("rprop_cost_script").reshape(-1)  # (6,)
-    w0 = _load("rprop_weights0").reshape(-1)  # (5,)
-    w_g = _load("rprop_weights_traj")
-    delta_g = _load("rprop_delta_traj")
-    dw_g = _load("rprop_deltaweight_traj")
-    dout_g = _load("rprop_derivout_traj")
-
-    n = w0.shape[0]
-    state = RpropState(
-        weights=w0.copy(),
-        delta=np.zeros(n),
-        deltaweight=np.zeros(n),
-        previous_derivatives=None,
-        prev_cost=0.0,
-    )
-    for s in range(deriv.shape[1]):
-        state = rprop_step(state, deriv[:, s], float(cost[s]))
-        _assert_bits(state.weights, w_g[:, s], f"weights step {s + 1}")
-        _assert_bits(state.delta, delta_g[:, s], f"delta step {s + 1}")
-        _assert_bits(state.deltaweight, dw_g[:, s], f"deltaweight step {s + 1}")
-        assert state.previous_derivatives is not None
-        _assert_bits(state.previous_derivatives, dout_g[:, s], f"derivout step {s + 1}")
-    # Non-vacuity: the sign-flip <0 branch zeroed at least one nonzero input derivative.
-    assert np.any((dout_g == 0.0) & (deriv != 0.0)), "no derivative-zeroing observed -- <0 branch never fired"

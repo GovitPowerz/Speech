@@ -1,13 +1,13 @@
 """Optimizer zoo for NN training and DSP-hyperparameter search.
 
-Ported from legacy MATLAB: SMORMS3.m (wired), Rprop.m (wired), QuantumPSO.m (wired --
-bespoke hand-port, do NOT swap for pymoo). Adam.m/RMSprop.m/sfo.m/pso_Trelea_vectorized.m
-are EXCLUDED (never wired in legacy, YAGNI per the Phase 4c spec); cmaes.m's `cma`-package
-stand-in (a different lineage, never bit-pinned, never wired by a driver) was retired in
-issue #103; BackPropagation.m's inner-loop contract is implemented by
-`drivers/train.py::_backprop_inner`. See design spec section 6.
+Ported from legacy MATLAB: SMORMS3.m (wired), QuantumPSO.m (wired -- bespoke hand-port,
+do NOT swap for pymoo). Adam.m/RMSprop.m/sfo.m/pso_Trelea_vectorized.m are EXCLUDED (never
+wired in legacy, YAGNI per the Phase 4c spec); the Rprop.m port and cmaes.m's `cma`-package
+stand-in were retired in issue #103 (the engine's iRPROP- is `nn/train.rs::Rprop`, pinned
+to the C++ oracle; nothing in the port called either); BackPropagation.m's inner-loop
+contract is implemented by `drivers/train.py::_backprop_inner`. See design spec section 6.
 
-SMORMS3/Rprop are bit-pinned against GNU Octave running the vendored .m sources unchanged
+SMORMS3 is bit-pinned against GNU Octave running the vendored .m source unchanged
 (Phase 4c Task 6). QuantumPSO is bit-pinned against a MODIFIED-COPY of QuantumPSO.m
 (`tools/octave_harness/qpso_modified/`) whose rand/randperm/stblrnd are substituted by
 reads of a shared committed random table -- the legacy path reseeds from the wall clock,
@@ -102,72 +102,6 @@ class Smorms3:
         for _ in range(self.eval_count, num_steps + 1):
             self.optimization_step()
         return self._unflatten(self.theta)
-
-
-@dataclass
-class RpropState:
-    """iRPROP- per-weight state carried call-to-call (Rprop.m's out-args fed back as
-    in-args). `previous_derivatives` is None before the first step (the init branch,
-    Rprop.m:10); `prev_cost` is last step's cost (the backtrack gate at :24)."""
-
-    weights: NDArray[np.float64]
-    delta: NDArray[np.float64]
-    deltaweight: NDArray[np.float64]
-    previous_derivatives: NDArray[np.float64] | None
-    prev_cost: float
-
-
-def rprop_step(state: RpropState, grad: NDArray[np.float64], cost: float) -> RpropState:
-    """One iRPROP- step -- a faithful port of the vendored `Rprop.m` (38 LOC).
-
-    etap 1.2 / etam 0.5 / delta0 0.01 (the `:5` rand is DEAD, overwritten at `:6` -- see
-    IMPROVEMENTS) / deltamin 1e-9 / deltamax 1.0. Sign-step with a cost-gated backtrack:
-    on a derivative sign flip the delta shrinks, the weight is rolled back iff the cost
-    rose (prev_cost < cost), and the derivative is zeroed (so next step hits the ==0
-    branch). Pure arithmetic -- no libm.
-    """
-    # legacy: Rprop.m:3-8
-    etap = 1.2
-    etam = 0.5
-    delta0 = 0.01
-    deltamin = 1e-9
-    deltamax = 1.0
-
-    weights = np.array(state.weights, dtype=np.float64, copy=True)
-    derivatives = np.array(grad, dtype=np.float64, copy=True)
-    prev = state.previous_derivatives
-
-    if prev is None or prev.size == 0:
-        # legacy: Rprop.m:10-15 (init branch)
-        delta = delta0 * np.ones_like(weights)
-        deltaweight = -np.sign(derivatives) * delta
-        weights = weights + deltaweight
-    else:
-        # legacy: Rprop.m:16-33
-        delta = np.array(state.delta, dtype=np.float64, copy=True)
-        deltaweight = np.array(state.deltaweight, dtype=np.float64, copy=True)
-        for nn in range(weights.size):
-            product = derivatives[nn] * prev[nn]
-            if product > 0:
-                delta[nn] = min(delta[nn] * etap, deltamax)
-                deltaweight[nn] = -np.sign(derivatives[nn]) * delta[nn]
-                weights[nn] = weights[nn] + deltaweight[nn]
-            elif product < 0:
-                delta[nn] = max(delta[nn] * etam, deltamin)
-                if state.prev_cost < cost:
-                    weights[nn] = weights[nn] - deltaweight[nn]
-                derivatives[nn] = 0.0
-            else:
-                deltaweight[nn] = -np.sign(derivatives[nn]) * delta[nn]
-                weights[nn] = weights[nn] + deltaweight[nn]
-
-    return RpropState(
-        weights=weights,
-        delta=delta,
-        deltaweight=deltaweight,
-        previous_derivatives=derivatives,
-        prev_cost=cost,
-    )
 
 
 # ============================================================================
