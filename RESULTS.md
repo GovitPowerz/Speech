@@ -3450,7 +3450,7 @@ this split clean: there is no second transcription left for a mutation to hide b
 
 ## Issue #25 -- the driver interface: the mutation battery
 
-**Live since issue #33:** `tests/mutations/issue25/` (6 patches). Item 3's "both training files green" is the MISSED line on `twin_train_epoch_weights_golden`, the only training golden in them.
+**Live since issue #33:** `tests/mutations/issue25/` (6 patches). Item 3's "both training files green" is the MISSED line on `twin_train_epoch_weights_golden`, the only training golden in them. Item 2's site, the `LID_` save prefix, is retired with the save files (issue #136); the patch now hands the Twin's LID net the SAD net's fold at the best-pack capture, caught by the same golden.
 
 Branch `feature/driver-interface` (off `main@a252fd4`). Before #25 the bag dispatched on the
 `Processor` variant thirteen times (nine-arm matches whose arms differed by field name, the LID

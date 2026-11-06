@@ -70,7 +70,7 @@ A per-file `Segmenter` implementation for one Algo. The nine drivers live in a c
 _Avoid_: processor for the engine as a whole
 
 **Bag**:
-`BagOfProcessors`: the per-config set of drivers plus the result assembly and best-weight save gate.
+`BagOfProcessors`: the per-config set of drivers plus the result assembly and the best-cost gate (the legacy best-weight save, whose files went in issue #136).
 
 **Channel result**:
 The engine's outcome for one (file, config, channel): the scoring errors, the timing and durations, each net's cost and count, for a LID driver the target class and per-class scores, and the decided Segmentation (issue #86). Its wire form is the result row, which the segmentation is not on.
