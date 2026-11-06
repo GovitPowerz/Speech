@@ -15,14 +15,14 @@ import math
 from pathlib import Path
 
 import numpy as np
-from speech.nn_reference import (
+from speech.weight_bridge import read_bin
+
+from tests._libm_gate import assert_f64_matrix_close as _assert_f64_matrix_close
+from tests.oracles.nn_reference import (
     blstm_forward_oracle,
     dense_forward_oracle,
     lstm_forward_oracle,
 )
-from speech.weight_bridge import read_bin
-
-from tests._libm_gate import assert_f64_matrix_close as _assert_f64_matrix_close
 
 PHASE2_DIR = Path(__file__).resolve().parent / "reference_data" / "phase2"
 

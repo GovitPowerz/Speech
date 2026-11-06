@@ -20,13 +20,16 @@ from __future__ import annotations
 
 import json
 import struct
+import sys
 from pathlib import Path
 
 import numpy as np
 
-from speech.nn_reference import dense_forward_oracle, lstm_forward_oracle
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO_ROOT))
+
+from tests.oracles.nn_reference import dense_forward_oracle, lstm_forward_oracle  # noqa: E402
+
 PHASE2_DIR = REPO_ROOT / "tests" / "reference_data" / "phase2"
 
 # (I, O) shapes; T grid; flag grid (cells, gates, gates_rec).

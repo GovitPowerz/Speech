@@ -1,11 +1,11 @@
-"""Unit tests for the numpy segmenter-decision oracle (`speech.scoring`).
+"""Unit tests for the numpy segmenter-decision oracle (`tests.oracles.scoring`).
 
 Pins the same hand-computed `clean_rising_falling_crossing` case as the Rust
 Task-2 test (`begin=1.5`, `end=3.5`), so the oracle is anchored independently of
 the fixture cross-check.
 """
 
-from speech.scoring import SPEECH_CODE, update_segmentation_oracle
+from tests.oracles.scoring import SPEECH_CODE, update_segmentation_oracle
 
 
 def test_clean_rising_falling_crossing() -> None:

@@ -152,7 +152,7 @@ MASKING_SHAPES = {
 # The table is generated ONCE with a FIXED numpy seed and committed. Regeneration must be
 # byte-identical: numpy's default_rng (PCG64) is version-stable for a given seed, and
 # `.random(N)` draws N uniforms in [0,1). BOTH the Octave modified-copy (qpso_modified/) and
-# the Python port (speech.optimizers.TableRng) read this same table sequentially, column-major.
+# the Python port (`tests/oracles/optimizers.py::TableRng`) read this same table sequentially, column-major.
 QPSO_TABLE_SEED = 20260709
 QPSO_TABLE_N = 5000
 # The stage's small-D/ps/me run and standalone Levy dump (stage_qpso.m). D=3, ps=4, me=3, K=8.

@@ -29,7 +29,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from speech.nn_reference import (
+from speech.weight_bridge import read_bin
+
+from tests._libm_gate import assert_f64_matrix_close as _assert_f64_matrix_close
+from tests.oracles.nn_reference import (
     _cost_deltas_multiclass,
     _gates_fn,
     blstm_backward_oracle,
@@ -37,9 +40,6 @@ from speech.nn_reference import (
     lstm_backward_oracle,
     lstm_forward_oracle,
 )
-from speech.weight_bridge import read_bin
-
-from tests._libm_gate import assert_f64_matrix_close as _assert_f64_matrix_close
 
 PHASE3_DIR = Path(__file__).resolve().parent / "reference_data" / "phase3"
 

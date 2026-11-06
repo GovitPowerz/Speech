@@ -159,7 +159,7 @@ def localize_listing(src: Path, corpus_root: Path, out: Path) -> LocalizeReport:
 
 # 70/15/15 train/valid/test, hardcoded (not a legacy value -- this is new tooling, no
 # parity target). `round()` here is plain Python round-half-to-even; NOT
-# `batching._mround` (MATLAB round-half-away-from-zero) -- that convention exists only
+# `genome._mround_s` (MATLAB round-half-away-from-zero) -- that convention exists only
 # where this codebase reproduces MATLAB arithmetic, which this module never does.
 _TRAIN_RATIO = 0.70
 _VALID_RATIO = 0.15

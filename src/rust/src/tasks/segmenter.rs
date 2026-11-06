@@ -502,7 +502,7 @@ impl HystStep {
 /// it is the FOLD over [`HystStep`] (one `push` per value, then `flush_tail`),
 /// the same kernel the streaming session drives. This isolates the decision math
 /// so it can be cross-checked bit-for-bit against the numpy oracle
-/// (`speech.scoring.update_segmentation_oracle`). `results[k]` is the
+/// (`tests/oracles/scoring.py::update_segmentation_oracle`). `results[k]` is the
 /// legacy `results(0, k)`; `dt` is `timeStep`, `off` is `timeOffset`. The TAIL
 /// uses `results.len()` (the legacy `results.size()` = rows*cols, equal to
 /// `length` only for a pure row vector - reproduced quirk, logged in

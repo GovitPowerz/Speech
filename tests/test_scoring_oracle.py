@@ -1,4 +1,4 @@
-"""Unit tests for the numpy `compute_errors` Pass 2 oracle (`speech.scoring`).
+"""Unit tests for the numpy `compute_errors` Pass 2 oracle (`tests.oracles.scoring`).
 
 Pins the same hand-computed ref/hyp case as the Rust Task-7 test: ref speech-span
 [2, 5], hyp speech-span [3, 6], audio_duration 10, giving
@@ -6,7 +6,7 @@ Pins the same hand-computed ref/hyp case as the Rust Task-7 test: ref speech-spa
 Anchors the oracle independently of the fixture cross-check.
 """
 
-from speech.scoring import (
+from tests.oracles.scoring import (
     END_CODE,
     OTHER_CODE,
     SPEECH_CODE,

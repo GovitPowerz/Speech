@@ -40,11 +40,14 @@ Usage: uv run python scripts/extract_phase1_oracle_cases.py
 
 import json
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
 
-from speech.features_oracle import (
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests.oracles.features_oracle import (  # noqa: E402
     ltsv_oracle,
     regression_deltas_oracle,
     sdc_oracle,
@@ -136,9 +139,7 @@ def main() -> None:
     for t, nb_dct in SDC_SHAPES:
         mfcc = make_base(t, nb_dct)
         expected = sdc_oracle(mfcc, nb_dct)
-        sdc_cases.append(
-            {"mfcc": mfcc.tolist(), "nb_dct": nb_dct, "expected": expected.tolist()}
-        )
+        sdc_cases.append({"mfcc": mfcc.tolist(), "nb_dct": nb_dct, "expected": expected.tolist()})
 
     # Closed-form 20x50 matrix, matching the harness's synth_20x50.bin exactly.
     synth = make_base(20, 50)
@@ -184,9 +185,7 @@ def main() -> None:
             # Shift row indices by row_offset so each chunk draws a distinct
             # closed-form slice (same formula as synth_20x50.bin / make_base)
             # across the whole chain, rather than repeating identical rows.
-            rows = [
-                [((i + row_offset) * 7 + j * 13) % 100 / 100.0 for j in range(STATS_WIDTH)] for i in range(nrows)
-            ]
+            rows = [[((i + row_offset) * 7 + j * 13) % 100 / 100.0 for j in range(STATS_WIDTH)] for i in range(nrows)]
             row_offset += nrows
             chunks_json.append({"rows": rows})
             oracle_chunks.append(rows)

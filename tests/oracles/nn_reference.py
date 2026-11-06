@@ -1,8 +1,11 @@
-"""Pure-Python BLSTM forward/backward oracle for gradient-check fixtures only.
+"""Pure-Python LSTM/dense forward and backward oracles with ENGINE semantics.
 
-Ported from legacy MATLAB: BLSTM_Forward.m, BLSTM_Backward.m, Hz2Mel.m, Mel2Hz.m,
-and (Phase 2) the C++ engine LSTMLayer.cpp:312-421 and NeuronLayer.cpp:127-149. NOT a
-production path -- used to validate the Rust engine (Phase 2-3).
+Transcribes the C++ engine: the forward (Phase 2) from LSTMLayer.cpp:312-421 and
+NeuronLayer.cpp:127-149, the backward (Phase 3) from LSTMLayer.cpp:518-723,
+NeuronLayer.cpp:151-207 and BLSTMNeuralNetwork.cpp:439-460. BLSTM_Forward.m /
+BLSTM_Backward.m are NOT ported: they pair with a divergent MATLAB forward (sigmoid
+gates, no output softmax) and cannot match the engine. NOT a production path -- used
+to validate the Rust engine (Phase 2-3).
 
 The LSTM/dense oracles here are INDEPENDENT reimplementations: per-timestep SCALAR
 Python loops with plain float accumulation, coded from the spec, NOT a

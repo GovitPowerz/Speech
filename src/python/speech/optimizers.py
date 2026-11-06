@@ -20,6 +20,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -110,67 +111,29 @@ class Smorms3:
 # Faithful transcription of legacy/Optimizer_V6.2.2/functions/QuantumPSO.m (845 LOC).
 # The legacy path is nondeterministic BY DESIGN (`QuantumPSO.m:91` reseeds `rand` from
 # the wall clock). This port routes EVERY stochastic draw through an injected source
-# (`TableRng` for bit-pinning against the Octave modified-copy oracle, or a plain numpy
-# `Generator` for production), so the trajectory is exactly reproducible given a table.
+# (a `RandSource`: the test-only table reader for bit-pinning against the Octave
+# modified-copy oracle, or a plain numpy `Generator` for production), so the trajectory
+# is exactly reproducible given a table.
 # The clock reseed (:91) is dropped -- see IMPROVEMENTS.md (the determinism deviation).
 #
 # The Chambers-Mallows-Stuck Levy sampler (`levy_stable_cms`) is <80 lines, so it lives
 # here, not in a separate levy.py module (per the task brief's size heuristic).
 
 
-class TableRng:
-    """A table-backed random source: reads sequential f64s from a committed table and
-    exposes the exact draw shapes QuantumPSO uses. BOTH the Octave modified-copy oracle
-    (`tools/octave_harness/qpso_modified/`) and this port read the SAME committed table
-    (`tests/reference_data/phase4c/qpso_random_table.bin`) through an identical cursor, so
-    the trajectory is bit-pinned.
+class RandSource(Protocol):
+    """The draw surface `quantum_pso` consumes: MATLAB-shaped `rand` and a 1-based
+    `randperm`. Two adapters: `_GeneratorSource` over a numpy `Generator` (production) and
+    the test-only table reader `tests/oracles/optimizers.py::TableRng` (the bit-pin)."""
 
-    Column-major fill is the load-bearing detail: MATLAB `rand([m,n])` lays out its stream
-    column-major, so `rand(m,n)` here reads `m*n` values and reshapes with `order='F'` --
-    element `(i,j)` gets `table[cursor + j*m + i]`. The Octave `tbl_rand` does the same via
-    `reshape(vals,[m,n])` (Octave reshape is column-major). numpy's default row-major fill
-    would silently transpose every matrix draw; do NOT use it here.
-    """
+    def rand(self, *shape: int) -> float | NDArray[np.float64]: ...
 
-    def __init__(self, table: NDArray[np.float64]) -> None:
-        self.table: NDArray[np.float64] = np.asarray(table, dtype=np.float64).reshape(-1)
-        self.cursor: int = 0
-
-    def _take(self, count: int) -> NDArray[np.float64]:
-        if self.cursor + count > self.table.size:
-            raise IndexError(f"TableRng exhausted: need {count} at cursor {self.cursor}, size {self.table.size}")
-        vals = self.table[self.cursor : self.cursor + count]
-        self.cursor += count
-        return vals
-
-    def rand(self, *shape: int) -> float | NDArray[np.float64]:
-        """`rand()` -> scalar; `rand(n)` -> length-n vector; `rand(m,n)` -> (m,n) column-major."""
-        if len(shape) == 0:
-            return float(self._take(1)[0])
-        dims = [int(s) for s in shape]
-        count = int(np.prod(dims))
-        vals = self._take(count)
-        if len(dims) == 1:
-            return vals.copy()
-        return vals.reshape(tuple(dims), order="F").copy()
-
-    def randperm(self, n: int, k: int | None = None) -> NDArray[np.int64]:
-        """Table-based Durstenfeld/Fisher-Yates over 1..n (MATLAB 1-based values), consuming
-        `n-1` draws: `for i=n..2: j=floor(rand*i)+1; swap p[i],p[j]`. Returns the first `k`.
-        Identical algorithm on the Octave side (`tbl_randperm.m`), so the selected indices
-        match -- NOT MATLAB's builtin randperm (which is not table-reproducible)."""
-        p = list(range(1, n + 1))
-        for i in range(n, 1, -1):
-            r = float(self._take(1)[0])
-            j = int(math.floor(r * i)) + 1
-            p[i - 1], p[j - 1] = p[j - 1], p[i - 1]
-        return np.array(p if k is None else p[:k], dtype=np.int64)
+    def randperm(self, n: int, k: int | None = None) -> NDArray[np.int64]: ...
 
 
 class _GeneratorSource:
-    """Adapts a numpy `Generator` to the TableRng surface for the PRODUCTION (non-pinned)
-    path. Fill order is immaterial here (the values are random), so `rand(m,n)` uses numpy's
-    native row-major fill; only TableRng needs the column-major discipline."""
+    """Adapts a numpy `Generator` to `RandSource` for the PRODUCTION (non-pinned) path.
+    Fill order is immaterial here (the values are random), so `rand(m,n)` uses numpy's
+    native row-major fill; only a table reader needs MATLAB's column-major discipline."""
 
     def __init__(self, gen: np.random.Generator) -> None:
         self.gen = gen
@@ -187,11 +150,8 @@ class _GeneratorSource:
         return p if k is None else p[:k]
 
 
-_RandSource = TableRng | _GeneratorSource
-
-
-def _as_rand_source(rng: np.random.Generator | TableRng) -> _RandSource:
-    return rng if isinstance(rng, TableRng) else _GeneratorSource(rng)
+def _as_rand_source(rng: np.random.Generator | RandSource) -> RandSource:
+    return _GeneratorSource(rng) if isinstance(rng, np.random.Generator) else rng
 
 
 # The injected objective (replaces `CostFunction` / the engine feval). Given a (n x D)
@@ -285,7 +245,7 @@ def _normmat_flag1(x: NDArray[np.float64], newminmax: NDArray[np.float64]) -> ND
 
 
 def levy_stable_cms(
-    src: _RandSource | TableRng,
+    src: RandSource,
     alpha: float,
     beta: float,
     gamma: float,
@@ -312,13 +272,13 @@ def quantum_pso(
     cost_fn: QpsoObjective,
     params: QpsoParams,
     d: int,
-    rng: np.random.Generator | TableRng,
+    rng: np.random.Generator | RandSource,
     *,
     backprop_refine: Callable[[NDArray[np.float64], int], tuple[NDArray[np.float64], NDArray[np.float64]]] | None = None,
     _dead_banks: bool = True,
 ) -> QpsoResult:
     """QuantumPSO (the ranking-operator QDPSO variant) -- a faithful transcription of
-    `QuantumPSO.m:252-843`. Every stochastic draw is routed through `rng` (a `TableRng` for
+    `QuantumPSO.m:252-843`. Every stochastic draw is routed through `rng` (a table-backed `RandSource` for
     bit-pinning or a numpy `Generator` for production).
 
     Structure (legacy line refs inline): init + opposition-based learning (:257-327); the

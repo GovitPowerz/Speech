@@ -23,9 +23,12 @@ Usage: uv run python scripts/extract_phase0bii_scoring_fixtures.py
 """
 
 import json
+import sys
 from pathlib import Path
 
-from speech.scoring import (
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from tests.oracles.scoring import (  # noqa: E402
     EXCLUDED_CODE,
     INSERTION_CODE,
     OTHER_CODE,
