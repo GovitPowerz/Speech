@@ -588,19 +588,15 @@ fn fast_refuses_gradient_check_at_construction() {
     // Issue #110 decision 3: a gradient check (`epsilon > 0`, Epochs 0, every flag off) is
     // training-shaped. Before #110 a UnitTest-mode fast run reached `grad_check_full` past
     // both refusal sites and failed with "no backprop-activated network in config 0". Now
-    // construction refuses, naming the epsilon, before the UnitTest-mode output-file
-    // truncation runs: nothing is written.
+    // construction refuses, naming the epsilon, and writes nothing: the one output key
+    // left since issue #135 (`Dump_Directory`) points at an empty directory that stays so.
     let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("MultiConfigResults.mat");
     let mut m = twin_map_fast();
     m.insert(
         "Neural_Networks_Gradient_Check_Epsilon".into(),
         "1e-4".into(),
     );
-    m.insert(
-        "multiConfigResultsOutputFile".into(),
-        out.to_str().unwrap().into(),
-    );
+    m.insert("Dump_Directory".into(), dir.path().to_str().unwrap().into());
     let err = CorpusProcessor::new(vec![m], unit_test_mode())
         .err()
         .expect("fast + UnitTest + epsilon>0 must refuse at construction");
@@ -609,9 +605,10 @@ fn fast_refuses_gradient_check_at_construction() {
         msg.contains("Neural_Networks_Gradient_Check_Epsilon 0.0001"),
         "error must name the epsilon, got: {msg}"
     );
-    assert!(
-        !out.exists(),
-        "the refusal precedes the output-file truncation"
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        0,
+        "the refusal writes no file"
     );
 }
 

@@ -16,7 +16,6 @@
 algo_choice = 6
 num_outer_threads = 1
 num_inner_threads = 1
-results_file = "MultiConfigResults.mat"
 file_type = 1
 backpropagation_epochs = 0
 

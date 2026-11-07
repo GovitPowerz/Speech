@@ -275,10 +275,6 @@ fn fold_order_config() -> IndexMap<String, String> {
         "fileslisting".to_string(),
         "fold_order_fileslisting.csv".to_string(),
     );
-    m.insert(
-        "multiConfigResultsOutputFile".to_string(),
-        "fold_order.mat".to_string(),
-    );
     m
 }
 

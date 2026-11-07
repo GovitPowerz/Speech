@@ -99,7 +99,6 @@ static KEY_TABLE: &[KeyMapping] = &[
     ("Algo_choice",                              "engine", "algo_choice"),
     ("numOuterThreads",                          "engine", "num_outer_threads"),
     ("numInnerThreads",                          "engine", "num_inner_threads"),
-    ("multiConfigResultsOutputFile",             "engine", "results_file"),
     ("Dump_Directory",                           "engine", "dump_directory"),
     ("File_Type",                                "engine", "file_type"),
     ("Neural_Networks_BackPropagation_Epochs",   "engine", "backpropagation_epochs"),

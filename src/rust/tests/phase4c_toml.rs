@@ -53,6 +53,19 @@ fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// Legacy keys whose `KEY_TABLE` row was removed with the feature they configured
+/// (issue #135: the `.mat` sink). A committed legacy
+/// config still carrying one stays byte-unchanged: the key lands in the map,
+/// unread, and round-trips through `[legacy.raw]`, so the coverage checks below
+/// exclude these keys and only these.
+const RETIRED_KEYS: [&str; 1] = ["multiConfigResultsOutputFile"];
+
+fn without_retired(map: &IndexMap<String, String>) -> IndexMap<String, String> {
+    let mut live = map.clone();
+    live.retain(|k, _| !RETIRED_KEYS.contains(&k.as_str()));
+    live
+}
+
 /// Every committed fixture `.config` this table was built from the union of
 /// (phase0 + phase4a + phase4b + the legacy LID_BLSTM sample).
 fn fixture_configs() -> Vec<PathBuf> {
@@ -100,11 +113,12 @@ fn toml_map_equivalence() {
             "round-trip mismatch for {path:?} (.config -> map != convert -> .toml -> map)"
         );
 
-        // Full-coverage side-channel: every key in every committed fixture must be
-        // in KEY_TABLE (never fall back to [legacy.raw]) -- the table was built
-        // from exactly this fixture union, so a gap here is a transcription bug.
+        // Full-coverage side-channel: every live key in every committed fixture
+        // must be in KEY_TABLE (never fall back to [legacy.raw]) -- the table was
+        // built from exactly this fixture union, so a gap here is a transcription
+        // bug.
         assert!(
-            !toml_text.contains("[legacy.raw]"),
+            !map_to_toml(&without_retired(&want)).contains("[legacy.raw]"),
             "{path:?} produced a [legacy.raw] fallback -- KEY_TABLE is missing a key from this fixture"
         );
     }
@@ -285,7 +299,7 @@ fn assert_masked_col6_bit_identical(a: &Array2<f64>, b: &Array2<f64>, label: &st
 fn lid_blstm_toml_full_coverage() {
     let legacy_path = repo_root().join("configs/legacy/LID_BLSTM.config");
     let legacy_text = std::fs::read_to_string(&legacy_path).unwrap();
-    let want = parse_legacy_config(&legacy_text);
+    let want = without_retired(&parse_legacy_config(&legacy_text));
     assert!(
         want.len() > 100,
         "sanity: LID_BLSTM.config should carry >100 keys, got {}",

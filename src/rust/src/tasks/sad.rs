@@ -513,7 +513,7 @@ pub struct BlstmSignalSegmenter {
     /// place. The legacy only ever externalizes this value through the
     /// `_IsUnitTest`-gated `.mat` dump (`Matrix2MatFile("result_vec_chan_%s",
     /// result_vec2, _MatFilePtr)`, `:316-322`), which requires a live
-    /// `_MatFilePtr` (`io/matfile.rs` is an unported Phase 4 stub) -- so there is
+    /// `_MatFilePtr` (the port writes no `.mat`, issue #135) -- so there is
     /// no dump-directory route to reproduce that mechanism here. This accessor
     /// exists purely so golden tests can pin the whole NN chain's output
     /// bit-exactly without adding a `.mat` writer just for test capture.

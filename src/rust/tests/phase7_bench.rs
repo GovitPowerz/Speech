@@ -66,7 +66,6 @@ fn stage_bench_config(dir: &Path) -> PathBuf {
 Audio_max_duration 3600000\n\
 fileslisting bench_listing.csv\n\
 language2classmapping bench_mapping.csv\n\
-multiConfigResultsOutputFile bench_result.mat\n\
 Dump_Directory vrcts_bench\n\
 Neural_Networks_BackPropagation_Epochs 0\n\
 BLSTM_BackPropagationActivated false\n"
@@ -392,12 +391,10 @@ fn bench_args_parse_json_and_label() {
 }
 
 /// `stage_bench_config` with EVERY path key absolute -- the inputs under `dir`,
-/// the two OUTPUT keys (`multiConfigResultsOutputFile`, `Dump_Directory`)
-/// under `out` -- appended last-wins after the relative tail. This is the
-/// ledger's staging shape (`speech.ledger.stage`): a temp staging dir, the
-/// binary run from wherever the caller is. `out/vrcts_bench` is created here;
-/// the `.mat` and its `bestNNWeight_1_`-prefixed weight-save siblings land
-/// next to it.
+/// the one OUTPUT key (`Dump_Directory`) under `out` -- appended last-wins after
+/// the relative tail. This is the ledger's staging shape (`speech.ledger.stage`):
+/// a temp staging dir, the binary run from wherever the caller is.
+/// `out/vrcts_bench` is created here.
 fn stage_bench_config_absolute(dir: &Path, out: &Path) -> PathBuf {
     let cfg_path = stage_bench_config(dir);
     std::fs::write(
@@ -412,24 +409,21 @@ fn stage_bench_config_absolute(dir: &Path, out: &Path) -> PathBuf {
 BLSTM_weightsFile {}\n\
 language2classmapping {}\n\
 fileslisting {}\n\
-multiConfigResultsOutputFile {}\n\
 Dump_Directory {}\n",
         dir.join("NNweights_config1.bin").display(),
         dir.join("bench_mapping.csv").display(),
         dir.join("bench_listing.csv").display(),
-        out.join("bench_result.mat").display(),
         out.join("vrcts_bench").display(),
     ));
     std::fs::write(&cfg_path, staged).unwrap();
     cfg_path
 }
 
-/// An absolute `multiConfigResultsOutputFile` / `Dump_Directory` runs from ANY
-/// cwd: the results `.mat` and the VRCTS dumps land under `out`, nothing lands
-/// relative to the cwd, and `out` holds nothing else -- since issue #136 the
-/// best-cost gate writes no `bestNNWeight_<n>_` weight files (IMPROVEMENTS.md's
-/// "`saveWeights` glues the prefix to the WHOLE filename" entry, RETIRED with
-/// them).
+/// An absolute `Dump_Directory` runs from ANY cwd: the VRCTS dumps land under
+/// `out`, nothing lands relative to the cwd, and `out` holds nothing else --
+/// since issue #136 the best-cost gate writes no `bestNNWeight_<n>_` weight files
+/// (IMPROVEMENTS.md's "`saveWeights` glues the prefix to the WHOLE filename"
+/// entry, RETIRED with them) and since issue #135 no run writes a results `.mat`.
 #[test]
 fn bench_runs_with_absolute_output_keys() {
     let dir = tempfile::tempdir().unwrap();
@@ -463,8 +457,8 @@ fn bench_runs_with_absolute_output_keys() {
     landed.sort();
     assert_eq!(
         landed,
-        ["bench_result.mat", "vrcts_bench"],
-        "the results key's directory holds the results .mat and the dumps, no weight file"
+        ["vrcts_bench"],
+        "the output directory holds the dumps only: no results .mat, no weight file"
     );
     for chan in [1, 2] {
         let xml = out
@@ -481,37 +475,5 @@ fn bench_runs_with_absolute_output_keys() {
         std::fs::read_dir(cwd.path()).unwrap().count(),
         0,
         "nothing may land relative to the cwd"
-    );
-}
-
-/// The write that fails names its path: a results key in a directory that does
-/// not exist dies with the path in the error, not a bare `os error 2`. Since issue
-/// #136 the failing write is the results `.mat` itself (`save_results`), the weight
-/// files that used to fail first being gone.
-#[test]
-fn bench_names_the_unwritable_output_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let cfg_path = stage_bench_config(dir.path());
-    let missing = dir.path().join("missing").join("bench_result.mat");
-    let mut staged = std::fs::read_to_string(&cfg_path).unwrap();
-    staged.push_str(&format!(
-        "multiConfigResultsOutputFile {}\n",
-        missing.display()
-    ));
-    std::fs::write(&cfg_path, staged).unwrap();
-
-    let output = Command::new(env!("CARGO_BIN_EXE_speech"))
-        .current_dir(dir.path())
-        .args(["bench", "--repeat=1", cfg_path.to_str().unwrap()])
-        .output()
-        .expect("failed to run speech binary");
-    assert!(
-        !output.status.success(),
-        "a results key under a missing directory must fail"
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("missing/") && stderr.contains("bench_result.mat"),
-        "the error must name the path it could not create: {stderr}"
     );
 }
