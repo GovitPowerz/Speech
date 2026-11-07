@@ -1603,6 +1603,10 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `bench_runs_with_absolute_output_keys` now asserts the results directory holds only the `.mat`
   and the dumps; `bench_names_the_unwritable_output_path` stays, its failing write now the
   results `.mat`.)
+  (Issue #135: the results `.mat`, its key `multiConfigResultsOutputFile`, the m/t truncation and
+  `io::matfile` are retired too, so `bench_names_the_unwritable_output_path` goes with the last
+  write it named and `bench_runs_with_absolute_output_keys` asserts the output directory holds
+  the dumps only. The engine's one output key is `Dump_Directory`.)
 
 - **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
   the console warning -- FIXED (phase 11 interstitial, commit `c02509e`)**
@@ -2586,7 +2590,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   (dead code); the SAD-irrelevance is proven by the goldens passing with no SAD weights loaded.
 
 - **[phase4b] Mode-7 `classNb = max(2, outputSize)`, and `_PostProcessMode 1` cancels in
-  normalization; the DumpLIDInternals filename is CLOSED (Phase 4c Task 2)** (`tasks/lid.rs`,
+  normalization; the DumpLIDInternals filename is CLOSED (Phase 4c Task 2), RETIRED (issue
+  #135)** (`tasks/lid.rs`,
   from `TwinBLSTMSpectralLID.cpp:624-625,906-921,1073-1179`): the committed LID net is BINARY
   (`OutputNeuronNb 48,1` -> `getOutputSize() = 1`), and `classNb` is forced to `max(2, 1) =
   2` (`:624-625`), so the brief's "3-class mapping" is superseded -- the fixtures use a
@@ -2630,6 +2635,11 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `.phSeq` path (previously left empty), and the assertion targets `s1.p_chan0_lid_dump.mat`
   under the tempdir; reverting `tasks/lid.rs`'s driver change alone (test unchanged) fails the
   test (file not found at the new path), confirming the rename is load-bearing.
+  (Issue #135: the dump is retired with the MAT v5 writer -- `BLSTM_LID_DumpInternals` is
+  unread, `mode7_dump_basename` and `dump_lid_internals_written_and_valued` are gone, and
+  `twin_mode7_ppm2.config` keeps its inert line. The filename observation above stands; the
+  `classNb` and ppm1 halves of this entry are unchanged. The harness's `mode7_dump_s1.mat`
+  keeps its own scipy check in `tests/test_phase4b_fixtures.py`.)
 
 - **[phase4b] `VrctsPart` (Algo 0) hard-codes the legacy `vrcts_part` binary path, and its spawn
   failure semantics necessarily diverge from the legacy's discarded `system()` return** (`tasks/

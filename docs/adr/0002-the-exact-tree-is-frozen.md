@@ -113,7 +113,7 @@ sized and filled where they were and handed out by `epoch_mems()` (the `speech_r
 dict reads it under the `.mat` variable names), no exact-path number moved, proven by the seven
 in-process goldens re-pointed from the `.mat` to it staying byte-green against the unchanged `.bin`
 fixtures and by the bridge test pinning the accessor bit-identical to the `.mat` the same run
-wrote, issue #134; and a file side effect removed, 2026-11-06: the best-weight save
+wrote, issue #134 (the bridge test retired with the `.mat` in issue #135); and a file side effect removed, 2026-11-06: the best-weight save
 (`nn/blstm.rs::save_weights`'s `weights_` / `weightsDerivatives_` `.bin` pair and its stats
 `.mat`, the `bestNNWeight_<n>_` / `LID_` naming, `run_epoch`'s input-statistics fold that fed only
 the stats file) is deleted while the decision stays: the bag's `best_cost_gate` keeps the
@@ -121,7 +121,12 @@ per-algo criterion, the strict `>` and the order before the update, and a fire c
 net's pre-update pack and folded derivatives in memory under `test-support` (so in a production
 build the gate's only effect is the running `bestCost`, the accepted state: the Modern loop's
 `Checkpoint` is the production writer); every exact-path number unchanged, proven by the two training goldens re-pointed to that capture staying
-byte-green against the unchanged `.bin` fixtures, issue #136).
+byte-green against the unchanged `.bin` fixtures, issue #136; and the same class again, 2026-11-07:
+the results `.mat` (`CorpusProcessor::save_results`, the `multiConfigResultsOutputFile` key and
+its m/M/t/T truncation) and the Twin's Mode 7 `_DumpLIDInternals` `.mat` (`tasks/lid.rs`) are
+deleted with `io/matfile.rs`, every exact-path number unchanged, proven by the goldens #134
+re-pointed to `results_matrix()` / `epoch_mems()` staying byte-green and the two binary
+end-to-end tests reading the same values through `--results-json`, issue #135).
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),

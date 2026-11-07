@@ -43,8 +43,9 @@ The code is written largely with coding agents; [DEVELOPMENT.md](DEVELOPMENT.md)
 # Build the Rust engine (binary `speech`)
 cd src/rust && cargo build --release && cd ../..
 
-# Run a corpus through a TOML config (SAD: Algo 1-4; LID: Algo 5-6)
-./src/rust/target/release/speech -m configs/lid/lid_blstm.toml
+# Run a corpus through a TOML config (SAD: Algo 1-4; LID: Algo 5-6); --results-json writes
+# the result matrix and the per-epoch cost arrays as one JSON document (optional)
+./src/rust/target/release/speech -m --results-json results.json configs/lid/lid_blstm.toml
 
 # Stream a MONO wav through the online SAD session; one `SEG` line per finalized
 # segment, flushed at emission time, then a `STREAM` summary. The config carries the
@@ -98,7 +99,7 @@ TOML is the canonical input format. A run config names the algorithm and its DSP
 algo_choice = 6
 num_outer_threads = 1
 num_inner_threads = 1
-results_file = "MultiConfigResults.mat"
+file_type = 1
 
 [audio]
 offset = 0
@@ -166,7 +167,7 @@ Speech/
       nn/cells/{slstm,mamba,cfc,transformer}.rs   # the CellLayer seam
       tasks/{segmenter,sad,lid,segmentation,segmentation_io,vrcts}.rs
       fast/{nn,mel32,pipeline,plan,driver,cells,bicell,stream,stream_lid}.rs   # f32 fast + streaming
-      io/{mod,binary,matfile}.rs
+      io/{mod,binary}.rs
     tests/                                 # cargo integration suites, one file per phase gate
     benches/kernels.rs                     # criterion micro-benches
     speech-py/src/lib.rs                   # the PyO3 module speech_rs
