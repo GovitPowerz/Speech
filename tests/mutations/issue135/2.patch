@@ -1,0 +1,18 @@
+mutation: the first `--results-json` wins instead of the last (a repeated override's rule)
+catcher: CAUGHT cargo --test phase4a_cli results_json_flag_is_not_a_config_override
+
+diff --git a/src/rust/src/cli.rs b/src/rust/src/cli.rs
+index b3f447b..79fcad6 100644
+--- a/src/rust/src/cli.rs
++++ b/src/rust/src/cli.rs
+@@ -94,7 +94,9 @@ pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
+             continue;
+         };
+         match path {
+-            Some(p) if !p.is_empty() => results_json = Some(p.to_string()),
++            Some(p) if !p.is_empty() => {
++                results_json.get_or_insert(p.to_string());
++            }
+             _ => bail!("--results-json needs a path"),
+         }
+     }
