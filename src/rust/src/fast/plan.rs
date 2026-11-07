@@ -590,8 +590,7 @@ impl FastLidPlan {
     /// ([`Self::read_weights_files`]).
     ///
     /// Typed-bails, in the words the legs pin: `Algo_choice != 6`; any `BLSTM_LID_Mode`
-    /// but 7; the pitch second pass (`BLSTM_TDCwindow > 0`); `BLSTM_LID_DumpInternals`;
-    /// a LID `InputNormalizationType != 0` (the fast scoring applies no normalization);
+    /// but 7; the pitch second pass (`BLSTM_TDCwindow > 0`); a LID `InputNormalizationType != 0` (the fast scoring applies no normalization);
     /// a negative `BLSTM_LID_TargetEnforcementStep` (the exact cost block overwrites
     /// interior output rows with -0.5 for it, risk R7, which forward-only scoring never
     /// reproduces); MLP mode (`BLSTM_LID_LSTMNeuronNb[0] == 0`, the exact dispatch's
@@ -619,13 +618,6 @@ impl FastLidPlan {
             bail!(
                 "fast TwinLid: the pitch second pass (BLSTM_TDCwindow > 0) is not supported on the \
                  fast inference path; the gate configs use TDCwindow 0"
-            );
-        }
-
-        if get_default::<bool>(map, "BLSTM_LID_DumpInternals", false)? {
-            bail!(
-                "fast TwinLid: BLSTM_LID_DumpInternals is unsupported on the fast path (the LID \
-                 hidden states the dump emits are not tracked); the gate configs use false"
             );
         }
 

@@ -54,11 +54,11 @@ fn repo_root() -> PathBuf {
 }
 
 /// Legacy keys whose `KEY_TABLE` row was removed with the feature they configured
-/// (issue #135: the `.mat` sink). A committed legacy
+/// (issue #135: the `.mat` sink and the LID internals dump). A committed legacy
 /// config still carrying one stays byte-unchanged: the key lands in the map,
 /// unread, and round-trips through `[legacy.raw]`, so the coverage checks below
 /// exclude these keys and only these.
-const RETIRED_KEYS: [&str; 1] = ["multiConfigResultsOutputFile"];
+const RETIRED_KEYS: [&str; 2] = ["multiConfigResultsOutputFile", "BLSTM_LID_DumpInternals"];
 
 fn without_retired(map: &IndexMap<String, String>) -> IndexMap<String, String> {
     let mut live = map.clone();

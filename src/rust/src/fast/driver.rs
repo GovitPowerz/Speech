@@ -880,7 +880,7 @@ impl FastNet {
 /// SINCE ISSUE #84 ITS SETUP IS [`FastLidPlan`] (rate-free, shared with the Utterance
 /// stream) + [`LidTimeline`](super::plan::LidTimeline) (per file, at the audio's rate and
 /// target): every construction refusal (Mode 7 only, the pitch second pass,
-/// `DumpInternals`, a LID `InputNormalizationType != 0`, a negative
+/// a LID `InputNormalizationType != 0`, a negative
 /// `TargetEnforcementStep`, MLP mode) is the plan's, the two regime refusals (a windowed
 /// CAUSAL LID net, OVERLAP on every shape) included, rate-free on the config's intent, and
 /// the two stateful shifts the exact driver re-quantizes per file are NOT carried (the

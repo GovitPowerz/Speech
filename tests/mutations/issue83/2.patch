@@ -3,9 +3,10 @@ catcher: CAUGHT cargo --test phase4b_twin_mode7 mode7_integer_members_match_real
 catcher: CAUGHT cargo --test phase4b_twin_mode7 mode7_continuous_members_match_real
 
 diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
+index d23f519..3eb64ec 100644
 --- a/src/rust/src/tasks/lid.rs
 +++ b/src/rust/src/tasks/lid.rs
-@@ -1497,7 +1497,7 @@ impl TwinBlstmSpectralLid {
+@@ -1429,7 +1429,7 @@ impl TwinBlstmSpectralLid {
                  // langID (`:1131-1135`): the kernel.
                  acc.push(
                      output_seq.view(),
@@ -13,4 +14,4 @@ diff --git a/src/rust/src/tasks/lid.rs b/src/rust/src/tasks/lid.rs
 +                    BlockScore::ColumnMean,
                      BlockWeight::MeanIfCostModified,
                  );
- 
+             }

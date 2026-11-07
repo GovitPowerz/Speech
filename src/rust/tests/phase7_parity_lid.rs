@@ -778,19 +778,6 @@ fn fast_twin_pins_the_lid_pack_length_per_cell() {
 }
 
 #[test]
-fn fast_twin_bails_on_dump_internals() {
-    let mut m = map_of("twin_mode7");
-    m.insert("BLSTM_LID_DumpInternals".into(), "true".into());
-    match build_fast_twin(&m) {
-        Err(e) => assert!(
-            e.to_string().contains("DumpInternals"),
-            "expected a dump-internals bail, got: {e}"
-        ),
-        Ok(_) => panic!("fast Twin + DumpInternals must bail"),
-    }
-}
-
-#[test]
 fn fast_twin_bails_on_pitch_pass() {
     let mut m = map_of("twin_mode7");
     m.insert("BLSTM_TDCwindow".into(), "0.032".into());
