@@ -499,8 +499,9 @@ fn assert_gradcheck(
 // === binary_e2e_mode7 ========================================================
 // `speech -m --results-json twin_e2e.json twin_e2e.config` (epochs 0, LID
 // backprop off -- the as-committed Mode-7 scoring semantics) in a seeded tempdir:
-// exit 0 + the JSON document's 5 matrices vs the committed value fixtures (timing col 6 masked, ids strict; the algo-6
-// confusion columns are present and value-compared).
+// exit 0 + the JSON document's 5 matrices vs the committed value fixtures (timing
+// col 6 masked, ids strict; the algo-6 confusion columns are present and
+// value-compared).
 #[test]
 fn binary_e2e_mode7() {
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());

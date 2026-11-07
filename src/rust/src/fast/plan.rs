@@ -589,14 +589,14 @@ impl FastLidPlan {
     /// and I/O-free: the two weight files are only NAMED here
     /// ([`Self::read_weights_files`]).
     ///
-    /// Typed-bails, in the words the legs pin: `Algo_choice != 6`; any `BLSTM_LID_Mode`
-    /// but 7; the pitch second pass (`BLSTM_TDCwindow > 0`); a LID `InputNormalizationType != 0` (the fast scoring applies no normalization);
-    /// a negative `BLSTM_LID_TargetEnforcementStep` (the exact cost block overwrites
-    /// interior output rows with -0.5 for it, risk R7, which forward-only scoring never
-    /// reproduces); MLP mode (`BLSTM_LID_LSTMNeuronNb[0] == 0`, the exact dispatch's
-    /// `is_mlp` route to the MLP drivers, refused on the same derived flag so construction
-    /// fails whether or not weights arrive); and the LID regime rule, rate-free
-    /// ([`Self::precheck_regime`]).
+    /// Typed-bails, in the words the legs pin: `Algo_choice != 6`; any `BLSTM_LID_Mode` but
+    /// 7; the pitch second pass (`BLSTM_TDCwindow > 0`); a LID
+    /// `InputNormalizationType != 0` (the fast scoring applies no normalization); a negative
+    /// `BLSTM_LID_TargetEnforcementStep` (the exact cost block overwrites interior output
+    /// rows with -0.5 for it, risk R7, which forward-only scoring never reproduces); MLP
+    /// mode (`BLSTM_LID_LSTMNeuronNb[0] == 0`, the exact dispatch's `is_mlp` route to the
+    /// MLP drivers, refused on the same derived flag so construction fails whether or not
+    /// weights arrive); and the LID regime rule, rate-free ([`Self::precheck_regime`]).
     pub fn from_map(map: &IndexMap<String, String>) -> Result<FastLidPlan> {
         let algo = read_algo(map, "fast LID plan")?;
         if algo != 6 {

@@ -176,15 +176,25 @@ fn main() {
         }
     };
 
+    // `--results-json`: the file is created before the run, so an unwritable path fails
+    // now rather than after it (a failed run leaves the file empty).
+    let results_json = invocation.results_json.map(|path| {
+        let file = std::fs::File::create(&path).unwrap_or_else(|e| {
+            eprintln!("Error: cannot create the results JSON `{path}`: {e}");
+            std::process::exit(1);
+        });
+        (path, file)
+    });
+
     if let Err(e) = processor.run() {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
 
-    if let Some(path) = &invocation.results_json
-        && let Err(e) = write_results_json(&processor, path)
+    if let Some((path, file)) = results_json
+        && let Err(e) = write_results_json(&processor, file)
     {
-        eprintln!("Error: {e:#}");
+        eprintln!("Error: cannot write the results JSON `{path}`: {e}");
         std::process::exit(1);
     }
 }
@@ -193,9 +203,9 @@ fn main() {
 /// `saveResults` `.mat`): the result matrix (`results_matrix()`, rows `[file+1,
 /// conf+1, chan+1, result row...]`, the wall-clock column included) and the four
 /// per-epoch arrays under their legacy variable names (`EpochMems::named`), each
-/// a list of rows. Floats round-trip exactly; a NaN cell is written as `null`.
-fn write_results_json(processor: &CorpusProcessor, path: &str) -> anyhow::Result<()> {
-    use anyhow::Context;
+/// a list of rows. Floats round-trip exactly; a non-finite cell is written as `null`.
+fn write_results_json(processor: &CorpusProcessor, mut file: std::fs::File) -> std::io::Result<()> {
+    use std::io::Write;
     let rows = |m: &ndarray::Array2<f64>| -> serde_json::Value {
         m.rows()
             .into_iter()
@@ -211,8 +221,7 @@ fn write_results_json(processor: &CorpusProcessor, path: &str) -> anyhow::Result
     for (name, m) in processor.epoch_mems().named() {
         doc.insert(name.into(), rows(m));
     }
-    std::fs::write(path, serde_json::Value::Object(doc).to_string())
-        .with_context(|| format!("cannot write the results JSON `{path}`"))
+    file.write_all(serde_json::Value::Object(doc).to_string().as_bytes())
 }
 
 /// Port of `print_usage` (`FastSpeechProcessing.cpp:78-87`), `.config` wording

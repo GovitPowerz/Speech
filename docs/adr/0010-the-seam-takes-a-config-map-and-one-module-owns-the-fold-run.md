@@ -1,6 +1,6 @@
 # ADR-0010: The seam takes a config map, the process cwd is not part of the Python-side contract, and one module owns the fold run
 
-**Status:** accepted | **Date:** 2026-10-07 (issue #22, grilling outcome recorded there); the fast guard retired 2026-10-09 (issue #62)
+**Status:** accepted | **Date:** 2026-10-07 (issue #22, grilling outcome recorded there); the fast guard retired 2026-10-09 (issue #62); the results-file key retired 2026-11-07 (issue #135)
 
 ## Context
 

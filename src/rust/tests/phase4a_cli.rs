@@ -100,6 +100,20 @@ fn results_json_flag_is_not_a_config_override() {
         "the flag and its path are not config paths"
     );
 
+    let inv = parse_cli(&args(&[
+        "-s",
+        "--results-json",
+        "a.json",
+        "--results-json=c.json",
+        cfg,
+    ]))
+    .unwrap();
+    assert_eq!(
+        inv.results_json.as_deref(),
+        Some("c.json"),
+        "the last one wins"
+    );
+
     assert!(
         parse_cli(&args(&["-s", cfg]))
             .unwrap()
@@ -276,6 +290,43 @@ fn binary_end_to_end() {
         let want = load_bin_phase4a(&format!("solo_tdc_{var}.bin"));
         assert_matrix(&got, &want, &[], &[], &format!("binary e2e {var}"));
     }
+}
+
+// Issue #135: the `--results-json` file is created before the run, so a path in a
+// missing directory fails at once (exit 1, the path named) rather than after a run
+// that may take hours; the run never starts, so its VRCTS dumps are absent.
+#[test]
+fn results_json_unwritable_path_fails_before_the_run() {
+    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    seed_corpus(dir.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_speech"))
+        .current_dir(dir.path())
+        .args([
+            "-s",
+            "--results-json",
+            "missing/solo_tdc.json",
+            "--Neural_Networks_BackPropagation_Epochs=0",
+            "--Dump_Directory=vrcts_solo",
+            "tier1_tdc.config",
+        ])
+        .output()
+        .expect("failed to run speech binary");
+
+    assert_eq!(output.status.code(), Some(1), "an unwritable path exits 1");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing/solo_tdc.json"),
+        "the error names the path: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("vrcts_solo"))
+            .unwrap()
+            .count(),
+        0,
+        "the run never started"
+    );
 }
 
 #[test]
