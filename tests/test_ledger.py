@@ -600,7 +600,6 @@ def test_stage_fixture_60s_writes_an_absolute_path_config(tmp_path: Path) -> Non
     assert (tmp_path / "prcts_excerpt.wav").is_file() and (tmp_path / "NNweights_config1.bin").is_file()
     assert (tmp_path / "bench_listing.csv").read_text() == f"{tmp_path / 'prcts_excerpt.wav'}\n"
     assert f"\nDump_Directory {tmp_path / 'vrcts_bench'}\n" in text and (tmp_path / "vrcts_bench").is_dir()
-    assert f"\nmultiConfigResultsOutputFile {tmp_path / 'bench_result.mat'}\n" in text
     assert f"\nBLSTM_weightsFile {tmp_path / 'NNweights_config1.bin'}\n" in text
     assert lanes_of(cfg) == 1
 

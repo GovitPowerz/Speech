@@ -12,13 +12,12 @@ was repeated at every driver site. This module is that recipe, written once:
     unconditionally (the F11 rule, IMPROVEMENTS.md: a fold is ONE fold at theta, never the
     engine-internal `train()`), and the listing override. `config` is that map and
     `config_text` its rendering through the one `_config_text`, workdir-independent.
-  * The engine is built through `speech_rs.Engine.from_map` on `config` with the six path
+  * The engine is built through `speech_rs.Engine.from_map` on `config` with the five path
     keys resolved against `workdir` (ADR-0010: the process cwd is not part of the Python-side
     contract; the engine still resolves a relative LISTING ROW against its cwd, as the binary
-    does, so a production listing carries absolute rows). An absent
-    `multiConfigResultsOutputFile` lands in the workdir (where the chdir'd flow put it); an
-    absent or empty `Dump_Directory` stays as given (empty is the engine's "no dump", so it is
-    never resolved to the workdir). No config file is ever written.
+    does, so a production listing carries absolute rows). An absent or empty `Dump_Directory`
+    stays as given (empty is the engine's "no dump", so it is never resolved to the workdir).
+    No config file is ever written, and since issue #135 the engine writes no results `.mat`.
   * `run(weights=None) -> FoldResult` is one fold at `weights` (or at the config's own packs);
     a pack count that does not match the config's nets is refused. The engine is built once,
     on the config's own packs, and `set_weights` injects per run (the modern loop reuses it
@@ -59,7 +58,6 @@ _PATH_KEYS = (
     "BLSTM_weightsFile",
     "BLSTM_LID_weightsFile",
     "Dump_Directory",
-    "multiConfigResultsOutputFile",
 )
 
 
@@ -123,7 +121,6 @@ class FoldRun:
             value = out.get(key, "").strip()  # the engine trims every string value (issue #87)
             if value:  # an empty value is a sentinel (`Dump_Directory ""` = no dump), not a path
                 out[key] = str(self.workdir / value)
-        out.setdefault("multiConfigResultsOutputFile", str(self.workdir / "MultiConfigResults.mat"))
         return out
 
     @staticmethod

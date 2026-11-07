@@ -33,8 +33,8 @@ class Leg:
 
 def _sad_config(stage_dir: Path, audio: Path) -> Path:
     """`tier2_spectral.config` + the tuple-A pack over one unscored file, the cap lifted so the
-    whole file is processed. Every path key is absolute, the two OUTPUT keys (`Dump_Directory`,
-    `multiConfigResultsOutputFile`) included, so the binary runs from any cwd."""
+    whole file is processed. Every path key is absolute, the one OUTPUT key (`Dump_Directory`)
+    included, so the binary runs from any cwd."""
     pack = stage_dir / "NNweights_config1.bin"
     shutil.copyfile(FIXTURES / "phase0" / "NNweights_config1.bin", pack)
     listing = stage_dir / "bench_listing.csv"
@@ -49,7 +49,6 @@ def _sad_config(stage_dir: Path, audio: Path) -> Path:
         f"fileslisting {listing}\n"
         f"language2classmapping {mapping}\n"
         f"BLSTM_weightsFile {pack}\n"
-        f"multiConfigResultsOutputFile {stage_dir / 'bench_result.mat'}\n"
         f"Dump_Directory {stage_dir / 'vrcts_bench'}\n"
         "Neural_Networks_BackPropagation_Epochs 0\n"
         "BLSTM_BackPropagationActivated false\n"
@@ -61,8 +60,8 @@ def _sad_config(stage_dir: Path, audio: Path) -> Path:
 
 def _twin_config(stage_dir: Path, features: Path, file_type: int) -> Path:
     """`twin_mode7.config` over one precomputed-feature file (phSeq `File_Type 1`, cep
-    `File_Type 2`), every path key absolute (the committed LID pack and mapping, the two output
-    keys); the listing row names the mapping's first language so the Twin has a class to score
+    `File_Type 2`), every path key absolute (the committed LID pack and mapping, the output
+    key); the listing row names the mapping's first language so the Twin has a class to score
     against."""
     mapping = FIXTURES / "phase4b" / "languagemapping_lid7.csv"
     lang, dial = mapping.read_text().splitlines()[0].split(";")[:2]
@@ -77,7 +76,6 @@ def _twin_config(stage_dir: Path, features: Path, file_type: int) -> Path:
         f"language2classmapping {mapping}\n"
         f"fileslisting {listing}\n"
         f"File_Type {file_type}\n"
-        f"multiConfigResultsOutputFile {stage_dir / 'bench_result.mat'}\n"
         f"Dump_Directory {stage_dir / 'vrcts_bench'}\n"
     )
     cfg = stage_dir / "bench_twin.config"
