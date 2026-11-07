@@ -24,8 +24,9 @@
 //!   ii==0 -> SAD cols 4/len-1; ii==1 -> LID cols 14/len-2,
 //!   `CorpusProcessor.cpp:281-288`), golden per network index.
 //! - `lid5_gradcheck_golden`: algo 5's columns 14/len-2 (`:278-280`).
-//! - `binary_e2e_mode7`: `speech -m twin_e2e.config` in a seeded tempdir ->
-//!   exit 0 + the MultiConfigResults values vs the committed fixture (timing
+//! - `binary_e2e_mode7`: `speech -m --results-json ... twin_e2e.config` in a
+//!   seeded tempdir -> exit 0 + the JSON document's MultiConfigResults values vs
+//!   the committed fixture (timing
 //!   col masked; the algo-6 confusion columns value-compared).
 
 mod common;
@@ -38,7 +39,8 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 
 use common::{
-    assert_matrix, assert_oracle_eq_f64, fixture_phase4b, load_bin_phase4b, mat_var_matrix,
+    assert_matrix, assert_oracle_eq_f64, fixture_phase4b, json_matrix, load_bin_phase4b,
+    read_results_json,
 };
 use speech::cli::{Mode, ModeKind};
 use speech::engine::corpus_processor::CorpusProcessor;
@@ -495,9 +497,9 @@ fn assert_gradcheck(
 }
 
 // === binary_e2e_mode7 ========================================================
-// `speech -m twin_e2e.config` (epochs 0, LID backprop off -- the as-committed
-// Mode-7 scoring semantics) in a seeded tempdir: exit 0 + the 5 .mat variables
-// vs the committed value fixtures (timing col 6 masked, ids strict; the algo-6
+// `speech -m --results-json twin_e2e.json twin_e2e.config` (epochs 0, LID
+// backprop off -- the as-committed Mode-7 scoring semantics) in a seeded tempdir:
+// exit 0 + the JSON document's 5 matrices vs the committed value fixtures (timing col 6 masked, ids strict; the algo-6
 // confusion columns are present and value-compared).
 #[test]
 fn binary_e2e_mode7() {
@@ -507,7 +509,7 @@ fn binary_e2e_mode7() {
 
     let output = Command::new(env!("CARGO_BIN_EXE_speech"))
         .current_dir(dir.path())
-        .args(["-m", "twin_e2e.config"])
+        .args(["-m", "--results-json", "twin_e2e.json", "twin_e2e.config"])
         .output()
         .expect("failed to run speech binary");
     assert!(
@@ -518,14 +520,14 @@ fn binary_e2e_mode7() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let bytes = std::fs::read(dir.path().join("twin_e2e.mat")).unwrap();
-    let got = mat_var_matrix(&bytes, "MultiConfigResults").expect("MultiConfigResults missing");
+    let doc = read_results_json(&dir.path().join("twin_e2e.json"));
+    let got = json_matrix(&doc, "MultiConfigResults");
     let want = load_bin_phase4b("twin_e2e_MultiConfigResults.bin");
     // 2 files x 1 channel = 2 rows; 3 ids + 20-col algo-6 row = 23 cols.
     assert_eq!(got.dim(), (2, 23), "e2e MCR 2x23 (the grown LID row width)");
     assert_matrix(&got, &want, &[0, 1, 2], &[6], "e2e MultiConfigResults");
     for name in ["CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"] {
-        let got = mat_var_matrix(&bytes, name).unwrap_or_else(|| panic!("{name} missing"));
+        let got = json_matrix(&doc, name);
         let want = load_bin_phase4b(&format!("twin_e2e_{name}.bin"));
         assert_matrix(&got, &want, &[], &[], &format!("e2e {name}"));
     }

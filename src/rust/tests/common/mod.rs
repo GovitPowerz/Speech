@@ -823,6 +823,24 @@ pub fn mat_var_dims(bytes: &[u8], name: &str) -> Option<(usize, usize)> {
         .map(|(_, r, c, _)| (r, c))
 }
 
+/// Read the document `speech --results-json <path>` wrote (issue #135).
+pub fn read_results_json(path: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("results JSON {} not written: {e}", path.display()));
+    serde_json::from_str(&text).expect("results JSON parses")
+}
+
+/// One named matrix of the results JSON (a list of rows) as a row-major `Array2`.
+pub fn json_matrix(doc: &serde_json::Value, name: &str) -> Array2<f64> {
+    let rows = doc[name]
+        .as_array()
+        .unwrap_or_else(|| panic!("{name} missing from the results JSON"));
+    let cols = rows.first().map_or(0, |r| r.as_array().unwrap().len());
+    Array2::from_shape_fn((rows.len(), cols), |(i, j)| {
+        rows[i][j].as_f64().expect("a finite number")
+    })
+}
+
 /// Element compare: `strict_cols` bit-exact (id/count columns), `masked_cols`
 /// skipped (e.g. timing), the rest canary-gated via [`assert_oracle_eq_f64`].
 pub fn assert_matrix(
