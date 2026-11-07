@@ -41,8 +41,8 @@
 //! is the target, its score is `v - 200`". That decode happens once, in
 //! [`LidResult::from_encoded`]; [`ChannelResult::to_row`] re-encodes with
 //! `+ 200`. On `[200, 300]` the subtraction is exact (Sterbenz: `100 <= v <=
-//! 400`), so `(v - 200) + 200 == v` bit for bit and the `.mat` goldens are
-//! unmoved. The frozen tree keeps producing the encoding (ADR-0002).
+//! 400`), so `(v - 200) + 200 == v` bit for bit and the result-matrix goldens
+//! are unmoved. The frozen tree keeps producing the encoding (ADR-0002).
 //!
 //! # The hypothesis (issue #86)
 //!
@@ -136,7 +136,7 @@ pub struct ChannelResult {
     pub audio_duration: f64,
     /// Column 6.
     pub speech_duration: f64,
-    /// Columns 7-13. Dead surface (no reader past the `.mat`), kept for the bytes.
+    /// Columns 7-13. Dead surface (no reader past the result row), kept for the bytes.
     pub wer: WerStats,
     /// Columns 14, 15, 16..16+N and len-2; `None` writes the two 0.0 slots and a
     /// 0 counter, no score columns.

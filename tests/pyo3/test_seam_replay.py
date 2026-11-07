@@ -41,7 +41,6 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
-import scipy.io
 from numpy.typing import NDArray
 from speech.config_bridge import parse_legacy_config as parse_legacy_config_py
 from speech.engine import forward_backward
@@ -125,8 +124,7 @@ def _seed_twin_gradcheck(dst: Path) -> None:
 
 
 def _load_bin_matrix(path: Path) -> NDArray[np.float64]:
-    """`.bin` (io::binary column-major) -> a row-major (rows, cols) array, the
-    same shape scipy hands back for a `.mat` variable."""
+    """`.bin` (io::binary column-major) -> a row-major (rows, cols) array."""
     rows, cols, flat = read_bin(path)
     return flat.reshape((rows, cols), order="F")
 
@@ -163,11 +161,6 @@ def _assert_matrix(
                 assert g == w, f"{label}[{r},{c}] strict: got {g} want {w}"
             else:
                 assert_f64_close(g, w, f"{label}[{r},{c}]")
-
-
-def _mat_var(mat_path: Path, name: str) -> NDArray[np.float64]:
-    mat = scipy.io.loadmat(mat_path)
-    return cast(NDArray[np.float64], mat[name]).astype("<f8")
 
 
 def _ulp_diff(a: float, b: float) -> int:
@@ -270,25 +263,6 @@ def test_twin_train_replay(tmp_path: Path) -> None:
     manifest = cast(dict[str, Any], json.loads((PHASE4B / "manifest.json").read_text()))
     epochs = cast(int, manifest["corpus_lid"]["measured"]["train"]["twin_train"]["epochs"])
     assert epochs == 8, "epoch indices 0..7, final = epoch7"
-
-
-def test_epoch_mems_bridge_matches_mat(tmp_path: Path) -> None:
-    """Issue #134 bridge: `Engine.epoch_mems()` is a dict of the four per-epoch
-    arrays under their `.mat` variable names, each bit-identical to what the
-    engine wrote to the `.mat` in the same run. The one pytest test that still
-    reads an engine-written `.mat` (the Rust writer's own tests are the others);
-    it goes with the writer (#135)."""
-    _seed_tier2_spectral(tmp_path)
-    with chdir(tmp_path):
-        eng = speech_rs.Engine(["tier2_spectral.config"], "-m")
-        eng.run()
-        mems = eng.epoch_mems()
-        assert set(mems) == {"CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"}
-        for name, got in mems.items():
-            want = _mat_var(Path("tier2_spectral.mat"), name)
-            assert got.dtype == np.float64 and got.shape == want.shape, f"{name}: {got.shape} != {want.shape}"
-            assert np.array_equal(got.view(np.uint64), want.view(np.uint64)), f"{name}: not bit-identical to the .mat variable"
-        assert mems["CostMem"].shape == (5, 1), "3 epochs -> solo + 3 + final = 5 rows, 1 config"
 
 
 def test_grad_check_seam(tmp_path_factory: pytest.TempPathFactory) -> None:

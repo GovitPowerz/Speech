@@ -6,7 +6,8 @@
 //! `binary_end_to_end` shells out to the ACTUAL compiled `speech` binary
 //! (`CARGO_BIN_EXE_speech`) and replays the Task 8 tier-1 solo golden
 //! (`solo_tdc_matches` in `phase4a_tier1_e2e.rs`) through the CLI surface, to pin
-//! `main.rs`'s parse -> CorpusProcessor::new -> run wiring end to end.
+//! `main.rs`'s parse -> CorpusProcessor::new -> run -> `--results-json` wiring end
+//! to end (the JSON result document replaced the `.mat` sink in issue #135).
 //! `convert_config_binary_end_to_end` / `convert_config_wrong_arity_exits_nonzero`
 //! (Phase 4c Task 5 follow-up) cover `main.rs`'s OWN `--convert-config` dispatch
 //! branch the same way, via the same `CARGO_BIN_EXE_speech` idiom.
@@ -17,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
-use common::{assert_matrix, load_bin_phase4a, mat_var_matrix};
+use common::{assert_matrix, json_matrix, load_bin_phase4a, read_results_json};
 use speech::cli::{ModeKind, parse_cli};
 use speech::legacy_config::parse_legacy_config;
 use speech::toml_config::toml_to_map;
@@ -68,6 +69,67 @@ fn override_empty_removes_key() {
         "empty-value override must remove the key"
     );
     assert_eq!(inv.configs[0].get("numOuterThreads").unwrap(), "1");
+}
+
+// Issue #135: `--results-json` is taken out before the legacy grammar, in either
+// form and either mode, so it never lands in a config map nor reads as a config
+// path; a missing or empty path is a parse error.
+#[test]
+fn results_json_flag_is_not_a_config_override() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg_path = dir.path().join("base.config");
+    std::fs::write(&cfg_path, "numOuterThreads 1\n").unwrap();
+    let cfg = cfg_path.to_str().unwrap();
+
+    let inv = parse_cli(&args(&[
+        "-s",
+        "--results-json=a.json",
+        "--numOuterThreads=4",
+        cfg,
+    ]))
+    .unwrap();
+    assert_eq!(inv.results_json.as_deref(), Some("a.json"));
+    assert_eq!(inv.configs[0].len(), 1, "no results-json key in the map");
+    assert_eq!(inv.configs[0].get("numOuterThreads").unwrap(), "4");
+
+    let inv = parse_cli(&args(&["-m", cfg, "--results-json", "b.json", cfg])).unwrap();
+    assert_eq!(inv.results_json.as_deref(), Some("b.json"));
+    assert_eq!(
+        inv.configs.len(),
+        2,
+        "the flag and its path are not config paths"
+    );
+
+    let inv = parse_cli(&args(&[
+        "-s",
+        "--results-json",
+        "a.json",
+        "--results-json=c.json",
+        cfg,
+    ]))
+    .unwrap();
+    assert_eq!(
+        inv.results_json.as_deref(),
+        Some("c.json"),
+        "the last one wins"
+    );
+
+    assert!(
+        parse_cli(&args(&["-s", cfg]))
+            .unwrap()
+            .results_json
+            .is_none()
+    );
+    for bad in [
+        &["-s", cfg, "--results-json"][..],
+        &["-s", "--results-json=", cfg],
+    ] {
+        let err = parse_cli(&args(bad)).unwrap_err().to_string();
+        assert!(
+            err.contains("--results-json needs a path"),
+            "{bad:?}: {err}"
+        );
+    }
 }
 
 #[test]
@@ -181,8 +243,7 @@ fn seed_corpus(dir: &Path) {
     std::fs::create_dir_all(dir.join("vrcts_solo")).unwrap();
 }
 
-// `mat_var_matrix`/`assert_matrix` are shared via `common` (hoisted from four
-// copy-pasted phase4a test files; see `tests/common/mod.rs`).
+// `read_results_json`/`json_matrix`/`assert_matrix` are shared via `common`.
 
 #[test]
 fn binary_end_to_end() {
@@ -194,8 +255,9 @@ fn binary_end_to_end() {
         .current_dir(dir.path())
         .args([
             "-s",
+            "--results-json",
+            "solo_tdc.json",
             "--Neural_Networks_BackPropagation_Epochs=0",
-            "--multiConfigResultsOutputFile=solo_tdc.mat",
             "--Dump_Directory=vrcts_solo",
             "tier1_tdc.config",
         ])
@@ -210,11 +272,8 @@ fn binary_end_to_end() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let mat_path = dir.path().join("solo_tdc.mat");
-    assert!(mat_path.exists(), "output .mat was not written");
-
-    let bytes = std::fs::read(&mat_path).unwrap();
-    let got_mcr = mat_var_matrix(&bytes, "MultiConfigResults").expect("MultiConfigResults missing");
+    let doc = read_results_json(&dir.path().join("solo_tdc.json"));
+    let got_mcr = json_matrix(&doc, "MultiConfigResults");
     let want_mcr = load_bin_phase4a("solo_tdc_MultiConfigResults.bin");
     // cols 0/1/2 = file/conf/chan ids (strict); col 6 = timing (masked).
     assert_matrix(
@@ -227,10 +286,47 @@ fn binary_end_to_end() {
     assert_eq!(got_mcr.dim(), (6, 21), "binary e2e MCR 6x21");
 
     for var in ["CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"] {
-        let got = mat_var_matrix(&bytes, var).unwrap_or_else(|| panic!("{var} missing"));
+        let got = json_matrix(&doc, var);
         let want = load_bin_phase4a(&format!("solo_tdc_{var}.bin"));
         assert_matrix(&got, &want, &[], &[], &format!("binary e2e {var}"));
     }
+}
+
+// Issue #135: the `--results-json` file is created before the run, so a path in a
+// missing directory fails at once (exit 1, the path named) rather than after a run
+// that may take hours; the run never starts, so its VRCTS dumps are absent.
+#[test]
+fn results_json_unwritable_path_fails_before_the_run() {
+    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    seed_corpus(dir.path());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_speech"))
+        .current_dir(dir.path())
+        .args([
+            "-s",
+            "--results-json",
+            "missing/solo_tdc.json",
+            "--Neural_Networks_BackPropagation_Epochs=0",
+            "--Dump_Directory=vrcts_solo",
+            "tier1_tdc.config",
+        ])
+        .output()
+        .expect("failed to run speech binary");
+
+    assert_eq!(output.status.code(), Some(1), "an unwritable path exits 1");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("missing/solo_tdc.json"),
+        "the error names the path: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("vrcts_solo"))
+            .unwrap()
+            .count(),
+        0,
+        "the run never started"
+    );
 }
 
 #[test]

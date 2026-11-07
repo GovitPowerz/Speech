@@ -312,24 +312,20 @@ fn tdc_segmenter_rejects_trailing_junk_on_scalar_keys() {
     }
 }
 
-/// Issue #87: the Twin's defaulted i32 / bool reads, exact and fast, take the family's token
-/// parser (the pair of private copies in `tasks/lid.rs` and `fast/plan.rs` is gone).
+/// Issue #87: the Twin's defaulted i32 reads, exact and fast, take the family's token
+/// parser (the pair of private copies in `tasks/lid.rs` and `fast/plan.rs` is gone). The
+/// bool case read `BLSTM_LID_DumpInternals`, unread since issue #135.
 #[test]
 fn twin_lid_drivers_reject_trailing_junk_on_scalar_keys() {
-    let exact = load("phase4b/twin_mode0.config");
-    for (key, bad) in [
-        ("BLSTM_LID_Mode", "0x"),
-        ("BLSTM_LID_DumpInternals", "True"),
-    ] {
-        let err = err_of(
-            TwinBlstmSpectralLid::from_legacy(&with(exact.clone(), key, bad), None, None),
-            key,
-        );
-        assert!(
-            err.contains(&format!("cannot read '{bad}' as ")) && err.contains(key),
-            "exact {key}: {err}"
-        );
-    }
+    let exact = with(load("phase4b/twin_mode0.config"), "BLSTM_LID_Mode", "0x");
+    let err = err_of(
+        TwinBlstmSpectralLid::from_legacy(&exact, None, None),
+        "exact BLSTM_LID_Mode 0x",
+    );
+    assert!(
+        err.contains("cannot read '0x' as i32") && err.contains("BLSTM_LID_Mode"),
+        "{err}"
+    );
     let fast = with(load("phase4b/twin_mode7.config"), "BLSTM_LID_Mode", "7x");
     let err = err_of(
         FastTwinLid::from_legacy(&fast, None, None),

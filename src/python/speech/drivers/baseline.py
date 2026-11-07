@@ -450,8 +450,8 @@ def _held_out_fold(cfg: Mapping[str, str], workdir: Path, packs: Sequence[Path],
     set or the untrained `<net>_seed` set alike, injected through `set_weights` on either
     `Inference_Path`, issue #62), returning its config-0 channel results: the SAME scorer
     measures the trained model and its own from-scratch init on the identical test set (the
-    direction-safe improvement). No score file is written or read back (issue #86; the `-m`
-    engine still rewrites `<workdir>/MultiConfigResults.mat`): the LID metrics come off
+    direction-safe improvement). No score file is written or read back (issue #86) and the
+    engine writes no results `.mat` (issue #135): the LID metrics come off
     `lid_scores` / `lid_target`, the SAD DCF off `hypothesis`."""
     nets = [read_weight_vector(p) for p in packs]
     return FoldRun(cfg, workdir, backprop=False, listing=test_listing_name).run(nets).results.for_config(0)

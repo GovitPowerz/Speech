@@ -55,6 +55,9 @@ impl Mode {
 pub struct CliInvocation {
     pub mode: Mode,
     pub configs: Vec<IndexMap<String, String>>,
+    /// `--results-json <path>` (port-only, issue #135): where `main` writes the
+    /// result document after the run; `None` writes nothing.
+    pub results_json: Option<String>,
 }
 
 /// Port of `FastSpeechProcessing.cpp main` (`:31-64`)'s argument parsing (mode
@@ -73,7 +76,29 @@ pub struct CliInvocation {
 /// Unknown mode (`:59-63`) or `args.len() < 2` (legacy `argc < 3`, `:37-40`)
 /// is an error (usage + exit in the legacy; here, an `Err` for `main` to turn
 /// into a usage print + exit).
+///
+/// The port-only `--results-json <path>` (or `--results-json=<path>`, issue #135)
+/// is taken out of `args` before the legacy grammar runs, wherever it appears;
+/// the last one wins, as a repeated override does.
 pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
+    let mut rest: Vec<String> = Vec::with_capacity(args.len());
+    let mut results_json = None;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        let path = if arg == "--results-json" {
+            it.next().map(String::as_str)
+        } else if let Some(path) = arg.strip_prefix("--results-json=") {
+            Some(path)
+        } else {
+            rest.push(arg.clone());
+            continue;
+        };
+        match path {
+            Some(p) if !p.is_empty() => results_json = Some(p.to_string()),
+            _ => bail!("--results-json needs a path"),
+        }
+    }
+    let args = rest.as_slice();
     if args.len() < 2 {
         bail!("too few arguments");
     }
@@ -99,7 +124,11 @@ pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
         }
     };
 
-    Ok(CliInvocation { mode, configs })
+    Ok(CliInvocation {
+        mode,
+        configs,
+        results_json,
+    })
 }
 
 /// Load a config file, dispatching on extension: `.toml` -> the Phase 4c canonical

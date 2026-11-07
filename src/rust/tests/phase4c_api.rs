@@ -318,10 +318,6 @@ fn results_matrix_after_run() {
         "Neural_Networks_BackPropagation_Epochs".to_string(),
         "0".to_string(),
     );
-    cfg.insert(
-        "multiConfigResultsOutputFile".to_string(),
-        "phase4c_seam.mat".to_string(),
-    );
     cfg.insert("Dump_Directory".to_string(), "vrcts_seam".to_string());
     std::fs::create_dir_all("vrcts_seam").unwrap();
 
@@ -373,10 +369,6 @@ fn image_mode_trains_exact_path_unblocked() {
     let _cwd = CwdGuard::enter(dir.path());
 
     let mut cfg = load_config("phase4a/tier1_tdc.config");
-    cfg.insert(
-        "multiConfigResultsOutputFile".to_string(),
-        "phase7_t5_image_train.mat".to_string(),
-    );
     cfg.insert(
         "Dump_Directory".to_string(),
         "vrcts_t5_image_train".to_string(),

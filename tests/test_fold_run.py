@@ -139,10 +139,9 @@ def test_fold_run_never_mutates_the_base(tmp_path: Path) -> None:
 
 
 def test_fold_run_hands_the_engine_absolute_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The six path keys reach `from_map` resolved against the workdir (the process cwd is not
-    part of the contract); an absent `multiConfigResultsOutputFile` defaults to the workdir's
-    `MultiConfigResults.mat` (where the chdir'd legacy flow put it), an absent `Dump_Directory`
-    stays absent, an already-absolute value is left alone. `config` itself keeps the values as
+    """The five path keys reach `from_map` resolved against the workdir (the process cwd is not
+    part of the contract); an absent `Dump_Directory` stays absent, an already-absolute value is
+    left alone, and no results-file key is added (issue #135). `config` itself keeps the values as
     given, so its text is the same on every host."""
     seen = _fake_seam(monkeypatch)
     base = _base(6)
@@ -157,10 +156,8 @@ def test_fold_run_hands_the_engine_absolute_paths(tmp_path: Path, monkeypatch: p
     assert handed["language2classmapping"] == str(tmp_path / "mapping.csv")
     assert handed["BLSTM_weightsFile"] == str(tmp_path / "sad.bin")
     assert handed["BLSTM_LID_weightsFile"] == "/abs/lid.bin"
-    assert handed["multiConfigResultsOutputFile"] == str(tmp_path / "MultiConfigResults.mat")
-    assert "Dump_Directory" not in handed
+    assert "Dump_Directory" not in handed and "multiConfigResultsOutputFile" not in handed
     assert fold.config["fileslisting"] == "listing.csv", "the rendered map keeps the caller's relative value"
-    assert "multiConfigResultsOutputFile" not in fold.config
 
 
 def test_fold_run_leaves_an_empty_path_value_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

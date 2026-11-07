@@ -110,7 +110,7 @@ impl StreamingLidSession {
     /// stream `rate`, the target `lang_index` (the eval target -- the offline `audio.lang_index`),
     /// and the LID weight pack: [`FastLidPlan::from_map`] then [`Self::from_plan`]. Every
     /// construction refusal (Mode 7 only, InputNormalizationType 0, no pitch pass /
-    /// DumpInternals / negative TargetEnforcementStep / MLP, ...) is the plan's.
+    /// negative TargetEnforcementStep / MLP, ...) is the plan's.
     pub fn new(
         map: &IndexMap<String, String>,
         rate: f64,

@@ -176,10 +176,52 @@ fn main() {
         }
     };
 
+    // `--results-json`: the file is created before the run, so an unwritable path fails
+    // now rather than after it (a failed run leaves the file empty).
+    let results_json = invocation.results_json.map(|path| {
+        let file = std::fs::File::create(&path).unwrap_or_else(|e| {
+            eprintln!("Error: cannot create the results JSON `{path}`: {e}");
+            std::process::exit(1);
+        });
+        (path, file)
+    });
+
     if let Err(e) = processor.run() {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
+
+    if let Some((path, file)) = results_json
+        && let Err(e) = write_results_json(&processor, file)
+    {
+        eprintln!("Error: cannot write the results JSON `{path}`: {e}");
+        std::process::exit(1);
+    }
+}
+
+/// The `--results-json` document (port-only, issue #135; it replaced the legacy
+/// `saveResults` `.mat`): the result matrix (`results_matrix()`, rows `[file+1,
+/// conf+1, chan+1, result row...]`, the wall-clock column included) and the four
+/// per-epoch arrays under their legacy variable names (`EpochMems::named`), each
+/// a list of rows. Floats round-trip exactly; a non-finite cell is written as `null`.
+fn write_results_json(processor: &CorpusProcessor, mut file: std::fs::File) -> std::io::Result<()> {
+    use std::io::Write;
+    let rows = |m: &ndarray::Array2<f64>| -> serde_json::Value {
+        m.rows()
+            .into_iter()
+            .map(|r| r.to_vec())
+            .collect::<Vec<_>>()
+            .into()
+    };
+    let mut doc = serde_json::Map::new();
+    doc.insert(
+        "MultiConfigResults".into(),
+        rows(processor.results_matrix()),
+    );
+    for (name, m) in processor.epoch_mems().named() {
+        doc.insert(name.into(), rows(m));
+    }
+    file.write_all(serde_json::Value::Object(doc).to_string().as_bytes())
 }
 
 /// Port of `print_usage` (`FastSpeechProcessing.cpp:78-87`), `.config` wording
@@ -194,6 +236,9 @@ fn print_usage(progname: &str) {
         "    mode syntax (verbose): -S single config, -I single config with image output, -T single config for unit testing, -M multiple config"
     );
     eprintln!("    config_options syntax: --<variable_name>=<variable_value>");
+    eprintln!(
+        "    --results-json <path>: write the result matrix and the per-epoch arrays as JSON"
+    );
     eprintln!("    whitespace not allowed in variable names or values");
     eprintln!("    all config_file variables overwritten by config_options");
     eprintln!("    setting <variable_value> = \"\" removes the variable from the config");

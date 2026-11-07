@@ -751,8 +751,8 @@ impl FastNet {
     /// body are the legacy `BLSTMNeuralNetwork.cpp:548-590` lines that function
     /// transcribes), OUTPUT-ONLY. The
     /// exact stitches the fwd/bwd hidden states (`_OutputForward`/`_OutputBackward`) across
-    /// windows + sweeps; Mode 7 reads them ONLY for `DumpLIDInternals` (off on the gate
-    /// configs, the fast driver bails if it is on), so the fast path tracks only `output`.
+    /// windows + sweeps; Mode 7 read them only for the `DumpLIDInternals` dump, retired in
+    /// issue #135, so the fast path tracks only `output`.
     /// `out_len` is the caller's posterior row count. NET-AGNOSTIC: every shape runs it
     /// through [`Self::feed_forward`], one whole block per window. NOT one of the two
     /// byte-frozen streaming kernels, so lifting it out of `FastBlstm` (issue #57) was a
@@ -879,14 +879,14 @@ impl FastNet {
 ///
 /// SINCE ISSUE #84 ITS SETUP IS [`FastLidPlan`] (rate-free, shared with the Utterance
 /// stream) + [`LidTimeline`](super::plan::LidTimeline) (per file, at the audio's rate and
-/// target): every construction refusal (Mode 7 only, the pitch second pass,
-/// `DumpInternals`, a LID `InputNormalizationType != 0`, a negative
-/// `TargetEnforcementStep`, MLP mode) is the plan's, the two regime refusals (a windowed
-/// CAUSAL LID net, OVERLAP on every shape) included, rate-free on the config's intent, and
-/// the two stateful shifts the exact driver re-quantizes per file are NOT carried (the
-/// plan's module docs: a fixed point at one rate). This struct keeps the
-/// LID net, the per-channel loop and the result members. The wav CNN arm
-/// (`periodogram.is_none()`) still bails per file: it is the audio's, not the config's.
+/// target): every construction refusal (Mode 7 only, the pitch second pass, a LID
+/// `InputNormalizationType != 0`, a negative `TargetEnforcementStep`, MLP mode) is the
+/// plan's, the two regime refusals (a windowed CAUSAL LID net, OVERLAP on every shape)
+/// included, rate-free on the config's intent, and the two stateful shifts the exact driver
+/// re-quantizes per file are NOT carried (the plan's module docs: a fixed point at one
+/// rate). This struct keeps the LID net, the per-channel loop and the result members. The
+/// wav CNN arm (`periodogram.is_none()`) still bails per file: it is the audio's, not the
+/// config's.
 ///
 /// FORWARD-ONLY: `cumulative_error`/`nb_of_classif` (SAD, always 0 in Mode 7 anyway) and
 /// the LID members' `cumulative_error`/`nb_of_classif` (the LID NN-cost/count columns) stay ZERO

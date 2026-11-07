@@ -160,26 +160,28 @@ def test_fold_run_is_one_fold_at_theta_f11(tmp_path: Path) -> None:
 
 def test_fold_run_needs_no_process_cwd(tmp_path: Path) -> None:
     """A fold run from an unrelated cwd, on a listing with absolute rows, matches the
-    chdir'd path-constructor run: the six path keys are resolved against the workdir, and
-    the `.mat` the config names lands there too."""
+    chdir'd path-constructor run: the path keys are resolved against the workdir, and
+    neither run writes a file there beside the seeded ones (the VRCTS dumps land in the
+    seeded `Dump_Directory`; no results `.mat` since issue #135)."""
     cfg = _seed_tier2_spectral(tmp_path)
     cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
     listing = tmp_path / "tier2_fileslisting.csv"
     rows = listing.read_text().splitlines()
     listing.write_text("".join(";".join(str(tmp_path / c) if c.startswith("corpus/") else c for c in r.split(";")) + "\n" for r in rows))
     (tmp_path / "tier2_spectral.config").write_text(_config_text(cfg))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    seeded = sorted(p.name for p in tmp_path.iterdir())
 
     with chdir(tmp_path):
         by_path = speech_rs.Engine(["tier2_spectral.config"], "-m")
         by_path.run()
         r_path = ChannelResults.from_seam(by_path.channel_results())
 
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
     with chdir(elsewhere):
         res = FoldRun(cfg, tmp_path, backprop=False).run()
     _assert_same_results(r_path, res.results)
-    assert (tmp_path / cfg["multiConfigResultsOutputFile"]).is_file()
+    assert sorted(p.name for p in tmp_path.iterdir()) == seeded, "no engine-written file in the workdir"
     assert not list(elsewhere.iterdir()), "nothing lands in the process cwd"
 
 
