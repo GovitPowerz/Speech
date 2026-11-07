@@ -1,59 +1,27 @@
-//! Phase 4a Task 6: `BagOfProcessors::save_and_update` (`BagOfProcessors.cpp:409-471`)
-//! + `save_weights`/`update_weights` (`:148-205`).
+//! Phase 4a Task 6: `BagOfProcessors::save_and_update` (`BagOfProcessors.cpp:409-471`),
+//! the best-cost gate (`saveWeights`, no files since issue #136) and `update_weights`
+//! (`:148-205`).
 //!
 //! `aggregation_bit_exact` isolates the column-sum/mean arithmetic on an algo-1
-//! bag (TDC, NN-free): `save_weights`/`update_weights` are no-ops for algo 1/2 in
+//! bag (TDC, NN-free): the gate and the update are no-ops for algo 1/2 in
 //! the legacy (no matching `if` branch), so only the aggregation math is exercised.
-//! `best_cost_gate_fires_and_skips`/`cost_mem_rows_written`/
-//! `update_called_with_neg_costlid` use a real algo-3 bag (the only ported NN algo
-//! with a live save/update criterion) built the same way Task 3/4's inline tests do:
-//! `phase0/1_worker_1.config` + `phase0/NNweights_config1.bin` via `BLSTM_weightsFile`.
+//! `best_cost_gate_fires_and_skips`/`best_pack_is_the_pre_update_pack_and_the_fold`/
+//! `cost_mem_rows_written`/`update_called_with_neg_costlid` use a real algo-3 bag (the
+//! only ported NN algo with a live save/update criterion) built the same way Task 3/4's
+//! inline tests do: `phase0/1_worker_1.config` + `phase0/NNweights_config1.bin` via
+//! `BLSTM_weightsFile`.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use indexmap::IndexMap;
 use ndarray::Array2;
 
 use speech::engine::bag_of_processors::BagOfProcessors;
 use speech::engine::channel_result::ChannelResult;
-use speech::features::stats::InputStatistics;
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data")
-}
-
-/// `save_and_update`'s `bestNNWeight_<pos+1>_<filename>` compose
-/// (`BagOfProcessors.cpp:462-464`) puts the prefix on the BASENAME
-/// (`io::prefix_basename`; the legacy glued it onto the whole string, FIXED --
-/// `tests/phase7_bench.rs::bench_runs_with_absolute_output_keys` owns the
-/// directory case). The legacy's production shape is a bare relative `filename`
-/// (e.g. `multiConfigResultsOutputFile`, default `MultiConfigResults.mat`) with
-/// cwd == the run directory, and these tests keep that shape: chdir into a
-/// tempdir for the artifact-producing calls. `set_current_dir` is
-/// process-global, so serialize with this mutex against `cargo test`'s default
-/// parallel threads.
-static CWD_LOCK: Mutex<()> = Mutex::new(());
-
-/// RAII guard: chdir into `dir`, restore the original cwd on drop. Caller must
-/// hold `CWD_LOCK` for the guard's lifetime.
-struct CwdGuard {
-    original: PathBuf,
-}
-
-impl CwdGuard {
-    fn enter(dir: &std::path::Path) -> CwdGuard {
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
-        CwdGuard { original }
-    }
-}
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original);
-    }
 }
 
 fn load_config(rel: &str) -> IndexMap<String, String> {
@@ -68,8 +36,8 @@ fn with_bag_keys(mut m: IndexMap<String, String>, algo: i32) -> IndexMap<String,
 }
 
 /// Real algo-3 bag (single config), weights overridden to the known 33,671-weight
-/// net, so `save_weights` writes real artifacts and `update_weights` runs the real
-/// iRPROP- trainer without crashing.
+/// net, so the best-cost gate captures a real pack and `update_weights` runs the
+/// real iRPROP- trainer without crashing.
 fn algo3_bag(weights_path: &std::path::Path) -> BagOfProcessors {
     let mut cfg = with_bag_keys(load_config("phase0/1_worker_1.config"), 3);
     cfg.insert(
@@ -86,10 +54,6 @@ fn algo1_bag() -> BagOfProcessors {
 }
 
 fn empty_derivs(nb_of_conf: usize) -> BTreeMap<usize, Vec<Array2<f64>>> {
-    (0..nb_of_conf).map(|ii| (ii, Vec::new())).collect()
-}
-
-fn empty_stats(nb_of_conf: usize) -> BTreeMap<usize, Vec<InputStatistics>> {
     (0..nb_of_conf).map(|ii| (ii, Vec::new())).collect()
 }
 
@@ -120,24 +84,20 @@ fn aggregation_bit_exact() {
     // col7 (nbOfWords) = 4 -> WER normalization fires.
     let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20)]);
     let derivs = empty_derivs(1);
-    let stats = empty_stats(1);
     let mut cost_mem = [0.0; 1];
     let mut bad_classif = [0.0; 1];
     let mut cost_lid = [0.0; 1];
     let mut bad_classif_lid = [0.0; 1];
 
     bag.save_and_update(
-        "unused.mat",
         &[m.iter().collect()],
         &mut best_cost,
         &derivs,
-        &stats,
         &mut cost_mem,
         &mut bad_classif,
         &mut cost_lid,
         &mut bad_classif_lid,
-    )
-    .unwrap();
+    );
 
     // cost = sums(4)/sums(17) = 100/20 = 5.0
     assert_eq!(cost_mem[0], 5.0);
@@ -164,24 +124,20 @@ fn aggregation_counter_zero_guard_skips_division() {
 
     let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20)]);
     let derivs = empty_derivs(1);
-    let stats = empty_stats(1);
     let mut cost_mem = [0.0; 1];
     let mut bad_classif = [0.0; 1];
     let mut cost_lid = [0.0; 1];
     let mut bad_classif_lid = [0.0; 1];
 
     bag.save_and_update(
-        "unused.mat",
         &[m.iter().collect()],
         &mut best_cost,
         &derivs,
-        &stats,
         &mut cost_mem,
         &mut bad_classif,
         &mut cost_lid,
         &mut bad_classif_lid,
-    )
-    .unwrap();
+    );
 
     // sums(17) == 0 -> cost NOT divided, stays sums(4) = 7.0.
     assert_eq!(cost_mem[0], 7.0);
@@ -189,32 +145,21 @@ fn aggregation_counter_zero_guard_skips_division() {
     assert_eq!(cost_lid[0], 15.0);
 }
 
-/// Algo-3 bag, real net + tempdir: epoch A cost 5.0 beats the 1e20 seed -> the
-/// three save artifacts appear and best_cost updates; epoch B cost 7.0 does NOT
-/// beat 5.0 -> no new save (files unchanged), best_cost unchanged. STRICT: uses
-/// mtime + content equality, not just existence.
+/// Algo-3 bag, real net: epoch A cost 5.0 beats the 1e20 seed -> the gate fires
+/// (`fires == 1`) and best_cost updates; epoch B cost 7.0 does NOT beat 5.0 -> no
+/// fire: the captured pack is still epoch A's (`fires` still 1), best_cost unchanged.
 #[test]
 fn best_cost_gate_fires_and_skips() {
-    let _lock = CWD_LOCK.lock().unwrap();
     let weights_src = ref_dir().join("phase0/NNweights_config1.bin");
     let tmp = tempfile::tempdir().unwrap();
     let weights_path = tmp.path().join("weights.bin");
     std::fs::copy(&weights_src, &weights_path).unwrap();
 
     let mut bag = algo3_bag(&weights_path);
-    let derivs_mat = bag.get_weights_derivatives(0)[0].clone();
-    let stats0 = bag.get_input_statistics(0);
-
+    let derivs: BTreeMap<usize, Vec<Array2<f64>>> =
+        BTreeMap::from([(0, vec![bag.get_weights_derivatives(0)[0].clone()])]);
     let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20)]);
-    let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> =
-        BTreeMap::from([(0, vec![derivs_mat.clone()])]);
-    let stats: BTreeMap<usize, Vec<InputStatistics>> = BTreeMap::from([(0, stats0)]);
 
-    let _cwd = CwdGuard::enter(tmp.path());
-
-    // legacy always uses a bare relative filename (e.g. multiConfigResultsOutputFile,
-    // default MultiConfigResults.mat) with cwd == run dir.
-    let out_a = "run_a.mat";
     // Col 4 (cost numerator) = 5.0, col 17 (denom) = 1.0 -> cost = 5.0.
     #[rustfmt::skip]
     let row_a: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
@@ -226,67 +171,95 @@ fn best_cost_gate_fires_and_skips() {
     let mut bad_classif_lid = [0.0; 1];
 
     bag.save_and_update(
-        out_a,
         &[m_a.iter().collect()],
         &mut best_cost,
         &derivs,
-        &stats,
         &mut cost_mem,
         &mut bad_classif,
         &mut cost_lid,
         &mut bad_classif_lid,
-    )
-    .unwrap();
+    );
 
     assert_eq!(best_cost[&0], 5.0);
-    let weights_artifact = PathBuf::from(format!("weights_bestNNWeight_1_{out_a}"));
-    let derivs_artifact = PathBuf::from(format!("weightsDerivatives_bestNNWeight_1_{out_a}"));
-    let mat_artifact = PathBuf::from(format!("bestNNWeight_1_{out_a}"));
-    assert!(weights_artifact.exists(), "{weights_artifact:?} missing");
-    assert!(derivs_artifact.exists(), "{derivs_artifact:?} missing");
-    assert!(mat_artifact.exists(), "{mat_artifact:?} missing");
+    let pack_a = bag.best_pack_for_test(0, 0).expect("epoch A fires").clone();
+    assert_eq!(pack_a.fires, 1);
 
-    let weights_mtime_a = std::fs::metadata(&weights_artifact)
-        .unwrap()
-        .modified()
-        .unwrap();
-    let weights_bytes_a = std::fs::read(&weights_artifact).unwrap();
-
-    // Refresh derivs map (save_and_update did not mutate it; reuse the same handle).
-    derivs.insert(0, vec![derivs_mat]);
-
-    let out_b = "run_b.mat";
-    // Cost 7.0 - worse than the 5.0 best - must NOT save.
+    // Cost 7.0 - worse than the 5.0 best - must NOT fire.
     #[rustfmt::skip]
     let row_b: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 7.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
     let m_b = [ChannelResult::from_row(&row_b)];
 
     bag.save_and_update(
-        out_b,
         &[m_b.iter().collect()],
         &mut best_cost,
         &derivs,
-        &stats,
         &mut cost_mem,
         &mut bad_classif,
         &mut cost_lid,
         &mut bad_classif_lid,
-    )
-    .unwrap();
+    );
 
-    // best_cost unchanged, and no artifact for run_b was ever created.
     assert_eq!(best_cost[&0], 5.0);
-    let weights_artifact_b = PathBuf::from(format!("weights_bestNNWeight_1_{out_b}"));
-    assert!(!weights_artifact_b.exists());
+    assert_eq!(
+        bag.best_pack_for_test(0, 0),
+        Some(&pack_a),
+        "epoch B did not fire: the pack and its fire count are epoch A's"
+    );
+}
 
-    // The run_a artifact is untouched (same mtime + bytes): epoch B did not re-save.
-    let weights_mtime_b = std::fs::metadata(&weights_artifact)
-        .unwrap()
-        .modified()
-        .unwrap();
-    let weights_bytes_b = std::fs::read(&weights_artifact).unwrap();
-    assert_eq!(weights_mtime_a, weights_mtime_b);
-    assert_eq!(weights_bytes_a, weights_bytes_b);
+/// Issue #136: a fire captures each net's pack as it stood BEFORE the epoch's update
+/// and the folded derivatives that update consumed -- the legacy `saveWeights` ran
+/// before `updateWeights` (`BagOfProcessors.cpp:464-466`). The crafted nonzero fold
+/// moves the weights, so a capture taken after the update would miss `before`.
+#[test]
+fn best_pack_is_the_pre_update_pack_and_the_fold() {
+    let weights_src = ref_dir().join("phase0/NNweights_config1.bin");
+    let tmp = tempfile::tempdir().unwrap();
+    let weights_path = tmp.path().join("weights.bin");
+    std::fs::copy(&weights_src, &weights_path).unwrap();
+
+    let mut bag = algo3_bag(&weights_path);
+    let before = bag.get_weights(0)[0].clone();
+    let fold = Array2::from_shape_fn((before.len(), 2), |(r, c)| {
+        if c == 1 {
+            1.0
+        } else {
+            (r % 7) as f64 * 0.01 - 0.03
+        }
+    });
+    let derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::from([(0, vec![fold.clone()])]);
+    let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20)]);
+
+    #[rustfmt::skip]
+    let row: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
+    let m = [ChannelResult::from_row(&row)];
+    let mut cost_mem = [0.0; 1];
+    let mut bad_classif = [0.0; 1];
+    let mut cost_lid = [0.0; 1];
+    let mut bad_classif_lid = [0.0; 1];
+
+    bag.save_and_update(
+        &[m.iter().collect()],
+        &mut best_cost,
+        &derivs,
+        &mut cost_mem,
+        &mut bad_classif,
+        &mut cost_lid,
+        &mut bad_classif_lid,
+    );
+
+    assert_ne!(
+        bag.get_weights(0)[0],
+        before,
+        "the update moved the weights"
+    );
+    let pack = bag.best_pack_for_test(0, 0).expect("the first epoch fires");
+    assert_eq!(pack.weights, before, "the pack is the pre-update one");
+    assert_eq!(
+        pack.derivs, fold,
+        "the derivs are the fold the update consumed"
+    );
+    assert_eq!(pack.fires, 1);
 }
 
 /// The four row slices (cost/badClassif/costLID/badLIDClassif) receive the
@@ -309,13 +282,10 @@ fn cost_mem_rows_written() {
     let _ = &mut cfg_tdc;
 
     let derivs_mat = bag.get_weights_derivatives(1)[0].clone();
-    let stats1 = bag.get_input_statistics(1);
 
     let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20), (1, 1e20)]);
     let derivs: BTreeMap<usize, Vec<Array2<f64>>> =
         BTreeMap::from([(0, Vec::new()), (1, vec![derivs_mat])]);
-    let stats: BTreeMap<usize, Vec<InputStatistics>> =
-        BTreeMap::from([(0, Vec::new()), (1, stats1)]);
 
     #[rustfmt::skip]
     let row0: [f64; 18] = [0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 1.0];
@@ -324,26 +294,20 @@ fn cost_mem_rows_written() {
     let m0 = [ChannelResult::from_row(&row0)];
     let m1 = [ChannelResult::from_row(&row1)];
 
-    let _lock = CWD_LOCK.lock().unwrap();
-    let _cwd = CwdGuard::enter(tmp.path());
-    let out = "run.mat";
     let mut cost_mem = [0.0; 2];
     let mut bad_classif = [0.0; 2];
     let mut cost_lid = [0.0; 2];
     let mut bad_classif_lid = [0.0; 2];
 
     bag.save_and_update(
-        out,
         &[m0.iter().collect(), m1.iter().collect()],
         &mut best_cost,
         &derivs,
-        &stats,
         &mut cost_mem,
         &mut bad_classif,
         &mut cost_lid,
         &mut bad_classif_lid,
-    )
-    .unwrap();
+    );
 
     // Row0: cost = sums(4)/sums(17) = 2/1 = 2.0; badClassif = means(2) = 1.0;
     // costLID: sums(16) == 0 -> NOT divided, stays sums(14) = 0.0;
@@ -362,7 +326,7 @@ fn cost_mem_rows_written() {
 }
 
 /// `costLID = -1.0` when `totalSpeechDuration < 1e-3` (`:465`), applied AFTER
-/// `save_weights` and BEFORE `update_weights`. Not independently observable via
+/// the best-cost gate and BEFORE `update_weights`. Not independently observable via
 /// algo 3's own update criterion (algo 3 ignores costLID), so this asserts via
 /// the test-only hook recording the value `update_weights` actually received.
 #[test]
@@ -374,11 +338,9 @@ fn update_called_with_neg_costlid() {
 
     let mut bag = algo3_bag(&weights_path);
     let derivs_mat = bag.get_weights_derivatives(0)[0].clone();
-    let stats0 = bag.get_input_statistics(0);
 
     let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20)]);
     let derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::from([(0, vec![derivs_mat])]);
-    let stats: BTreeMap<usize, Vec<InputStatistics>> = BTreeMap::from([(0, stats0)]);
 
     // means(5) (col5, totalSignalDuration/rows) and means(6) (col6, speech
     // duration/rows) both 0 across the single row -> totalSpeechDuration = 0 <
@@ -388,26 +350,20 @@ fn update_called_with_neg_costlid() {
     let row: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 9.0, 0.0, 3.0, 1.0];
     let m = [ChannelResult::from_row(&row)];
 
-    let _lock = CWD_LOCK.lock().unwrap();
-    let _cwd = CwdGuard::enter(tmp.path());
-    let out = "run.mat";
     let mut cost_mem = [0.0; 1];
     let mut bad_classif = [0.0; 1];
     let mut cost_lid = [0.0; 1];
     let mut bad_classif_lid = [0.0; 1];
 
     bag.save_and_update(
-        out,
         &[m.iter().collect()],
         &mut best_cost,
         &derivs,
-        &stats,
         &mut cost_mem,
         &mut bad_classif,
         &mut cost_lid,
         &mut bad_classif_lid,
-    )
-    .unwrap();
+    );
 
     // cost_mem itself carries the PRE-gate costLID (9/3 = 3.0) - the row slices are
     // written before the :465 override.

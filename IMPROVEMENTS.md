@@ -1505,7 +1505,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   captured from compiled `istringstream >>` probes on the oracle env).
 
 - **[phase4a] `saveWeights` glues the `weights_`/`weightsDerivatives_` prefix to the WHOLE filename
-  string, not the basename -- FIXED (ledger interstitial, commit `7a827ca`, all three sites)**
+  string, not the basename -- FIXED (ledger interstitial, commit `7a827ca`, all three sites);
+  RETIRED (issue #136)**
   (`nn/blstm.rs::save_weights`, from `BLSTMNeuralNetwork.cpp:319-323`):
   `buf << "weights_%s" << filename` (and `buf2 << "weightsDerivatives_%s"`) string-concatenates the
   prefix before the ENTIRE path, so a `<filename>` of `/out/epoch995.mat` yields the sibling `.bin`
@@ -1596,6 +1597,12 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   naming rules coincide on every bare name, the only shape the harness ever emits, so its
   committed artifacts (`weights_bestNNWeight_1_tier2_spectral.mat` and siblings) stay the goldens
   they were.
+  (Issue #136: the three naming sites, `io::prefix_basename` and its two unit tests are retired with
+  the files they named -- the engine writes no weight file; a gate fire's pack lives in memory
+  (`BestPack`), compared to those same committed artifacts by the two training goldens.
+  `bench_runs_with_absolute_output_keys` now asserts the results directory holds only the `.mat`
+  and the dumps; `bench_names_the_unwritable_output_path` stays, its failing write now the
+  results `.mat`.)
 
 - **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
   the console warning -- FIXED (phase 11 interstitial, commit `c02509e`)**
@@ -1827,6 +1834,11 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   ns goldens AND differ from nsx at epoch 5, and `CostLIDMem` must carry the PRE-gate values.
   Mutation (verified): disabling the `save_and_update` gate (`if false && ...`) makes the test
   fail at exactly `epoch 5 weight 167` -- the port then reproduces the counterfactual.
+  *Issue #136:* `saveWeights` writes no file now. The bag's `best_cost_gate` still evaluates the
+  save criterion on the REAL `costLID`, and a fire's in-memory capture (`BestPack`) takes each
+  net's pack BEFORE `update_weights`, so the order stays load-bearing (gate and capture, then the
+  `-1.0` override, then the update); `best_pack_is_the_pre_update_pack_and_the_fold` pins the
+  capture side.
 
 - **[phase4a] `saveAndUpdate`'s column means are per file x channel ROW, not per file** (from
   `BagOfProcessors.cpp:409-471`): `resultsperConf[ii].rows()` is one row per (file, channel) pair
@@ -2045,7 +2057,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   ledger, re-targeted where noted. Items 1 and 2 carry the Task 10 catchers (`phase4b_backlog.rs::fold_order_ascending_golden`,
   `best_cost_gate_skips_on_exact_tie`) beside their original MISSED ones; the backlog entry below
   restates the same two mutations and has no patch of its own. Item 2's gate is the one 46dd6d2
-  (#25) merged across the four per-algo arms, so `>=` now reaches every trainable algo. Items 3 and
+  (#25) merged across the four per-algo arms, so `>=` now reaches every trainable algo. Since
+  issue #136 that gate is `best_cost_gate` (no file), and its tie catcher reads the in-memory fire
+  count instead of the weight file's mtime and bytes. Items 3 and
   4 land on the per-field sums of b489687 (#23): column 5 is `audio_duration`, and the guards
   divide by `sum_seg_count` / `sum_lid_count`. Item 4's two downstream legs are
   `cost_mem_rows_written` (CAUGHT) and `update_called_with_neg_costlid`, which the ledger records as
@@ -2061,6 +2075,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `phase4b_backlog.rs::best_cost_gate_skips_on_exact_tie`. *Mutation evidence:* `save_weights`'s
   `Processor::Spectral` arm `best_cost[&pos] > save_criterion` -> `>=` makes the test FAIL
   (`assertion failed: !weights_artifact_b.exists()`, the tie now re-saves); reverted, PASS.
+  (Issue #136: the observable is the in-memory capture's fire count since the weight files went;
+  the live patch `phase4a/2` holds the verdict.)
   (2) CLOSED: a 3-file (`f1`/`f2`/`f3`) fold-order-divergence golden -- MEASURED, no seed search
   needed (bound: 1 of a budgeted 20; the base `NNweights_config1.bin` seed diverges immediately,
   5865 of 67342 raw-derivative elements differ in bits between the ascending and descending fold).
@@ -2741,7 +2757,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   dropping the prefix makes the LID net's save collide with the SAD net's identically-named
   artifact, so the SAD weights dims check fails FIRST (`weights_bestNNWeight_1_twin_train.mat
   dims: left: (1093, 1) right: (537, 1)`) -- the corruption is caught earlier in the same test,
-  confirming the mutation is load-bearing; reverted, PASS. (5) `[sad, lid]` dispatch order swap
+  confirming the mutation is load-bearing; reverted, PASS. (Issue #136: retired with the save
+  files; a net's best pack is keyed by its index, and `issue25/2` mutates that capture.) (5) `[sad, lid]` dispatch order swap
   in `BagOfProcessors::get_weights_derivatives`'s `TwinLid` arm (now `[lid, sad]`) against
   `phase4b_corpus_lid::twin_gradcheck_golden`/`twin_train_epoch_weights_golden` -- FAILED as
   expected on both (`twin_gradcheck_golden`: "twin net 0 weight 0 backprop: got ... want ... (>
@@ -2788,7 +2805,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   re-targeted where noted.
   Two items share a site with an older or newer live patch and have none of their own: item 4's
   `save_weights_lid` prefix moved into `training_policy`'s algo 6 arm in 46dd6d2 (#25), where
-  `issue25/2` applies the same edit against the same catcher; item 6's gate is `phase4a/6`, which
+  `issue25/2` applied the same edit against the same catcher until issue #136 retired the prefix
+  with the files (the patch now keeps only the first net's pack at the best-pack capture,
+  dropping the LID net's, same catcher); item 6's gate is `phase4a/6`, which
   carries this item's catcher too. Item 2's `> 150` decode moved from `confusion_from_results` to
   `LidResult::from_encoded` (e767121, b489687, #23) and is mutated there; its error leg now reads
   MISSED: the two rows that lose their target are skipped since the F5 fix (53de2ca), their

@@ -27,11 +27,9 @@ use speech::cli::{Mode, ModeKind};
 use speech::engine::bag_of_processors::BagOfProcessors;
 use speech::engine::channel_result::ChannelResult;
 use speech::engine::corpus_processor::CorpusProcessor;
-use speech::features::stats::InputStatistics;
 
 /// `set_current_dir` is process-global; serialize against `cargo test`'s
-/// default parallel threads (same pattern as `phase4a_save_update.rs`/
-/// `phase4a_train_golden.rs`).
+/// default parallel threads (same pattern as `phase4a_train_golden.rs`).
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 struct CwdGuard {
@@ -76,8 +74,8 @@ fn multi_mode() -> Mode {
 // Item 1: best-cost TIE golden.
 // =============================================================================
 //
-// `BagOfProcessors::save_weights`'s gate is strict `>` (`bag_of_processors.rs`
-// `:524/532/540/549`, from `BagOfProcessors.cpp:149/156/165/172`): a save
+// `BagOfProcessors::best_cost_gate` is strict `>` (from
+// `BagOfProcessors.cpp:149/156/165/172`): the gate
 // fires only when the running best beats the tie-breaking `save_criterion`,
 // i.e. `bestCost > cost`. A worse OR a tied cost must both leave `bestCost`
 // unchanged, but only a TIE distinguishes `>` from a `>=` mutation (a worse
@@ -86,8 +84,10 @@ fn multi_mode() -> Mode {
 // WORSE" case -- Task 11's mutation battery flagged this as a genuine
 // coverage gap (IMPROVEMENTS.md "Mutation battery (Task 11)" mutation (2)).
 // This test mirrors that test's structure exactly (algo-3 bag, real net,
-// tempdir + mtime/content artifact check) but crafts epoch B's cost BYTE-
-// EQUAL to epoch A's -- a genuine tie, not merely a non-improvement.
+// the best pack's fire count) but crafts epoch B's cost BYTE-EQUAL to
+// epoch A's -- a genuine tie, not merely a non-improvement. Until issue #136
+// the observable was the weight file's mtime and bytes; it is now the
+// in-memory capture's fire count.
 
 /// Real algo-3 bag (single config), weights overridden to the known
 /// 33,671-weight net -- identical helper to `phase4a_save_update.rs::algo3_bag`.
@@ -104,15 +104,13 @@ fn algo3_bag(weights_path: &std::path::Path) -> BagOfProcessors {
 
 /// Epoch A fires (beats the 1e20 seed); epoch B's cost is BYTE-EQUAL to
 /// epoch A's (5.0 == 5.0, a genuine tie, via the identical col4/col17 row
-/// values) -- the `>` gate must SKIP (no re-save): `bestCost` stays at
-/// epoch A's value, and the `bestNNWeight` artifact is untouched (same mtime
-/// and bytes as after epoch A). A `>` -> `>=` mutation would instead re-fire
-/// on the tie (`5.0 >= 5.0` is true) and rewrite the artifact with a fresh
-/// mtime -- this is the distinguishing observable the 4a battery found
+/// values) -- the `>` gate must SKIP: `bestCost` stays at epoch A's value and
+/// the best pack is still epoch A's capture (`fires == 1`). A `>` -> `>=`
+/// mutation would instead re-fire on the tie (`5.0 >= 5.0` is true) and count
+/// a second fire -- the distinguishing observable the 4a battery found
 /// missing.
 #[test]
 fn best_cost_gate_skips_on_exact_tie() {
-    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let weights_src = ref_dir().join("phase0/NNweights_config1.bin");
     let tmp = tempfile::tempdir().unwrap();
     let weights_path = tmp.path().join("weights.bin");
@@ -120,15 +118,10 @@ fn best_cost_gate_skips_on_exact_tie() {
 
     let mut bag = algo3_bag(&weights_path);
     let derivs_mat = bag.get_weights_derivatives(0)[0].clone();
-    let stats0 = bag.get_input_statistics(0);
 
     let mut best_cost: BTreeMap<usize, f64> = BTreeMap::from([(0, 1e20)]);
     let derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::from([(0, vec![derivs_mat])]);
-    let stats: BTreeMap<usize, Vec<InputStatistics>> = BTreeMap::from([(0, stats0)]);
 
-    let _cwd = CwdGuard::enter(tmp.path());
-
-    let out_a = "run_a.mat";
     // Col 4 (cost numerator) = 5.0, col 17 (denom) = 1.0 -> cost = 5.0.
     #[rustfmt::skip]
     let row_a: [f64; 18] = [0.0, 0.0, 0.0, 0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0];
@@ -140,29 +133,19 @@ fn best_cost_gate_skips_on_exact_tie() {
     let mut bad_classif_lid = [0.0; 1];
 
     bag.save_and_update(
-        out_a,
         &[m_a.iter().collect()],
         &mut best_cost,
         &derivs,
-        &stats,
         &mut cost_mem,
         &mut bad_classif,
         &mut cost_lid,
         &mut bad_classif_lid,
-    )
-    .unwrap();
+    );
 
     assert_eq!(best_cost[&0], 5.0, "epoch A fires (5.0 < 1e20 seed)");
-    let weights_artifact = PathBuf::from(format!("weights_bestNNWeight_1_{out_a}"));
-    assert!(weights_artifact.exists(), "{weights_artifact:?} missing");
+    let pack_a = bag.best_pack_for_test(0, 0).expect("epoch A fires").clone();
+    assert_eq!(pack_a.fires, 1);
 
-    let weights_mtime_a = std::fs::metadata(&weights_artifact)
-        .unwrap()
-        .modified()
-        .unwrap();
-    let weights_bytes_a = std::fs::read(&weights_artifact).unwrap();
-
-    let out_b = "run_b.mat";
     // BYTE-EQUAL cost to epoch A: same col4/col17 values -> cost == 5.0 exactly
     // (not merely "close" -- both are the literal f64 5.0/1.0, so the division
     // reproduces the identical bit pattern).
@@ -171,17 +154,14 @@ fn best_cost_gate_skips_on_exact_tie() {
     let m_b = [ChannelResult::from_row(&row_b)];
 
     bag.save_and_update(
-        out_b,
         &[m_b.iter().collect()],
         &mut best_cost,
         &derivs,
-        &stats,
         &mut cost_mem,
         &mut bad_classif,
         &mut cost_lid,
         &mut bad_classif_lid,
-    )
-    .unwrap();
+    );
 
     assert_eq!(
         cost_mem[0], 5.0,
@@ -192,26 +172,13 @@ fn best_cost_gate_skips_on_exact_tie() {
         "bestCost unchanged on a tie (the `>` gate does not treat == as an improvement)"
     );
 
-    // No artifact for run_b was ever created -- the tie did not trigger a NEW
-    // save under a different name.
-    let weights_artifact_b = PathBuf::from(format!("weights_bestNNWeight_1_{out_b}"));
-    assert!(!weights_artifact_b.exists());
-
-    // The run_a artifact is untouched (same mtime + bytes): epoch B did NOT
-    // re-save over it either. This is the observable a `>` -> `>=` mutation
-    // flips (see IMPROVEMENTS.md item 1, marked CLOSED by this test).
-    let weights_mtime_b = std::fs::metadata(&weights_artifact)
-        .unwrap()
-        .modified()
-        .unwrap();
-    let weights_bytes_b = std::fs::read(&weights_artifact).unwrap();
+    // The pack is still epoch A's, fire count included: the tie did NOT fire.
+    // This is the observable a `>` -> `>=` mutation flips (see IMPROVEMENTS.md
+    // item 1, marked CLOSED by this test).
     assert_eq!(
-        weights_mtime_a, weights_mtime_b,
-        "tie must not touch the epoch-A artifact's mtime"
-    );
-    assert_eq!(
-        weights_bytes_a, weights_bytes_b,
-        "tie must not rewrite the epoch-A artifact's contents"
+        bag.best_pack_for_test(0, 0),
+        Some(&pack_a),
+        "a tie must not fire the gate (fires stays 1)"
     );
 }
 

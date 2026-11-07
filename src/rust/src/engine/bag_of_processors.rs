@@ -1,5 +1,5 @@
 //! One `Segmenter` per config, dispatched by an `Algo` enum (replaces the legacy
-//! if/else ladder); per-file dispatch, weight save/update, metric reduction.
+//! if/else ladder); per-file dispatch, best-cost gate/update, metric reduction.
 //!
 //! Ported from legacy C++: BagOfProcessors.*.
 
@@ -155,32 +155,41 @@ impl SaveCriterion {
 /// The per-algo training policy of `BagOfProcessors::saveWeights`/`updateWeights`
 /// (`:148-205`), keyed on the algo number as the legacy is: the save criterion and, per
 /// trainable net in pack order, the cost pair it owns (its update cost, and the cost the
-/// gradient check differentiates, issue #92) and its save-file basename prefix. `None`
-/// for algo 0/1/2 (no legacy branch; the gradient check's `:275-289` has no arm either,
-/// so its cost stays untouched and the `:292` division yields 0/0 = NaN). A fast conf
-/// (algo 3 or 6) gets a policy too but has no trainable net to apply it to.
-pub(crate) fn training_policy(
-    algo: i32,
-) -> Option<(SaveCriterion, &'static [(CostPair, &'static str)])> {
+/// gradient check differentiates, issue #92). `None` for algo 0/1/2 (no legacy branch;
+/// the gradient check's `:275-289` has no arm either, so its cost stays untouched and the
+/// `:292` division yields 0/0 = NaN). A fast conf (algo 3 or 6) gets a policy too but has
+/// no trainable net to apply it to. The legacy's per-net save-file prefix (`saveWeightsLID`'s
+/// `LID_`) left with the save files (issue #136): a net's best pack is keyed by its index.
+pub(crate) fn training_policy(algo: i32) -> Option<(SaveCriterion, &'static [CostPair])> {
     match algo {
         // :149-162 saveCriterion = cost; :184-193 update with cost; gradCheck :275-277.
-        3 | 4 => Some((SaveCriterion::Cost, &[(CostPair::Seg, "")])),
+        3 | 4 => Some((SaveCriterion::Cost, &[CostPair::Seg])),
         // :165-171 saveCriterion = badClassifLID + costLID; :192-194 update with costLID;
         // gradCheck :278-280.
-        5 => Some((
-            SaveCriterion::BadClassifLidPlusCostLid,
-            &[(CostPair::Lid, "")],
-        )),
-        // :172-179 saveCriterion = cost + costLID, BOTH nets saved under ONE gate,
-        // `saveWeightsLID` adding its own `LID_` prefix; :195-200 updateWeights(cost)
-        // THEN updateWeightsLID(costLID); gradCheck :281-288 net 0 the SAD pair, net 1
-        // the LID pair.
+        5 => Some((SaveCriterion::BadClassifLidPlusCostLid, &[CostPair::Lid])),
+        // :172-179 saveCriterion = cost + costLID, BOTH nets under ONE gate; :195-200
+        // updateWeights(cost) THEN updateWeightsLID(costLID); gradCheck :281-288 net 0
+        // the SAD pair, net 1 the LID pair.
         6 => Some((
             SaveCriterion::CostPlusCostLid,
-            &[(CostPair::Seg, ""), (CostPair::Lid, "LID_")],
+            &[CostPair::Seg, CostPair::Lid],
         )),
         _ => None,
     }
+}
+
+/// What one trainable net held at the last fire of its conf's best-cost gate (issue #136):
+/// the flat pack BEFORE that epoch's update and the folded `Nx2` derivatives the update
+/// consumed, plus how many times the gate has fired. The legacy wrote the first two to
+/// `weights_bestNNWeight_<n>_<f>` / `weightsDerivatives_...` (`saveWeights`); the port keeps
+/// them in memory, observable under `test-support` only. Every net of a conf shares one gate,
+/// so `fires` is the same across a conf's packs.
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq)]
+pub struct BestPack {
+    pub weights: Vec<f64>,
+    pub derivs: Array2<f64>,
+    pub fires: usize,
 }
 
 /// The ONE refusal of a training-shaped config on the fast tree (issue #92's one body,
@@ -251,6 +260,11 @@ pub struct BagOfProcessors {
     /// gate order is observable on a SAD conf.
     #[cfg(feature = "test-support")]
     last_update_cost_lid: BTreeMap<usize, f64>,
+    /// Test-support capture (issue #136): per conf, one [`BestPack`] per trainable net in
+    /// pack order, replaced at every fire of [`Self::best_cost_gate`] (captured by
+    /// [`Self::save_and_update`]).
+    #[cfg(feature = "test-support")]
+    best_packs: BTreeMap<usize, Vec<BestPack>>,
     /// T1-review hardening (Phase 8 Task 1, finding 1; no legacy counterpart):
     /// sum-of-`|x|` over `data_raw` from the LAST [`Self::segmentation_function`]
     /// internal [`read_audio`] call. `segmentation_function`'s dispatch surface
@@ -467,6 +481,8 @@ impl BagOfProcessors {
             #[cfg(feature = "test-support")]
             last_update_cost_lid: BTreeMap::new(),
             #[cfg(feature = "test-support")]
+            best_packs: BTreeMap::new(),
+            #[cfg(feature = "test-support")]
             last_audio_abs_sum: None,
         })
     }
@@ -574,6 +590,9 @@ impl BagOfProcessors {
     /// per trainable net (`[regular, LID]` for algo 6); EMPTY for a conf with no
     /// trainable net (`:128-129`). Read-shaped and never indexed back out for such a
     /// conf, so it stays inert rather than fallible on a plain inference run (T6b).
+    /// Since issue #136 no epoch fold harvests it (the stats file it fed is gone);
+    /// [`CorpusProcessor::input_statistics`](crate::engine::corpus_processor::CorpusProcessor::input_statistics)
+    /// is its one caller.
     pub fn get_input_statistics(&self, pos: usize) -> Vec<InputStatistics> {
         let nets = self.processors[pos].driver().nets();
         nets.iter()
@@ -588,7 +607,7 @@ impl BagOfProcessors {
     /// T6b AUDIT: inert, not fallible, DESPITE being called UNCONDITIONALLY for every
     /// conf on every file of every epoch (`corpus_processor.rs::run_epoch`'s per-file
     /// harvest, not gated on `is_back_prop_activated`): a fast conf's empty Vec is folded
-    /// into the `derivs` map but never indexed back out (`save_weights`/`update_weights`
+    /// into the `derivs` map but never indexed back out (`best_cost_gate`/`update_weights`
     /// iterate the same empty `nets()`), so it cannot corrupt a gradient sum.
     pub fn get_weights_derivatives(&self, pos: usize) -> Vec<Array2<f64>> {
         let nets = self.processors[pos].driver().nets();
@@ -597,42 +616,62 @@ impl BagOfProcessors {
             .collect()
     }
 
-    /// Port of `BagOfProcessors::saveWeights` (`:148-181`): the per-algo save criterion
-    /// ([`training_policy`]), gated on beating the running `bestCost[pos]`; every
-    /// trainable net saves under the ONE gate, algo 6's LID net with the `LID_` basename
-    /// prefix of `saveWeightsLID` (`:176`). A conf with no trainable net (algo 0/1/2, no
-    /// legacy branch; the fast drivers, whose `is_back_prop_activated` is `false`) is a
-    /// no-op that reads neither `bestCost` nor `derivs`/`stats`.
-    /// Arity mirrors the legacy signature (`:148`) verbatim.
-    #[allow(clippy::too_many_arguments)]
-    fn save_weights(
-        &mut self,
-        filename: &str,
+    /// Port of `BagOfProcessors::saveWeights` (`:148-181`) without its files (issue #136):
+    /// the per-algo save criterion ([`training_policy`]), gated on beating the running
+    /// `bestCost[pos]` (strict `>`: a tie does not fire); every trainable net of the conf
+    /// fires under the ONE gate. The legacy wrote each net's pack, derivatives and input
+    /// statistics to `weights_` / `weightsDerivatives_` / stats files that nothing in the
+    /// port read; a fire now records the new best cost and answers `true`, and
+    /// [`Self::save_and_update`] captures the [`BestPack`]s under `test-support`. In a
+    /// production build the running `bestCost` is the gate's only effect, read by nothing
+    /// outside `test-support` (the accepted state of issue #136: the Modern loop's
+    /// `Checkpoint` is the production writer). A conf with no trainable net (algo 0/1/2,
+    /// no legacy branch; the fast drivers) never fires and leaves `bestCost` unread.
+    fn best_cost_gate(
+        &self,
         pos: usize,
         best_cost: &mut BTreeMap<usize, f64>,
         cost: f64,
-        _bad_classif: f64,
         cost_lid: f64,
         bad_classif_lid: f64,
-        derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
-        stats: &BTreeMap<usize, Vec<InputStatistics>>,
-    ) -> Result<()> {
-        let nets = self.processors[pos].driver().nets();
-        let Some((save_criterion, per_net)) = training_policy(self.algo_types[pos]) else {
-            return Ok(());
+    ) -> bool {
+        let Some((save_criterion, _)) = training_policy(self.algo_types[pos]) else {
+            return false;
         };
-        if nets.is_empty() {
-            return Ok(());
+        if self.processors[pos].driver().nets().is_empty() {
+            return false;
         }
         let save_criterion = save_criterion.value(cost, cost_lid, bad_classif_lid);
         if best_cost[&pos] > save_criterion {
-            for (i, (net, (_, prefix))) in nets.iter().zip(per_net).enumerate() {
-                let file = crate::io::prefix_basename(prefix, filename);
-                net.save_weights(&file, &derivs[&pos][i], &stats[&pos][i])?;
-            }
             best_cost.insert(pos, save_criterion);
+            return true;
         }
-        Ok(())
+        false
+    }
+
+    /// The test-support half of a gate fire (issue #136): every trainable net's flat pack
+    /// as it stands (the caller captures BEFORE `update_weights`) and its folded
+    /// derivatives, keyed by pack order, with the conf's fire count bumped.
+    #[cfg(feature = "test-support")]
+    fn capture_best_pack(&mut self, pos: usize, derivs: &BTreeMap<usize, Vec<Array2<f64>>>) {
+        let fires = self
+            .best_packs
+            .get(&pos)
+            .and_then(|packs| packs.first())
+            .map_or(0, |pack| pack.fires)
+            + 1;
+        let packs = self.processors[pos]
+            .driver()
+            .nets()
+            .iter()
+            .enumerate()
+            .map(|(i, net)| BestPack {
+                weights: net.get_weights(),
+                derivs: derivs[&pos][i].clone(),
+                fires,
+            })
+            .collect();
+        self.best_packs.insert(pos, packs);
     }
 
     /// Port of `BagOfProcessors::updateWeights` (`:183-205`): unconditional (unlike
@@ -657,7 +696,7 @@ impl BagOfProcessors {
             return;
         };
         let nets = self.processors[pos].driver_mut().nets_mut();
-        for (i, (net, (pair, _))) in nets.into_iter().zip(per_net).enumerate() {
+        for (i, (net, pair)) in nets.into_iter().zip(per_net).enumerate() {
             net.update_weights(&derivs[&pos][i], pair.pick(cost, cost_lid));
         }
     }
@@ -712,6 +751,14 @@ impl BagOfProcessors {
         self.last_update_cost_lid.get(&pos).copied()
     }
 
+    /// Test-observation hook (issue #136): conf `pos`'s net `net` (pack order) as the
+    /// best-cost gate last captured it; `None` before the first fire or for a conf with no
+    /// trainable net.
+    #[cfg(feature = "test-support")]
+    pub fn best_pack_for_test(&self, pos: usize, net: usize) -> Option<&BestPack> {
+        self.best_packs.get(&pos).and_then(|packs| packs.get(net))
+    }
+
     /// Test-observation hook (Phase 8 Task 1, T1-review hardening finding 1, no
     /// legacy counterpart): see [`Self::last_audio_abs_sum`]'s field doc for why
     /// this exists.
@@ -725,10 +772,11 @@ impl BagOfProcessors {
     /// badClassif/costLID/badLIDClassif derivation (the WER percent scaling is
     /// display-only and not computed, issue #94), the
     /// `costMem`/`badClassifMem`/`costLIDMem`/`badClassifLIDMem` row writes, the
-    /// `bestNNWeight_<pos+1>_<filename>` save, and the `costLID = -1.0` gate
-    /// (`:465`) applied AFTER `save_weights` and BEFORE `update_weights` -- order
-    /// is load-bearing (the save criterion sees the real costLID; the update
-    /// criterion sees the gated one).
+    /// best-cost gate (the legacy's `bestNNWeight_<pos+1>_<filename>` save, issue #136:
+    /// no file), and the `costLID = -1.0` gate (`:465`) applied AFTER the best-cost gate
+    /// and BEFORE `update_weights` -- order is load-bearing (the save criterion sees the
+    /// real costLID; the update criterion sees the gated one; the `BestPack` capture
+    /// sees the pre-update pack).
     ///
     /// The legacy summed the result-row COLUMNS (`:411-412`); here each field is
     /// summed by its own explicit ascending-row loop (the repo's ascending-loop
@@ -746,21 +794,19 @@ impl BagOfProcessors {
     /// what makes `badClassif`/`badLIDClassif` correct per-frame-class averages
     /// rather than per-file averages.
     ///
-    /// Arity matches the brief's exact signature; the legacy `saveAndUpdate`
-    /// (`:409`) similarly takes 9 parameters.
+    /// The legacy `saveAndUpdate` (`:409`) takes 9 parameters; the save filename and the
+    /// input statistics left with the save files (issue #136).
     #[allow(clippy::too_many_arguments)]
     pub fn save_and_update(
         &mut self,
-        filename: &str,
         results_per_conf: &[Vec<&ChannelResult>],
         best_cost: &mut BTreeMap<usize, f64>,
         derivs: &BTreeMap<usize, Vec<Array2<f64>>>,
-        stats: &BTreeMap<usize, Vec<InputStatistics>>,
         cost_mem_row: &mut [f64],
         bad_classif_row: &mut [f64],
         cost_lid_row: &mut [f64],
         bad_classif_lid_row: &mut [f64],
-    ) -> Result<()> {
+    ) {
         #[cfg(feature = "test-support")]
         self.last_confusion.clear();
 
@@ -831,33 +877,25 @@ impl BagOfProcessors {
             cost_lid_row[ii] = cost_lid;
             bad_classif_lid_row[ii] = bad_lid_classif;
 
-            // legacy: :462-464 bestNNWeight_<pos+1>_<filename> compose -- on the
-            // BASENAME (the legacy glued it onto the whole string; FIXED, see
-            // `io::prefix_basename`).
-            let save_filename =
-                crate::io::prefix_basename(&format!("bestNNWeight_{}_", ii + 1), filename);
-            // legacy: :464 saveWeights call -- BEFORE the :465 costLID override.
-            self.save_weights(
-                &save_filename,
-                ii,
-                best_cost,
-                cost,
-                bad_classif,
-                cost_lid,
-                bad_lid_classif,
-                derivs,
-                stats,
-            )?;
+            // legacy: :462-464 saveWeights(bestNNWeight_<pos+1>_<filename>) -- the gate
+            // without the files (issue #136), BEFORE the :465 costLID override; a fire's
+            // capture takes the pack BEFORE update_weights moves it.
+            let fired = self.best_cost_gate(ii, best_cost, cost, cost_lid, bad_lid_classif);
+            #[cfg(feature = "test-support")]
+            if fired {
+                self.capture_best_pack(ii, derivs);
+            }
+            #[cfg(not(feature = "test-support"))]
+            let _ = fired;
 
             // legacy: :465 costLID = -1.0 when totalSpeechDuration < 1e-3. ORDER:
-            // after save_weights, before update_weights.
+            // after the best-cost gate, before update_weights.
             if total_speech_duration < 1e-3 {
                 cost_lid = -1.0;
             }
             // legacy: :466 updateWeights call -- AFTER the override.
             self.update_weights(ii, cost, bad_classif, cost_lid, bad_lid_classif, derivs);
         }
-        Ok(())
     }
 
     /// Dispatch config-`pos`'s `Segmenter::getSegmentation` onto a pre-seeded
@@ -1559,7 +1597,7 @@ mod tests {
     /// algo-5 criterion's `badClassifLID` term is owned by this pin alone (the battery
     /// measured it missed everywhere else). Issue #92: the per-net cost PAIR is the
     /// table's entry (the update cost and the gradient check's cost read it), so the pin
-    /// holds the pair, the prefix and the criterion's value.
+    /// holds the pair and the criterion's value.
     #[test]
     fn training_policy_is_the_legacy_branch_per_algo() {
         let (cost, cost_lid, bad_lid) = (1.0, 10.0, 100.0);
@@ -1569,14 +1607,14 @@ mod tests {
         for algo in [3, 4] {
             let (save, nets) = training_policy(algo).unwrap();
             assert_eq!(save.value(cost, cost_lid, bad_lid), 1.0, "algo {algo}");
-            assert_eq!(nets, vec![(CostPair::Seg, "")], "algo {algo}");
+            assert_eq!(nets, vec![CostPair::Seg], "algo {algo}");
         }
         let (save, nets) = training_policy(5).unwrap();
         assert_eq!(save.value(cost, cost_lid, bad_lid), 110.0);
-        assert_eq!(nets, vec![(CostPair::Lid, "")]);
+        assert_eq!(nets, vec![CostPair::Lid]);
         let (save, nets) = training_policy(6).unwrap();
         assert_eq!(save.value(cost, cost_lid, bad_lid), 11.0);
-        assert_eq!(nets, vec![(CostPair::Seg, ""), (CostPair::Lid, "LID_")]);
+        assert_eq!(nets, vec![CostPair::Seg, CostPair::Lid]);
         assert_eq!(CostPair::Seg.pick(cost, cost_lid), 1.0);
         assert_eq!(CostPair::Lid.pick(cost, cost_lid), 10.0);
     }

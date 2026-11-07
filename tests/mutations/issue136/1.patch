@@ -1,0 +1,31 @@
+mutation: save_and_update captures the best pack AFTER update_weights (the capture-before-update order the costLID-order entry calls load-bearing)
+catcher: CAUGHT cargo --test phase4a_save_update best_pack_is_the_pre_update_pack_and_the_fold
+catcher: CAUGHT cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: CAUGHT cargo --test phase4b_corpus_lid twin_train_epoch_weights_golden
+
+diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
+index c3c4219..cba6f2b 100644
+--- a/src/rust/src/engine/bag_of_processors.rs
++++ b/src/rust/src/engine/bag_of_processors.rs
+@@ -881,10 +881,6 @@ impl BagOfProcessors {
+             // without the files (issue #136), BEFORE the :465 costLID override; a fire's
+             // capture takes the pack BEFORE update_weights moves it.
+             let fired = self.best_cost_gate(ii, best_cost, cost, cost_lid, bad_lid_classif);
+-            #[cfg(feature = "test-support")]
+-            if fired {
+-                self.capture_best_pack(ii, derivs);
+-            }
+             #[cfg(not(feature = "test-support"))]
+             let _ = fired;
+ 
+@@ -895,6 +891,10 @@ impl BagOfProcessors {
+             }
+             // legacy: :466 updateWeights call -- AFTER the override.
+             self.update_weights(ii, cost, bad_classif, cost_lid, bad_lid_classif, derivs);
++            #[cfg(feature = "test-support")]
++            if fired {
++                self.capture_best_pack(ii, derivs);
++            }
+         }
+     }
+ 

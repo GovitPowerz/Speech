@@ -1,47 +1,20 @@
 //! Task 3: NN lifecycle surface goldens.
 //!
 //! Covers `BlstmNetwork` InputStatistics accumulation across files (STRICT bits vs a
-//! hand-chained `from_matrix`+`update`), `save_weights` three-artifact write
-//! (`weights_<f>`/`weightsDerivatives_<f>` .bin + the `<f>` .mat stats), and the
-//! `<prefix>_weightsFile` load semantics (empty skip / too-few error / too-many
-//! truncate) transcribed from `BLSTMNeuralNetwork.cpp:122-150,312-331,385-417`.
+//! hand-chained `from_matrix`+`update`) and the `<prefix>_weightsFile` load semantics
+//! (empty skip / too-few error / too-many truncate) transcribed from
+//! `BLSTMNeuralNetwork.cpp:122-150,385-417`. The `saveWeights` three-artifact write
+//! (`:312-331`) is gone (issue #136); its successor, the bag's in-memory best pack, is
+//! pinned in `phase4a_save_update.rs`.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 use indexmap::IndexMap;
 use ndarray::Array2;
 
 use speech::features::stats::InputStatistics;
-use speech::io::binary::{read_matrix, write_matrix};
+use speech::io::binary::write_matrix;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
-
-/// `save_weights`'s `weights_`/`weightsDerivatives_` prefix goes on the BASENAME
-/// (`io::prefix_basename`; the legacy glued it onto the whole string, `:319-321`,
-/// FIXED). The legacy's production shape is a BARE relative filename with cwd ==
-/// the run/output dir, the `.bin` siblings next to it; this file keeps that shape
-/// with a real chdir (`tests/phase7_bench.rs::bench_runs_with_absolute_output_keys`
-/// owns the directory case). `set_current_dir` is process-global; serialize
-/// against `cargo test`'s parallel threads.
-static CWD_LOCK: Mutex<()> = Mutex::new(());
-
-struct CwdGuard {
-    original: PathBuf,
-}
-
-impl CwdGuard {
-    fn enter(dir: &std::path::Path) -> CwdGuard {
-        let original = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir).unwrap();
-        CwdGuard { original }
-    }
-}
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.original);
-    }
-}
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data/phase0")
@@ -122,112 +95,6 @@ fn type1_normalize(m: &Array2<f64>, mean: &[f64], std: &[f64]) -> Array2<f64> {
         }
     }
     out
-}
-
-#[test]
-fn save_weights_writes_three_artifacts() {
-    let (_m, mut net) = real_net_with_weights_file("");
-    let flat =
-        speech::io::binary::read_weight_vector(&ref_dir().join("NNweights_config1.bin")).unwrap();
-    net.set_weights(&flat).unwrap();
-
-    // Craft a non-trivial stats object + derivs so the artifacts are non-vacuous.
-    let stats =
-        InputStatistics::from_matrix(&Array2::from_shape_fn((4, net.input_size()), |(r, c)| {
-            (r * net.input_size() + c) as f64 - 2.0
-        }));
-    let n = net.nb_of_weights();
-    let derivs = Array2::from_shape_fn((n, 2), |(r, c)| if c == 1 { 1.0 } else { r as f64 * 0.01 });
-
-    // The legacy's production shape: a bare relative filename with cwd == the
-    // run/output dir, the `.bin` siblings next to `<filename>` in that same dir.
-    // Reproduce that shape exactly: chdir into a tempdir and pass a bare filename
-    // (a bare name composes byte-identically to the legacy's whole-string glue).
-    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = tempfile::tempdir().unwrap();
-    let _cwd = CwdGuard::enter(dir.path());
-
-    let filename = "epoch1.mat";
-    let weights_path = PathBuf::from(format!("weights_{filename}"));
-    let derivs_path = PathBuf::from(format!("weightsDerivatives_{filename}"));
-    let mat_path = PathBuf::from(filename);
-
-    net.save_weights(filename, &derivs, &stats).unwrap();
-
-    // 1) weights_<f>.mat is the flat weight vector as an N x 1 .bin (custom codec).
-    let (wr, wc, wdata) = read_matrix(&weights_path).unwrap();
-    assert_eq!((wr, wc), (n, 1));
-    assert_eq!(wdata, net.get_weights());
-
-    // 2) weightsDerivatives_<f>.mat is the N x 2 derivs .bin (column-major payload).
-    let (dr, dc, ddata) = read_matrix(&derivs_path).unwrap();
-    assert_eq!((dr, dc), (n, 2));
-    // Column-major: all of col0 then col1. Reproduce that ordering from `derivs`.
-    let mut expected_d = Vec::with_capacity(n * 2);
-    for c in 0..2 {
-        for r in 0..n {
-            expected_d.push(derivs[[r, c]]);
-        }
-    }
-    assert_eq!(ddata, expected_d);
-
-    // 3) <f>.mat is a structurally valid MAT v5 file carrying nbOfInputs (1x1),
-    // meanInputs (1 x D), stdInputs (1 x D).
-    let bytes = std::fs::read(&mat_path).unwrap();
-    assert!(bytes.len() >= 128);
-    assert_eq!(&bytes[0..4], b"MATL");
-    let version = u16::from_le_bytes(bytes[124..126].try_into().unwrap());
-    assert_eq!(version, 0x0100);
-
-    let d = net.input_size();
-    // First variable: nbOfInputs, 1x1, value == stats.n.
-    let mut off = 128;
-    assert_eq!(u32_le(&bytes, off), 14, "miMATRIX");
-    let first_size = u32_le(&bytes, off + 4) as usize;
-    let mut cur = off + 8 + 16; // tag + array flags
-    assert_eq!(i32_le(&bytes, cur + 8), 1, "nbOfInputs rows");
-    assert_eq!(i32_le(&bytes, cur + 12), 1, "nbOfInputs cols");
-    cur += 16 + 8; // dims + name tag/size
-    assert_eq!(
-        &bytes[cur..cur + 8],
-        b"nbOfInpu"[..].get(..8).unwrap_or(&bytes[cur..cur + 8])
-    );
-    // name "nbOfInputs" is 10 bytes -> padded to 16.
-    let name0 = &bytes[cur..cur + 10];
-    assert_eq!(name0, b"nbOfInputs");
-    cur += 16; // padded name
-    assert_eq!(u32_le(&bytes, cur), 9, "miDOUBLE");
-    cur += 8;
-    assert_eq!(f64_le(&bytes, cur), stats.n as f64);
-
-    // Second variable: meanInputs, 1 x D.
-    off += 8 + first_size;
-    assert_eq!(u32_le(&bytes, off), 14, "second miMATRIX");
-    let second_size = u32_le(&bytes, off + 4) as usize;
-    let mut cur2 = off + 8 + 16;
-    assert_eq!(i32_le(&bytes, cur2 + 8), 1, "meanInputs rows");
-    assert_eq!(i32_le(&bytes, cur2 + 12), d as i32, "meanInputs cols == D");
-    cur2 += 16 + 8;
-    assert_eq!(&bytes[cur2..cur2 + 10], b"meanInputs");
-
-    // Third variable: stdInputs, 1 x D.
-    off += 8 + second_size;
-    assert_eq!(u32_le(&bytes, off), 14, "third miMATRIX");
-    let mut cur3 = off + 8 + 16;
-    assert_eq!(i32_le(&bytes, cur3 + 8), 1, "stdInputs rows");
-    assert_eq!(i32_le(&bytes, cur3 + 12), d as i32, "stdInputs cols == D");
-    cur3 += 16 + 8;
-    assert_eq!(&bytes[cur3..cur3 + 9], b"stdInputs");
-}
-
-fn u32_le(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-fn i32_le(b: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-fn f64_le(b: &[u8], off: usize) -> f64 {
-    f64::from_le_bytes(b[off..off + 8].try_into().unwrap())
 }
 
 #[test]

@@ -12,7 +12,8 @@
 //! - `twin_train_*`: the Mode-7 phSeq 2-file TRAIN replay (algo 6) -- BOTH nets'
 //!   per-epoch post-saveAndUpdate weights, the cost+costLID best-cost gate
 //!   fire/skip trajectory (measured, manifest-pinned), the result matrix and the four epoch arrays,
-//!   the bestNNWeight artifact split incl. saveWeightsLID's `LID_` prefix, and
+//!   both nets' best packs vs the legacy's `bestNNWeight` artifacts (the LID one
+//!   under saveWeightsLID's `LID_` prefix), and
 //!   the save_and_update confusion capture (errorPercLID, display-only in the
 //!   legacy).
 //! - `twin_train_ns_costlid_gate_live`: the `:465` costLID = -1.0 no-speech gate
@@ -150,7 +151,7 @@ fn parse_bin(b: &[u8]) -> Array2<f64> {
 // The whole Mode-7 train replay at N=1: run, then compare every observable
 // against the committed fixtures. One test (one run) covering BOTH nets' epoch
 // weights, the measured gate trajectory, the result matrix and epoch arrays, the
-// bestNNWeight artifacts (incl. the LID_ prefix), and the confusion capture.
+// best packs (vs the legacy artifacts, incl. the LID_ one), and the confusion capture.
 #[test]
 fn twin_train_epoch_weights_golden() {
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -237,26 +238,53 @@ fn twin_train_epoch_weights_golden() {
         assert_matrix(got, &want, &[], &[], name);
     }
 
-    // --- bestNNWeight artifact split, BOTH nets: the LID pair carries
-    // saveWeightsLID's LID_ prefix (BagOfProcessors.cpp:176 via
-    // TwinBLSTMSpectralLID.cpp:83-85). Value-compared (canary-gated). ----------
-    for name in [
-        "weights_bestNNWeight_1_twin_train.mat",
-        "weightsDerivatives_bestNNWeight_1_twin_train.mat",
-        "weights_LID_bestNNWeight_1_twin_train.mat",
-        "weightsDerivatives_LID_bestNNWeight_1_twin_train.mat",
-    ] {
-        let got = parse_bin(&std::fs::read(name).unwrap_or_else(|_| panic!("{name} missing")));
-        let want = parse_bin(&std::fs::read(fixture_phase4b(name)).unwrap());
-        assert_eq!(got.dim(), want.dim(), "{name} dims");
-        for (g, w) in got.iter().zip(want.iter()) {
-            assert_oracle_eq_f64(*g, *w, name);
+    // --- The best packs of BOTH nets (the LAST gate fire) vs the legacy's
+    // `saveWeights` artifacts: net 0 the SAD pair, net 1 the LID pair the legacy
+    // wrote under saveWeightsLID's LID_ prefix (BagOfProcessors.cpp:176 via
+    // TwinBLSTMSpectralLID.cpp:83-85). The pack is keyed by net index, so a LID
+    // pack dropped or swapped with the SAD one fails here. Canary-gated. The SAD
+    // net's derivs are 0x0 (Mode 7 never forwards it), which `read_matrix` refuses,
+    // hence the local reader. -------------------------------------------------------
+    let fires_want = fired as usize + 1;
+    let read = |name: String| parse_bin(&std::fs::read(fixture_phase4b(&name)).unwrap());
+    for (net, prefix) in [(0, ""), (1, "LID_")] {
+        let pack = cp
+            .best_pack_for_test(net)
+            .unwrap_or_else(|| panic!("net {net}: no best pack"));
+        assert_eq!(
+            pack.fires, fires_want,
+            "net {net}: gate fires incl. epoch 0"
+        );
+        let want_w = read(format!("weights_{prefix}bestNNWeight_1_twin_train.mat"));
+        assert_eq!(
+            want_w.dim(),
+            (pack.weights.len(), 1),
+            "net {net} weights dims"
+        );
+        for (k, &g) in pack.weights.iter().enumerate() {
+            assert_oracle_eq_f64(g, want_w[[k, 0]], &format!("net {net} weight {k}"));
+        }
+        let want_d = read(format!(
+            "weightsDerivatives_{prefix}bestNNWeight_1_twin_train.mat"
+        ));
+        assert_eq!(pack.derivs.dim(), want_d.dim(), "net {net} derivs dims");
+        for (ix, &g) in pack.derivs.indexed_iter() {
+            assert_oracle_eq_f64(g, want_d[ix], &format!("net {net} deriv {ix:?}"));
         }
     }
-    // The stats .mat artifacts exist for both nets (empty stats: the LID net is
-    // InputNormalizationType 0, the SAD net never forwards).
-    assert!(Path::new("bestNNWeight_1_twin_train.mat").exists());
-    assert!(Path::new("LID_bestNNWeight_1_twin_train.mat").exists());
+
+    // --- Issue #136 acceptance: a `-m` training run writes no weight file (every
+    // legacy save name carried `bestNNWeight`: the stats file, its `weights_` /
+    // `weightsDerivatives_` siblings, the Twin's `LID_` pair). ------------------------
+    let leftovers: Vec<String> = std::fs::read_dir(".")
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| n.contains("bestNNWeight"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "no weight file written: {leftovers:?}"
+    );
 
     // --- The save_and_update confusion capture: errorPercLID (display-only in
     // the legacy; the :443 cout) == the measured harness value per epoch. The

@@ -4,15 +4,15 @@ catcher: CAUGHT cargo --test phase4b_corpus_lid twin_gradcheck_golden
 catcher: CAUGHT cargo --lib engine::bag_of_processors::tests::training_policy_is_the_legacy_branch_per_algo
 
 diff --git a/src/rust/src/engine/bag_of_processors.rs b/src/rust/src/engine/bag_of_processors.rs
-index a83e263..c9bc968 100644
+index 6535193..80aada7 100644
 --- a/src/rust/src/engine/bag_of_processors.rs
 +++ b/src/rust/src/engine/bag_of_processors.rs
-@@ -216,7 +216,7 @@ pub(crate) fn training_policy(
-         // the LID pair.
+@@ -172,7 +172,7 @@ pub(crate) fn training_policy(algo: i32) -> Option<(SaveCriterion, &'static [Cos
+         // the SAD pair, net 1 the LID pair.
          6 => Some((
              SaveCriterion::CostPlusCostLid,
--            &[(CostPair::Seg, ""), (CostPair::Lid, "LID_")],
-+            &[(CostPair::Lid, ""), (CostPair::Seg, "LID_")],
+-            &[CostPair::Seg, CostPair::Lid],
++            &[CostPair::Lid, CostPair::Seg],
          )),
          _ => None,
      }
