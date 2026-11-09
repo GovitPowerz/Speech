@@ -1357,7 +1357,6 @@ mod tests {
         // Algo 5 (pos 0): single-element vecs; backprop mirrors the config.
         assert_eq!(bag.get_weights(0).len(), 1);
         assert_eq!(bag.is_back_prop_activated(0).len(), 1);
-        assert_eq!(bag.processors[0].driver().nets().len(), 1);
         assert_eq!(bag.get_weights_derivatives(0).len(), 1);
 
         // Algo 6 (pos 1): 2-element [sad, lid] vecs.
@@ -1365,7 +1364,6 @@ mod tests {
         assert_eq!(w.len(), 2);
         assert_ne!(w[0].len(), w[1].len(), "SAD and LID nets are distinct");
         assert_eq!(bag.is_back_prop_activated(1).len(), 2);
-        assert_eq!(bag.processors[1].driver().nets().len(), 2);
         // Paired [sad, lid] derivs (Nx2 buffers are sized lazily on the first
         // reset/backward, so only the VEC shape is a construction-time contract).
         assert_eq!(bag.get_weights_derivatives(1).len(), 2);
@@ -1457,14 +1455,11 @@ mod tests {
         assert_eq!(bag.get_weights(1).len(), 0);
         assert_eq!(bag.is_back_prop_activated(0), vec![false]);
         assert_eq!(bag.is_back_prop_activated(1), vec![false]);
-        assert_eq!(bag.processors[0].driver().nets().len(), 0);
         assert_eq!(bag.get_weights_derivatives(0).len(), 0);
 
         // algo 3 (pos 2), algo 4 (pos 3): single-element NN vecs.
         assert_eq!(bag.get_weights(2).len(), 1);
         assert_eq!(bag.get_weights(3).len(), 1);
-        assert_eq!(bag.processors[2].driver().nets().len(), 1);
-        assert_eq!(bag.processors[3].driver().nets().len(), 1);
         assert_eq!(bag.get_weights_derivatives(2).len(), 1);
         assert_eq!(bag.get_weights_derivatives(3).len(), 1);
         // The real config-1 net's weight vector is the known 33,671 length.

@@ -9,7 +9,7 @@
 //! frozen-stats mode a streaming session needs, since no whole-file lookahead
 //! exists online.
 //!
-//! Seven tests: (1)/(2) `read_audio`-level RED->GREEN pins (inert when absent,
+//! Eight tests and one `#[ignore]`d fixture writer: (1)/(2) `read_audio`-level RED->GREEN pins (inert when absent,
 //! exact raw/gain when present); (3) a `BagOfProcessors`-level thread proof (the
 //! config key genuinely reaches the internal `read_audio` call in
 //! `segmentation_function`, not merely stored inertly); (3b) T1-review hardening
@@ -31,14 +31,16 @@
 //! T1-review hardening (finding 2): commits the T1 report's adjudication claim
 //! in-tree -- the EXACT tree, run on the SAME staged frozen config, reproduces
 //! the fast path's boundary-row count and agrees on posteriors within a
-//! measured-then-pinned bound.
+//! measured-then-pinned bound; (7) issue #140: that same exact leg pinned
+//! bit-for-bit to a port-truth fixture under `tests/reference_data/phase8/`,
+//! written once by the ignored `write_type1_exact_fixtures`.
 
 mod common;
 
 use std::path::Path;
 
 use indexmap::IndexMap;
-use ndarray::{Array2, ShapeBuilder};
+use ndarray::Array2;
 use speech::audio::read_audio;
 use speech::cli::{Mode, ModeKind};
 use speech::config::NnetSpec;
@@ -655,20 +657,28 @@ fn frozen_norm_exact_matches_fast_adjudication_pin() {
 // Issue #140: the exact type-1 forward pinned bit-for-bit (port-truth).
 // ---------------------------------------------------------------------------
 
-/// The exact leg of the frozen stage, as a (posterior row, boundary table) pair:
-/// the posteriors as a `1 x T` matrix, the decided boundaries as a `rows x 2`
-/// matrix of `[begin_s, class discriminant]`.
-fn exact_type1_leg() -> (Vec<f64>, Vec<f64>, usize) {
+/// The exact leg of the frozen stage as the pair the fixtures hold: the posterior
+/// row as a `1 x T` matrix, the decided boundaries as a `rows x 2` matrix of
+/// `[begin_s, class discriminant]`.
+fn exact_type1_leg() -> (Array2<f64>, Array2<f64>) {
     let dir = tempfile::tempdir().unwrap();
     let stage = common::stage_frozen_tier2(dir.path());
     let frozen_text = std::fs::read_to_string(&stage.config_path).unwrap();
     let mut map = speech::legacy_config::parse_legacy_config(&frozen_text);
     let (post, seg) = run_exact(&mut map, &stage.wav_path, Some(stage.fixed_gain));
-    let rows = seg.segments().len();
-    let mut bounds = Vec::with_capacity(rows * 2);
-    bounds.extend(seg.segments().iter().map(|s| s.begin));
-    bounds.extend(seg.segments().iter().map(|s| s.ty as i32 as f64));
-    (post, bounds, rows)
+    let post = Array2::from_shape_vec((1, post.len()), post).unwrap();
+    let bounds = Array2::from_shape_fn((seg.segments().len(), 2), |(i, j)| {
+        let s = &seg.segments()[i];
+        if j == 0 { s.begin } else { s.ty as i32 as f64 }
+    });
+    (post, bounds)
+}
+
+/// `write_matrix` takes column-major data; `.t().iter()` walks an array that way.
+fn write_fixture(name: &str, m: &Array2<f64>) {
+    let data: Vec<f64> = m.t().iter().copied().collect();
+    speech::io::binary::write_matrix(&common::fixture_phase8(name), m.nrows(), m.ncols(), &data)
+        .unwrap();
 }
 
 const TYPE1_POSTERIORS: &str = "type1_exact_posteriors.bin";
@@ -685,14 +695,17 @@ const TYPE1_BOUNDARIES: &str = "type1_exact_boundaries.bin";
 /// boundaries by identity (count, begin times, classes: the SAD tier's own rule).
 #[test]
 fn exact_type1_posteriors_are_port_truth_pinned() {
-    let (post, bounds, rows) = exact_type1_leg();
-    let got_post = Array2::from_shape_vec((1, post.len()), post).unwrap();
-    let want_post = common::load_bin_phase8(TYPE1_POSTERIORS);
-    common::assert_oracle_eq(&got_post, &want_post, "exact type-1 posterior row");
-
-    let got_bounds = Array2::from_shape_vec((rows, 2).f(), bounds).unwrap();
-    let want_bounds = common::load_bin_phase8(TYPE1_BOUNDARIES);
-    assert_bits_eq(&got_bounds, &want_bounds, "exact type-1 decided boundaries");
+    let (post, bounds) = exact_type1_leg();
+    common::assert_oracle_eq(
+        &post,
+        &common::load_bin_phase8(TYPE1_POSTERIORS),
+        "exact type-1 posterior row",
+    );
+    assert_bits_eq(
+        &bounds,
+        &common::load_bin_phase8(TYPE1_BOUNDARIES),
+        "exact type-1 decided boundaries",
+    );
 }
 
 /// The fixture writer for the test above. Run ONCE, on the commit the fixture
@@ -704,15 +717,8 @@ fn exact_type1_posteriors_are_port_truth_pinned() {
 #[test]
 #[ignore = "fixture writer: run once on the producing commit, see its doc"]
 fn write_type1_exact_fixtures() {
-    let (post, bounds, rows) = exact_type1_leg();
+    let (post, bounds) = exact_type1_leg();
     std::fs::create_dir_all(common::fixture_phase8("")).unwrap();
-    speech::io::binary::write_matrix(
-        &common::fixture_phase8(TYPE1_POSTERIORS),
-        1,
-        post.len(),
-        &post,
-    )
-    .unwrap();
-    speech::io::binary::write_matrix(&common::fixture_phase8(TYPE1_BOUNDARIES), rows, 2, &bounds)
-        .unwrap();
+    write_fixture(TYPE1_POSTERIORS, &post);
+    write_fixture(TYPE1_BOUNDARIES, &bounds);
 }

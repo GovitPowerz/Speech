@@ -2,7 +2,7 @@
 
 Builds bases from a fixed closed-form (`((i*7 + j*13) % 100) / 100.0`) - NOT
 `random`/`np.random` - at a spread of shapes and delta orders, runs each through
-the numpy oracles, and writes five JSONs under `tests/reference_data/phase1/`:
+the numpy oracles, and writes four JSONs under `tests/reference_data/phase1/`:
 
   - `deltas_cases.json`: `[{"base": [[..]], "n": int, "expected": [[..]]}, ...]`
     for `regression_deltas_oracle` (MelFilterBank.cpp:153-170).

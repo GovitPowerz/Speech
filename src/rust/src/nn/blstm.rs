@@ -643,8 +643,9 @@ pub fn file_pack_head<'a>(flat: &'a [f64], needed: usize, weights_file: &str) ->
 ///
 /// `Clone` mirrors the legacy copy ctor (`:155-173`) plus the buffers/accumulators
 /// it omits (the ill-formed legacy ctor leaves `_OutputForward`/`_Trainer`
-/// default-initialized; a full `#[derive(Clone)]` here is a strict superset). Task 4/7 clone whole driver bags for the grad-check snapshot and
-/// per-lane fan-out, so the net + `Rprop` state must clone with full fidelity.
+/// default-initialized; a full `#[derive(Clone)]` here is a strict superset).
+/// Task 4/7 clone whole driver bags for the grad-check snapshot and per-lane
+/// fan-out, so the net + `Rprop` state must clone with full fidelity.
 #[derive(Clone)]
 pub struct BlstmNetwork {
     cfg: BlstmConfig,
