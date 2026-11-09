@@ -1,6 +1,6 @@
 //! Phase 4c Task 1: the promoted `CorpusProcessor` seam surface (the PyO3 seam
 //! surface) -- `results_matrix`/`weights`/`set_weights`/`weights_derivatives`/
-//! `input_statistics`/`grad_check`, thin public promotions of the pre-existing
+//! `grad_check` (and, until issue #140, `input_statistics`), thin public promotions of the pre-existing
 //! `_for_test` hooks (`corpus_processor.rs:825-1000` pre-promotion). These tests
 //! exercise ONLY the new public methods; the `_for_test` wrappers now delegate to
 //! them (no duplicate bodies) and stay covered by the existing 4a/4b suites.

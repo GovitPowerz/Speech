@@ -162,11 +162,10 @@ pub fn self_normalize_f32(m: &mut FastMatrix) {
 /// streaming reference mode requires -- the fast SAD driver applies this ONCE
 /// per channel before the overlap windowing, at the SAME pipeline position
 /// where the -1 self-norm runs (the exact path's pre-dispatch application in
-/// `feed_forward_backward`). The exact type-1 branch also feeds the normalized
-/// snapshot to `nn::blstm::BlstmNetwork::analyse_input_seq` (InputStatistics accumulation
-/// -- a training-side bookkeeping read); the fast path is FORWARD-ONLY and
-/// carries no InputStatistics (the phase-7 T6b audit: `get_input_statistics`
-/// is an inert-empty read on fast), so that call is deliberately absent here.
+/// `feed_forward_backward`). Until issue #140 the exact type-1 branch also fed the
+/// normalized snapshot to a per-net statistics accumulator (a training-side
+/// bookkeeping fold whose one reader, the stats `.mat`, #136 retired); the fast
+/// path never carried it (the phase-7 T6b audit), and now neither tree does.
 pub fn external_normalize_f32(m: &mut FastMatrix, mean: &[f32], std: &[f32]) {
     let r = m.rows;
     let c = m.cols;

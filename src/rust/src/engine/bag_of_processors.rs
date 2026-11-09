@@ -17,7 +17,6 @@ use crate::engine::channel_result::{ChannelResult, LidResult};
 use crate::engine::confusion;
 use crate::engine::corpus::CorpusItem;
 use crate::fast::driver::{FastSpectralSegmenter, FastTwinLid};
-use crate::features::stats::InputStatistics;
 use crate::legacy_config::{get, get_default, get_f64_default, get_f64_opt};
 use crate::tasks::lid::{BlstmSpectralLid, TwinBlstmSpectralLid};
 use crate::tasks::sad::{
@@ -584,20 +583,6 @@ impl BagOfProcessors {
             );
         }
         driver.set_packs(new_weights)
-    }
-
-    /// Port of `BagOfProcessors::getInputStatistics` (`:116-130`): one `InputStatistics`
-    /// per trainable net (`[regular, LID]` for algo 6); EMPTY for a conf with no
-    /// trainable net (`:128-129`). Read-shaped and never indexed back out for such a
-    /// conf, so it stays inert rather than fallible on a plain inference run (T6b).
-    /// Since issue #136 no epoch fold harvests it (the stats file it fed is gone);
-    /// [`CorpusProcessor::input_statistics`](crate::engine::corpus_processor::CorpusProcessor::input_statistics)
-    /// is its one caller.
-    pub fn get_input_statistics(&self, pos: usize) -> Vec<InputStatistics> {
-        let nets = self.processors[pos].driver().nets();
-        nets.iter()
-            .map(|net| net.input_statistics().clone())
-            .collect()
     }
 
     /// Port of `BagOfProcessors::getWeightsDerivatives` (`:132-146`): one `Nx2`
@@ -1372,7 +1357,7 @@ mod tests {
         // Algo 5 (pos 0): single-element vecs; backprop mirrors the config.
         assert_eq!(bag.get_weights(0).len(), 1);
         assert_eq!(bag.is_back_prop_activated(0).len(), 1);
-        assert_eq!(bag.get_input_statistics(0).len(), 1);
+        assert_eq!(bag.processors[0].driver().nets().len(), 1);
         assert_eq!(bag.get_weights_derivatives(0).len(), 1);
 
         // Algo 6 (pos 1): 2-element [sad, lid] vecs.
@@ -1380,7 +1365,7 @@ mod tests {
         assert_eq!(w.len(), 2);
         assert_ne!(w[0].len(), w[1].len(), "SAD and LID nets are distinct");
         assert_eq!(bag.is_back_prop_activated(1).len(), 2);
-        assert_eq!(bag.get_input_statistics(1).len(), 2);
+        assert_eq!(bag.processors[1].driver().nets().len(), 2);
         // Paired [sad, lid] derivs (Nx2 buffers are sized lazily on the first
         // reset/backward, so only the VEC shape is a construction-time contract).
         assert_eq!(bag.get_weights_derivatives(1).len(), 2);
@@ -1472,14 +1457,14 @@ mod tests {
         assert_eq!(bag.get_weights(1).len(), 0);
         assert_eq!(bag.is_back_prop_activated(0), vec![false]);
         assert_eq!(bag.is_back_prop_activated(1), vec![false]);
-        assert_eq!(bag.get_input_statistics(0).len(), 0);
+        assert_eq!(bag.processors[0].driver().nets().len(), 0);
         assert_eq!(bag.get_weights_derivatives(0).len(), 0);
 
         // algo 3 (pos 2), algo 4 (pos 3): single-element NN vecs.
         assert_eq!(bag.get_weights(2).len(), 1);
         assert_eq!(bag.get_weights(3).len(), 1);
-        assert_eq!(bag.get_input_statistics(2).len(), 1);
-        assert_eq!(bag.get_input_statistics(3).len(), 1);
+        assert_eq!(bag.processors[2].driver().nets().len(), 1);
+        assert_eq!(bag.processors[3].driver().nets().len(), 1);
         assert_eq!(bag.get_weights_derivatives(2).len(), 1);
         assert_eq!(bag.get_weights_derivatives(3).len(), 1);
         // The real config-1 net's weight vector is the known 33,671 length.

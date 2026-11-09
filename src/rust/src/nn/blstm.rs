@@ -62,7 +62,6 @@ use indexmap::IndexMap;
 use ndarray::Array2;
 
 use crate::cost::CostLaw;
-use crate::features::stats::InputStatistics;
 use crate::legacy_config::{get, get_default, get_f64_default, get_usize_list};
 
 use super::cells::CellLayer;
@@ -643,9 +642,8 @@ pub fn file_pack_head<'a>(flat: &'a [f64], needed: usize, weights_file: &str) ->
 /// always used, so the arithmetic is byte-untouched -- sanctioned touch class (a).
 ///
 /// `Clone` mirrors the legacy copy ctor (`:155-173`) plus the buffers/accumulators
-/// it omits (the ill-formed legacy ctor leaves `_OutputForward`/`_InputStatistics`/
-/// `_Trainer` default-initialized; a full `#[derive(Clone)]` here is a strict
-/// superset). Task 4/7 clone whole driver bags for the grad-check snapshot and
+/// it omits (the ill-formed legacy ctor leaves `_OutputForward`/`_Trainer`
+/// default-initialized; a full `#[derive(Clone)]` here is a strict superset). Task 4/7 clone whole driver bags for the grad-check snapshot and
 /// per-lane fan-out, so the net + `Rprop` state must clone with full fidelity.
 #[derive(Clone)]
 pub struct BlstmNetwork {
@@ -667,8 +665,6 @@ pub struct BlstmNetwork {
     /// (Task 9's `set_processing_type` fills these beyond the trivial default).
     truncates_sequence: bool,
     overlaps: bool,
-
-    pub input_statistics: InputStatistics,
 
     /// `_Trainer` (`BLSTMNeuralNetwork.cpp:152`): the iRPROP- optimizer, a LONG-LIVED
     /// per-network member (state persists across `update_weights` calls for the
@@ -796,7 +792,6 @@ impl BlstmNetwork {
             nb_of_classif: 0,
             truncates_sequence: false,
             overlaps: false,
-            input_statistics: InputStatistics::new(),
             trainer,
         };
         // Phase 10 spec S7 -- the ONE construction site, and the ONE condition. See
@@ -1088,9 +1083,10 @@ impl BlstmNetwork {
     }
 
     /// `resetWeightsDerivatives` (`:278-287`): reset the sub-networks' per-layer
-    /// gradient accumulators (fwd/bwd LSTM nets skipped in MLP mode) + the
-    /// `InputStatistics` field. `_Cost`/`_NbOfClassif`/`_OutputForward`/
-    /// `_OutputBackward` are deliberately untouched, matching the legacy.
+    /// gradient accumulators (fwd/bwd LSTM nets skipped in MLP mode). `_Cost`/
+    /// `_NbOfClassif`/`_OutputForward`/`_OutputBackward` are deliberately untouched,
+    /// matching the legacy. The legacy's `:286` `_InputStatistics` reset went with the
+    /// accumulator (issue #140: write-only since #136 retired the stats `.mat`).
     pub fn reset_weights_derivatives(&mut self) {
         if self.cfg.is_mlp {
             self.output_network.reset_weights_derivatives();
@@ -1104,7 +1100,6 @@ impl BlstmNetwork {
             }
             self.output_network.reset_weights_derivatives();
         }
-        self.input_statistics = InputStatistics::new();
     }
 
     /// `getWeightsDerivatives` (`BLSTMNeuralNetwork.cpp:255-276`): the Nx2 flat gradient
@@ -1229,20 +1224,6 @@ impl BlstmNetwork {
         &self.normalize_input_std
     }
 
-    /// `getInputStatistics` (`BLSTMNeuralNetwork.cpp:299-301`): the accumulated
-    /// per-dim mean/std/count folded in by the type-1 scoring forward.
-    pub fn input_statistics(&self) -> &InputStatistics {
-        &self.input_statistics
-    }
-
-    /// `resetInputStatistics` (the `_InputStatistics = InputStatistics()` half of
-    /// `resetWeightsDerivatives`, `BLSTMNeuralNetwork.cpp:286`): wipe the accumulator
-    /// back to `n == 0` with empty mean/std, without touching the weight-derivative
-    /// state.
-    pub fn reset_input_statistics(&mut self) {
-        self.input_statistics = InputStatistics::new();
-    }
-
     /// `<prefix>_weightsFile` load (`BLSTMNeuralNetwork.cpp:122-150`): read the config
     /// key (default `""`); an EMPTY string skips the load (`:123` `size() != 0`
     /// guard). Otherwise read the `.bin` (`BinaryFile2Vector`, `:132`) and compare
@@ -1270,28 +1251,6 @@ impl BlstmNetwork {
         let flat = crate::io::binary::read_weight_vector(std::path::Path::new(&weights_file))?; // :132
         // :144-148 too-many (head) and exact both setWeights.
         self.set_weights(file_pack_head(&flat, self.nb_of_weights(), &weights_file)?)
-    }
-
-    /// `analyseInputSeq` (`BLSTMNeuralNetwork.cpp:385-417`): fold the input's per-dim
-    /// statistics into `_InputStatistics`. `rows > 0` guard; crops `leftCols(input
-    /// size)` when the sequence is STRICTLY wider than the net input; first call
-    /// constructs from the batch, later calls `update`. Called only from the type-1
-    /// normalization branch.
-    fn analyse_input_seq(&mut self, input: &Array2<f64>) {
-        if input.nrows() == 0 {
-            return;
-        }
-        let net_in = self.input_size();
-        let batch = if net_in < input.ncols() {
-            InputStatistics::from_matrix(&input.slice(ndarray::s![.., ..net_in]).to_owned())
-        } else {
-            InputStatistics::from_matrix(input)
-        };
-        if self.input_statistics.n == 0 {
-            self.input_statistics = batch;
-        } else {
-            self.input_statistics.update(&batch);
-        }
     }
 
     /// Type -1 / -2 self-normalization body (`BLSTMNeuralNetwork.cpp:737-744` /
@@ -1563,7 +1522,11 @@ impl BlstmNetwork {
             1 => {
                 // External normalization (:720-723): per column jj < min(cols,
                 // mean.size()), (x - mean_jj)/max(1e-12, std_jj). Cols beyond the
-                // mean/std tail are UNTOUCHED. Then analyseInputSeq (:728).
+                // mean/std tail are UNTOUCHED. The legacy's `analyseInputSeq` (:728)
+                // folded the normalized input into a write-only accumulator whose one
+                // reader, the stats `.mat`, #136 retired; issue #140 cut the fold
+                // (the exact type-1 posteriors pinned bit-for-bit across the cut,
+                // `phase8_frozen_norm.rs::exact_type1_posteriors_are_port_truth_pinned`).
                 let (r, cols) = input.dim();
                 let max_col = cols.min(self.normalize_input_mean.len());
                 for jj in 0..max_col {
@@ -1573,8 +1536,6 @@ impl BlstmNetwork {
                         input[[row, jj]] = (input[[row, jj]] - mean) / denom;
                     }
                 }
-                let snapshot = input.clone();
-                self.analyse_input_seq(&snapshot);
             }
             -1 => {
                 // Whole-sequence self-normalization in place (:737-744).
@@ -2406,85 +2367,6 @@ fn hcat(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod analyse_input_seq_tests {
-    use super::*;
-
-    /// Minimal MLP-mode net (LSTM `[0,3]` -> `_IsMLP`, output `[5,4,1]` sub
-    /// `[2,1]`): `input_size()` = 5 (the output net's input size in MLP mode),
-    /// so `analyse_input_seq` crops any wider sequence to the first 5 columns.
-    fn mlp_net(input_norm_type: i16) -> BlstmNetwork {
-        let mut m: IndexMap<String, String> = IndexMap::new();
-        m.insert("SYNT_LSTMNeuronNb".into(), "0,3".into());
-        m.insert("SYNT_LSTMSubSampling".into(), "1".into());
-        m.insert("SYNT_OutputNeuronNb".into(), "5,4,1".into());
-        m.insert("SYNT_OutputSubSampling".into(), "2,1".into());
-        m.insert(
-            "SYNT_InputNormalizationType".into(),
-            input_norm_type.to_string(),
-        );
-        m.insert("SYNT_TwoSweeps".into(), "false".into());
-        let cfg = BlstmConfig::from_legacy(&m, "SYNT").unwrap();
-        BlstmNetwork::from_config(cfg).unwrap()
-    }
-
-    #[test]
-    fn crops_when_strictly_wider_than_net_input() {
-        // net input_size() == 5; feed a 7-col sequence -> stats must be computed
-        // only over the LEFT 5 columns (`InputStatistics::from_matrix` on the
-        // cropped slice), the extra 2 columns must not perturb mean/std.
-        let mut net = mlp_net(1);
-        let wide = Array2::from_shape_fn((4, 7), |(r, c)| (r * 7 + c) as f64);
-        net.analyse_input_seq(&wide);
-
-        let cropped = wide.slice(ndarray::s![.., ..5]).to_owned();
-        let expected = InputStatistics::from_matrix(&cropped);
-        assert_eq!(net.input_statistics.mean, expected.mean);
-        assert_eq!(net.input_statistics.std, expected.std);
-        assert_eq!(net.input_statistics.n, expected.n);
-    }
-
-    #[test]
-    fn first_call_constructs_second_call_updates() {
-        // First call on a fresh net (n == 0): the batch REPLACES the accumulator
-        // wholesale (no merge). Second call: n != 0, so it MERGES via `update`
-        // (n accumulates: 3 + 3 == 6), not a plain overwrite.
-        let mut net = mlp_net(1);
-        assert_eq!(net.input_statistics.n, 0);
-
-        let batch1 = Array2::from_shape_fn((3, 5), |(r, c)| (r + c) as f64);
-        net.analyse_input_seq(&batch1);
-        let expected1 = InputStatistics::from_matrix(&batch1);
-        assert_eq!(net.input_statistics, expected1);
-        assert_eq!(net.input_statistics.n, 3);
-
-        let batch2 = Array2::from_shape_fn((3, 5), |(r, c)| (2 * r + c + 1) as f64);
-        net.analyse_input_seq(&batch2);
-        assert_eq!(net.input_statistics.n, 6);
-
-        // The merged result must match calling `update` directly, not a fresh
-        // `from_matrix` over either batch alone (proves the n != 0 branch merges
-        // rather than overwriting).
-        let mut expected_merged = InputStatistics::from_matrix(&batch1);
-        expected_merged.update(&InputStatistics::from_matrix(&batch2));
-        assert_eq!(net.input_statistics, expected_merged);
-    }
-
-    #[test]
-    fn zero_rows_is_a_noop() {
-        // `rows > 0` guard (:385): an empty sequence must not touch the
-        // accumulator at all (not even a zero-sample merge).
-        let mut net = mlp_net(1);
-        let batch = Array2::from_shape_fn((3, 5), |(r, c)| (r + c) as f64);
-        net.analyse_input_seq(&batch);
-        let before = net.input_statistics.clone();
-
-        let empty = Array2::<f64>::zeros((0, 5));
-        net.analyse_input_seq(&empty);
-        assert_eq!(net.input_statistics, before);
-    }
 }
 
 #[cfg(test)]
