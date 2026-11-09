@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135), 2026-11-09 (issue #140)
 
 ## Context
 
@@ -129,6 +129,16 @@ re-pointed to `results_matrix()` / `epoch_mems()` staying byte-green and the two
 end-to-end tests reading the same values through `--results-json`; two refusals go with the
 reads, so a malformed `BLSTM_LID_DumpInternals` and a results path in a missing directory no
 longer stop a run, and `BLSTM_LID_DumpInternals true` is inert without a warning, issue #135).
+The caller-less class once more, 2026-11-09, extended to a write-only accumulator deleted with
+the computation that only fed it: `BlstmNetwork`'s input-statistics accumulator (the field, the
+type-1 branch's snapshot clone and `analyse_input_seq` fold, its reset, the two net accessors,
+`BagOfProcessors::get_input_statistics` and `CorpusProcessor::input_statistics`) had no reader
+once #136 retired the stats `.mat`, and goes with `features/stats.rs` and its phase-1 goldens.
+The committed goldens run no `InputNormalizationType 1` config, so byte-green says nothing about
+the edited branch; the proof is a bit-exact pin of the exact type-1 forward measured on the
+pre-cut commit and green unchanged on the post-cut one
+(`phase8_frozen_norm.rs::exact_type1_posteriors_are_port_truth_pinned` against
+`tests/reference_data/phase8/`), issue #140.
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),

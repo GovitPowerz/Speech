@@ -162,7 +162,7 @@ Speech/
       lib.rs  main.rs  cli.rs  config.rs  legacy_config.rs  toml_config.rs  constants.rs
       engine/{corpus_processor,bag_of_processors,channel_result,corpus,confusion}.rs
       audio.rs  cost.rs  bench.rs  stream_cli.rs  stream_lid_cli.rs
-      features/{fft,mel,ltsv_tdc,stats,pipeline}.rs
+      features/{fft,mel,ltsv_tdc,pipeline}.rs
       nn/{network,blstm,layers,activations,train}.rs
       nn/cells/{slstm,mamba,cfc,transformer}.rs   # the CellLayer seam
       tasks/{segmenter,sad,lid,segmentation,segmentation_io,vrcts}.rs

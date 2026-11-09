@@ -26,8 +26,8 @@ scores without it). Only the Legacy regime reaches `compute_cost` and the balanc
 `score_hyperparam_genome`, have no production entry. No production caller passes
 `forward_backward`'s `l2` (the LID L2 term is test-reachable only) and every production
 `CostParams` is `mode=0` (the `mode == 4` / `mode < 0` branches run only in tests). The
-pooled input-stats merge (:285-300) has no Python twin since #100: its production form
-is Rust's `features/stats.rs::InputStatistics::update`.
+pooled input-stats merge (:285-300) has no twin on either side: the Python one went in #100,
+the Rust accumulator it mirrored in #140 (write-only once #136 retired the stats `.mat`).
 
 The results are read by NAME: `speech_rs.Engine.channel_results()` returns one array per
 field, wrapped here as `ChannelResults` (issue #23). The legacy `Error_vad` column indices

@@ -408,7 +408,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   the f64 balance blend -- two precision cliffs in the hot score path. Reproduced exactly. *Fix
   candidate:* subsumed by the `fmath::log -> f32::ln` swap above.
 
-- **[phase1] `InputStatistics::from_matrix` has no `n == 0` guard; empty batch yields NaN**
+- **[phase1] `InputStatistics::from_matrix` has no `n == 0` guard; empty batch yields NaN --
+  RETIRED (issue #140, the kernel deleted with its one write-only caller)**
   (`features/stats.rs` `InputStatistics::from_matrix`, from `InputStatistics.cpp:8-16`): both the mean
   and std finalization divide by `_NbOfValues` unconditionally; a zero-row input therefore produces
   `0.0/0 = NaN` mean/std rather than a guarded zero or an error. Reproduced as-is -- callers must not
@@ -417,7 +418,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   parity, either guard `n == 0` in `from_matrix` or make it return `Option`/`Result`.
 
 - **[phase1] `InputStatistics::update` merge re-squares the STORED std (not variance) in a pinned
-  op order** (`features/stats.rs` `InputStatistics::update`, from `InputStatistics.cpp:39-46`): the
+  op order -- RETIRED (issue #140, the kernel deleted with its one write-only caller)**
+  (`features/stats.rs` `InputStatistics::update`, from `InputStatistics.cpp:39-46`): the
   accumulator persists `std` (already sqrt'd), so every merge must square each side's std back to a
   variance-like quantity, add the squared mean-shift term, scale by that side's sample count, sum both
   sides, divide by the merged count, then `sqrt` once -- in exactly that per-element order (not
@@ -740,10 +742,10 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   law, mode flags, normalization vectors, cost/classif counters) but omits four -- the Rprop trainer
   (the copy reverts to a default-constructed `Rprop()`, losing the configured `initDelta` and any
   accumulated step sizes), the streaming `_InputStatistics`, and both hidden-state members (empty
-  matrices in the copy). The port deliberately implements no `Clone` for `BlstmNetwork` (mirroring
-  the ill-formed `NeuralNetwork` copy-ctor entry above); callers rebuild from config +
-  `set_weights`. Provenance note. *Fix candidate:* if a copy path is ever needed, copy or explicitly
-  reset ALL members.
+  matrices in the copy). The port derives `Clone` for `BlstmNetwork` (the grad-check snapshot and
+  the per-lane fan-out clone whole driver bags), a strict superset of the legacy copy:
+  every member copies, the trainer and the hidden-state buffers included; the `_InputStatistics`
+  member is gone since issue #140. Provenance note.
 
 - **[phase2] NN product-order substitution: Eigen GEMM replaced by ascending-loop products at ALL NN
   sites; the diverging layer-0 GEMMs seed the recurrence, so the substitution propagates NON-LOCALLY**
