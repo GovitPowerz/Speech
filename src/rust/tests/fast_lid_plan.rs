@@ -64,11 +64,12 @@ fn err_of<T>(r: anyhow::Result<T>, what: &str) -> String {
 }
 
 /// Every committed algo-6 Mode-7 config the fast Twin runs, with the LID shape its name
-/// promises (`phase4b/twin_mode7_ppm2.config` sets `BLSTM_LID_DumpInternals true`, a
-/// construction refusal on the fast tree, so it is in the refusal leg instead).
-const CONFIGS: [(&str, FastNetShape); 15] = [
+/// promises (`phase4b/twin_mode7_ppm2.config`'s `BLSTM_LID_DumpInternals true` is
+/// unread since issue #135, so it runs like its siblings).
+const CONFIGS: [(&str, FastNetShape); 16] = [
     ("phase4b/twin_mode7.config", FastNetShape::Blstm),
     ("phase4b/twin_mode7_ppm1.config", FastNetShape::Blstm),
+    ("phase4b/twin_mode7_ppm2.config", FastNetShape::Blstm),
     ("phase4b/twin_e2e.config", FastNetShape::Blstm),
     (
         "phase9/twin_mode7_lid_lstm_forward.config",
@@ -426,15 +427,9 @@ fn plan_refuses_what_the_twin_refused_at_construction() {
         msg.contains("only Mode 7") && msg.contains("got 5"),
         "{msg}"
     );
-    let msg = err_of(
-        FastLidPlan::from_map(&map_for("phase4b/twin_mode7_ppm2.config")),
-        "ppm2",
-    );
-    assert!(msg.contains("DumpInternals"), "{msg}");
     for (key, value, needle) in [
         ("BLSTM_LID_Mode", "0", "only Mode 7"),
         ("BLSTM_TDCwindow", "0.1", "pitch second pass"),
-        ("BLSTM_LID_DumpInternals", "true", "DumpInternals"),
         (
             "BLSTM_LID_InputNormalizationType",
             "1",

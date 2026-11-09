@@ -850,7 +850,7 @@ impl BagOfProcessors {
 
             // legacy: :419-433 WER percent scaling (display-only there, nothing
             // stored): not computed in the port (issue #94). The per-file `wer`
-            // members still reach the `.mat` through `ChannelResult::to_row`.
+            // members still reach the result row through `ChannelResult::to_row`.
 
             // legacy: :435-441 confusion block, algo 5/6 only -- in the port, "this
             // config's results carry a LID block" (only the LID drivers fill one).

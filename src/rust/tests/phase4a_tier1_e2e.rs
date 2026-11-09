@@ -115,11 +115,7 @@ fn solo_tdc_matches() {
         "Neural_Networks_BackPropagation_Epochs".to_string(),
         "0".to_string(),
     );
-    // Match the harness set_val: solo writes solo_tdc.mat, dump dir vrcts_solo.
-    cfg.insert(
-        "multiConfigResultsOutputFile".to_string(),
-        "solo_tdc.mat".to_string(),
-    );
+    // Match the harness set_val: dump dir vrcts_solo.
     cfg.insert("Dump_Directory".to_string(), "vrcts_solo".to_string());
     std::fs::create_dir_all("vrcts_solo").unwrap();
 
@@ -161,10 +157,6 @@ fn train_ltsv_two_epochs_matches() {
 
     let mut cfg = load_config("tier1_ltsv_powermel.config");
     // Committed config already has epochs 2; harness kept it.
-    cfg.insert(
-        "multiConfigResultsOutputFile".to_string(),
-        "train_ltsv.mat".to_string(),
-    );
     cfg.insert("Dump_Directory".to_string(), "vrcts_train".to_string());
     std::fs::create_dir_all("vrcts_train").unwrap();
 
@@ -227,10 +219,6 @@ fn multiconfig_matches() {
     cfg_tdc.insert(
         "Neural_Networks_BackPropagation_Epochs".to_string(),
         "0".to_string(),
-    );
-    cfg_tdc.insert(
-        "multiConfigResultsOutputFile".to_string(),
-        "multiconfig.mat".to_string(),
     );
     cfg_tdc.insert("Dump_Directory".to_string(), "vrcts_multi_tdc".to_string());
     std::fs::create_dir_all("vrcts_multi_tdc").unwrap();
@@ -299,10 +287,6 @@ fn vrcts_byte_equal() {
     cfg.insert(
         "Neural_Networks_BackPropagation_Epochs".to_string(),
         "0".to_string(),
-    );
-    cfg.insert(
-        "multiConfigResultsOutputFile".to_string(),
-        "solo_tdc.mat".to_string(),
     );
     cfg.insert("Dump_Directory".to_string(), "vrcts_solo".to_string());
     std::fs::create_dir_all("vrcts_solo").unwrap();

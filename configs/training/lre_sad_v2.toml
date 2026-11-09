@@ -50,7 +50,7 @@
 # DIVERGENCES from 1_worker_1.config (the complete list -- all RUNTIME/orchestration
 # keys, none DSP/net/cost, so the "seeded VERBATIM" claim above holds for the modeled
 # keys): max_duration (capped for a bounded run, run_baseline overrides), num_outer_threads
-# (N-lane fold width), results_file, backpropagation_epochs (0 -- the modern loop's run_solo
+# (N-lane fold width), backpropagation_epochs (0 -- the modern loop's run_solo
 # path, not the engine-internal train()), exclude_nontrans (false, see below), and
 # dump_directory (empty: no VRCTS dump; the held-out DCF reads the fold result, issue #86).
 #
@@ -69,7 +69,6 @@
 algo_choice = 3
 num_outer_threads = 1
 num_inner_threads = 1
-results_file = "MultiConfigResults.mat"
 file_type = 0
 backpropagation_epochs = 0
 # false: include every derived wav/xml pair (the VRCTS refs are speech references,

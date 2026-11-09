@@ -73,7 +73,7 @@ class RunConfig(BaseModel):
     # PS.VP.* front matter + PS.FS paths
     numOuterThreads: int  # PS.VP.nbproc.outer
     numInnerThreads: int  # PS.VP.nbproc.inner
-    OutputFile: str  # PS.VP.OutputFile -> multiConfigResultsOutputFile
+    OutputFile: str  # PS.VP.OutputFile -> multiConfigResultsOutputFile (emitted; unread by the engine since #135)
     Display_MillisecondsPerPixel: float  # PS.VP.Display_MillisecondsPerPixel
     name_dir_fig: str  # PS.FS.name_dir_fig -> Display_Output_Directory
     offset: float  # PS.VP.offset -> Audio_offset

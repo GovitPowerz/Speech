@@ -745,82 +745,26 @@ pub fn assert_vrcts_eq(got: &str, expected: &str, label: &str) {
 }
 
 // ============================================================================
-// Minimal MAT v5 reader (Phase 4a; the engine's `MatWriter` has no reader).
-// Uncompressed v5 only: 128-byte header then a sequence of miMATRIX elements.
-// Shared by the phase4a integration tests, which all read back a `.mat` the
-// engine wrote and compare it against a converted fixture.
+// The results JSON reader (issue #135) and the matrix comparator the result-matrix
+// goldens share.
 // ============================================================================
 
-fn u32_le(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes(b[off..off + 4].try_into().unwrap())
+/// Read the document `speech --results-json <path>` wrote (issue #135).
+pub fn read_results_json(path: &Path) -> serde_json::Value {
+    let text = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("results JSON {} not written: {e}", path.display()));
+    serde_json::from_str(&text).expect("results JSON parses")
 }
 
-fn i32_le(b: &[u8], off: usize) -> i32 {
-    i32::from_le_bytes(b[off..off + 4].try_into().unwrap())
-}
-
-fn f64_le(b: &[u8], off: usize) -> f64 {
-    f64::from_le_bytes(b[off..off + 8].try_into().unwrap())
-}
-
-fn pad8(n: usize) -> usize {
-    n.div_ceil(8) * 8
-}
-
-/// Walk the miMATRIX elements, returning `(name, rows, cols, col_major_data)` per
-/// variable in file order.
-pub fn mat_vars(bytes: &[u8]) -> Vec<(String, usize, usize, Vec<f64>)> {
-    let mut out = Vec::new();
-    let mut off = 128;
-    while off + 8 <= bytes.len() {
-        let tag = u32_le(bytes, off);
-        let size = u32_le(bytes, off + 4) as usize;
-        if tag != 14 {
-            break;
-        }
-        let mut p = off + 8;
-        // array flags sub-element (miUINT32, 8 payload): skip tag+size+8.
-        p += 8 + 8;
-        // dims sub-element (miINT32): tag+size then two i32.
-        let dims_size = u32_le(bytes, p + 4) as usize;
-        let rows = i32_le(bytes, p + 8) as usize;
-        let cols = i32_le(bytes, p + 12) as usize;
-        p += 8 + pad8(dims_size);
-        // name sub-element (miINT8, long form): tag+size then the padded body.
-        let name_size = u32_le(bytes, p + 4) as usize;
-        let name = String::from_utf8(bytes[p + 8..p + 8 + name_size].to_vec()).unwrap();
-        p += 8 + pad8(name_size);
-        // data sub-element (miDOUBLE): tag+size then the doubles.
-        let data_size = u32_le(bytes, p + 4) as usize;
-        let n = data_size / 8;
-        let mut data = Vec::with_capacity(n);
-        for k in 0..n {
-            data.push(f64_le(bytes, p + 8 + k * 8));
-        }
-        out.push((name, rows, cols, data));
-        off += 8 + size;
-    }
-    out
-}
-
-/// Read a variable's matrix back out of a MAT v5 file the engine wrote. The
-/// writer stores column-major; this rebuilds a row-major `Array2`.
-pub fn mat_var_matrix(bytes: &[u8], name: &str) -> Option<Array2<f64>> {
-    mat_vars(bytes)
-        .into_iter()
-        .find(|(n, _, _, _)| n == name)
-        .map(|(_, r, c, data)| Array2::from_shape_fn((r, c), |(i, j)| data[j * r + i]))
-}
-
-pub fn mat_var_order(bytes: &[u8]) -> Vec<String> {
-    mat_vars(bytes).into_iter().map(|(n, _, _, _)| n).collect()
-}
-
-pub fn mat_var_dims(bytes: &[u8], name: &str) -> Option<(usize, usize)> {
-    mat_vars(bytes)
-        .into_iter()
-        .find(|(n, _, _, _)| n == name)
-        .map(|(_, r, c, _)| (r, c))
+/// One named matrix of the results JSON (a list of rows) as a row-major `Array2`.
+pub fn json_matrix(doc: &serde_json::Value, name: &str) -> Array2<f64> {
+    let rows = doc[name]
+        .as_array()
+        .unwrap_or_else(|| panic!("{name} missing from the results JSON"));
+    let cols = rows.first().map_or(0, |r| r.as_array().unwrap().len());
+    Array2::from_shape_fn((rows.len(), cols), |(i, j)| {
+        rows[i][j].as_f64().expect("a finite number")
+    })
 }
 
 /// Element compare: `strict_cols` bit-exact (id/count columns), `masked_cols`

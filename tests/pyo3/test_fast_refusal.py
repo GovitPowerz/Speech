@@ -6,7 +6,7 @@
     (epochs, gradient-check epsilon, both `BackPropagationActivated` flags); the exact tree
     builds the same map.
   * A gradient check is training-shaped: `Neural_Networks_Gradient_Check_Epsilon > 0` on a
-    fast map refuses in UnitTest mode, before the mode's output-file truncation.
+    fast map refuses in UnitTest mode, writing nothing in the workdir.
   * `Engine.grad_check` on a fast engine answers `[]`, the exact engine's answer with backprop
     off (decision 4: after the refusal a fast engine always has backprop off, so the empty
     list is the truthful zero-active-nets answer, not a silent no-op).
@@ -66,10 +66,11 @@ def test_fast_refuses_training_shaped_map_at_construction(tmp_path: Path, mode: 
 
 def test_fast_refuses_gradient_check_epsilon_in_unit_test_mode(tmp_path: Path) -> None:
     cfg = _inference_only(_cfg(tmp_path, "fast", Neural_Networks_Gradient_Check_Epsilon="1e-4"))
+    seeded = sorted(tmp_path.rglob("*"))
     with pytest.raises(RuntimeError, match=REFUSAL) as refused:
         _build(tmp_path, cfg, "-t")
     assert "Neural_Networks_Gradient_Check_Epsilon 0.0001" in str(refused.value)
-    assert not (tmp_path / "MultiConfigResults.mat").exists(), "the refusal precedes the UnitTest-mode output-file truncation"
+    assert sorted(tmp_path.rglob("*")) == seeded, "the refusal writes no file in the workdir"
     _build(tmp_path, {**cfg, "Inference_Path": "exact"}, "-t")
 
 

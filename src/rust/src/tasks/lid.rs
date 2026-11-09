@@ -941,38 +941,6 @@ impl Segmenter for BlstmSpectralLid {
 // Twin/Siamese LID driver (Algo 6; `TwinBLSTMSpectralLID.{h,cpp}`).
 // ===========================================================================
 
-/// Port of `TwinBLSTMSpectralLID.cpp:906-913`'s `_DumpDir.size() > 0` branch (the only
-/// branch reachable here, since the call site already guards on `!dump_dir.is_empty()`):
-///
-/// ```cpp
-/// basefilename = audio.getAudioFileName().substr(
-///     audio.getAudioFileName().find_last_of('/')+1,
-///     audio.getAudioFileName().size()-audio.getAudioFileName().find_last_of('/')-1-4);
-/// basefilename = _DumpDir+"/"+basefilename;
-/// ```
-///
-/// Strips the directory (the portion after the last `/`, or the whole string if there is
-/// none) then ALWAYS drops exactly 4 trailing characters from that basename -- NOT an
-/// extension-aware strip. For a `.wav` name this cleanly removes `.wav`; for the mode-7
-/// phSeq arm's `.phSeq` (6 chars) it leaves a partial extension (`"s1.phSeq"` ->
-/// `"s1.p"`), a load-bearing legacy quirk reproduced verbatim (see IMPROVEMENTS.md). When
-/// the basename is shorter than 4 bytes, `std::string::substr`'s length-clamping (the
-/// requested length underflows to a huge `size_t`, then gets clamped to the remaining
-/// string) leaves it untouched rather than panicking -- well-defined in C++, reproduced
-/// here with an explicit length check instead of relying on unsigned wraparound.
-fn mode7_dump_basename(audio_file_name: &str, dump_dir: &str) -> String {
-    let after_slash = match audio_file_name.rfind('/') {
-        Some(i) => &audio_file_name[i + 1..],
-        None => audio_file_name,
-    };
-    let stem = if after_slash.len() >= 4 {
-        &after_slash[..after_slash.len() - 4]
-    } else {
-        after_slash
-    };
-    format!("{dump_dir}/{stem}")
-}
-
 /// Twin/Siamese spectral LID driver (Algo 6; `TwinBLSTMSpectralLID.{h,cpp}`).
 ///
 /// UNLIKE Algo 5 (`BlstmSpectralLid`, whose SAD is LTSV-driven), Algo 6's SAD IS the
@@ -1032,8 +1000,6 @@ pub struct TwinBlstmSpectralLid {
     min_nb_of_frames: i32,
     /// `_NoiseMagnitude` (`:37`, default 0.0). Mode 7-only; stored for the next task.
     noise_magnitude: f64,
-    /// `_DumpLIDInternals` (`:38`, default false). Mode 7-only; stored for the next task.
-    dump_lid_internals: bool,
     /// The stateful `_SpectrumShift` / `_SpectrumShiftInFrames` / SAD `_WindowShift`
     /// (`:208-210`, `:453/:1419`), issue #121.
     carry: SpectralCarry,
@@ -1107,7 +1073,8 @@ impl TwinBlstmSpectralLid {
         let post_process_mode = get_default::<i32>(map, "BLSTM_LID_PostProcessMode", 0)?;
         let min_nb_of_frames = get_default::<i32>(map, "BLSTM_LID_MinNbOfFrames", 0)?;
         let noise_magnitude = get_f64_default(map, "BLSTM_LID_NoiseMagnitude", 0.0)?;
-        let dump_lid_internals = get_default::<bool>(map, "BLSTM_LID_DumpInternals", false)?;
+        // `_DumpLIDInternals` (`:38`) and its `.mat` dump (`:906-913`, `:1136-1158`) are
+        // not ported since issue #135: `BLSTM_LID_DumpInternals` is unread.
 
         let carry = SpectralCarry::new(feature_cfg.shift_sec, driver_cfg.window_shift_sec);
 
@@ -1125,7 +1092,6 @@ impl TwinBlstmSpectralLid {
             post_process_mode,
             min_nb_of_frames,
             noise_magnitude,
-            dump_lid_internals,
             carry,
             cumulative_error: Vec::new(),
             nb_of_classif: Vec::new(),
@@ -1312,16 +1278,6 @@ impl TwinBlstmSpectralLid {
         targets
     }
 
-    /// Override the DumpLIDInternals output directory (`_DumpDir`). The legacy derives
-    /// the `.mat` filename from `audio.getAudioFileName()` (`:906-913`, see
-    /// [`mode7_dump_basename`]) -- `<dir>/<audio basename minus 4 trailing chars>_chan<c>
-    /// _lid_dump.mat`. Closed 4c-era fix: `Audio::audio_file_name` (landed in 4b Task 8,
-    /// populated post-hoc by `engine::bag_of_processors::apply_corpus_item`, not by
-    /// `read_audio`/`read_phseq`) is now threaded into this dump path.
-    pub fn set_dump_dir(&mut self, dir: String) {
-        self.driver_cfg.dump_dir = dir;
-    }
-
     /// Port of the `abs(_Mode) == 7` branch (`:903-1193`), phSeq (File_Type 1) arm only.
     /// The SAD net is NEVER run (`result_vec` is synthesized constant 10.0 at `:726`);
     /// the LID net scores each `audio._ExternalFeatures[i]` block directly (`:980-1155`).
@@ -1398,13 +1354,10 @@ impl TwinBlstmSpectralLid {
         let post_process_mode = self.post_process_mode;
         let min_nb_of_frames = self.min_nb_of_frames;
         let noise_magnitude = self.noise_magnitude;
-        let dump_lid_internals = self.dump_lid_internals;
-        let dump_dir = self.driver_cfg.dump_dir.clone();
         let conv_coeff = self.driver_cfg.conv_coeff.clone();
         let mut lid_cost_ponderation = 1.0f64;
         // External features are shared across channels (phSeq has _ChannelsCount = 1).
         let external_features = audio.external_features.clone();
-        let audio_file_name = audio.audio_file_name.clone();
 
         for (chan, seg) in seg_per_chan.iter_mut().enumerate().take(channels) {
             // targetIndex = clamp(lang_index, [0, classNb)) (`:626-628`).
@@ -1432,15 +1385,6 @@ impl TwinBlstmSpectralLid {
             // --- abs(_Mode)==7 external-features loop (`:965-1179`) ------------
             self.lid_net
                 .set_processing_type(lid_window_size > 0, !lid_no_overlap); // :971
-
-            let mut dump = if dump_lid_internals && !dump_dir.is_empty() {
-                let base = mode7_dump_basename(&audio_file_name, &dump_dir);
-                let p = std::path::PathBuf::from(format!("{base}_chan{chan}_lid_dump.mat"));
-                Some(crate::io::matfile::MatWriter::create(&p)?)
-            } else {
-                None
-            };
-            let mut count_dump = 0i64;
 
             // The scoring accumulator (`:787-790` seed; `:1113-1135` per entry; `:1163-1179`
             // + `:1318-1337` epilogue): the ONE kernel, `LidChannelAcc`.
@@ -1488,32 +1432,6 @@ impl TwinBlstmSpectralLid {
                     BlockScore::PostProcess(post_process_mode),
                     BlockWeight::MeanIfCostModified,
                 );
-
-                // DumpLIDInternals features_<n> = [oF | oB] (`:1136-1144`).
-                if let Some(w) = dump.as_mut() {
-                    let of = &self.lid_net.output_forward;
-                    let ob = &self.lid_net.output_backward;
-                    let n = of.nrows();
-                    let (fc, bc) = (of.ncols(), ob.ncols());
-                    let mut colmaj = Vec::with_capacity(n * (fc + bc));
-                    for c in 0..fc {
-                        for r in 0..n {
-                            colmaj.push(of[[r, c]]);
-                        }
-                    }
-                    for c in 0..bc {
-                        for r in 0..n {
-                            colmaj.push(ob[[r, c]]);
-                        }
-                    }
-                    w.write_matrix(&format!("features_{count_dump}"), n, fc + bc, &colmaj)?;
-                    count_dump += 1;
-                }
-            }
-
-            if let Some(mut w) = dump.take() {
-                w.write_scalar("matNb", count_dump as f64)?; // :1157-1158
-                w.finish()?;
             }
 
             // langID normalization (`:1163-1179`) + member writes (`:1318-1337`).

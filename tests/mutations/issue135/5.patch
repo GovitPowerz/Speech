@@ -1,0 +1,16 @@
+mutation: the JSON document lists each matrix by columns instead of rows (a transposed reader would still see a matrix)
+catcher: CAUGHT cargo --test phase4a_cli binary_end_to_end
+catcher: CAUGHT cargo --test phase4b_corpus_lid binary_e2e_mode7
+
+diff --git a/src/rust/src/main.rs b/src/rust/src/main.rs
+--- a/src/rust/src/main.rs
++++ b/src/rust/src/main.rs
+@@ -207,7 +207,7 @@ fn main() {
+ fn write_results_json(processor: &CorpusProcessor, mut file: std::fs::File) -> std::io::Result<()> {
+     use std::io::Write;
+     let rows = |m: &ndarray::Array2<f64>| -> Vec<Vec<f64>> {
+-        m.rows().into_iter().map(|r| r.to_vec()).collect()
++        m.columns().into_iter().map(|r| r.to_vec()).collect()
+     };
+     let mut doc = std::collections::BTreeMap::new();
+     doc.insert("MultiConfigResults", rows(processor.results_matrix()));

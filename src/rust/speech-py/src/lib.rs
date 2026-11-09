@@ -307,7 +307,7 @@ impl Engine {
         self.inner.results_matrix().to_pyarray(py)
     }
 
-    /// The four per-epoch result arrays (issue #134): one dict keyed by the `.mat`
+    /// The four per-epoch result arrays (issue #134): one dict keyed by the legacy
     /// variable names (`CostMem`, `BadClassifMem`, `CostLIDMem`, `BadClassifLIDMem`),
     /// each `epochs x configs` -- `1 x n` before the first `run()` and after a solo
     /// run, `(N + 2) x n` after a training run of `N` epochs, and `1 x n` zeros after

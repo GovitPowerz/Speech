@@ -1,0 +1,16 @@
+mutation: an empty `--results-json=` path is accepted (the bail answers only a missing path)
+catcher: CAUGHT cargo --test phase4a_cli results_json_flag_is_not_a_config_override
+
+diff --git a/src/rust/src/cli.rs b/src/rust/src/cli.rs
+index b3f447b..ee50ba9 100644
+--- a/src/rust/src/cli.rs
++++ b/src/rust/src/cli.rs
+@@ -94,7 +94,7 @@ pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
+             continue;
+         };
+         match path {
+-            Some(p) if !p.is_empty() => results_json = Some(p.to_string()),
++            Some(p) => results_json = Some(p.to_string()),
+             _ => bail!("--results-json needs a path"),
+         }
+     }

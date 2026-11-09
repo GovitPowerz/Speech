@@ -1,0 +1,32 @@
+mutation: the results file is created after the run, so an unwritable path fails only once the run is over
+catcher: CAUGHT cargo --test phase4a_cli results_json_unwritable_path_fails_before_the_run
+catcher: MISSED cargo --test phase4a_cli binary_end_to_end
+
+diff --git a/src/rust/src/main.rs b/src/rust/src/main.rs
+index 6e1e5db..5c7cb0a 100644
+--- a/src/rust/src/main.rs
++++ b/src/rust/src/main.rs
+@@ -178,6 +178,11 @@ fn main() {
+ 
+     // `--results-json`: the file is created before the run, so an unwritable path fails
+     // now rather than after it (a failed run leaves the file empty).
++    if let Err(e) = processor.run() {
++        eprintln!("Error: {e}");
++        std::process::exit(1);
++    }
++
+     let results_json = invocation.results_json.map(|path| {
+         let file = std::fs::File::create(&path).unwrap_or_else(|e| {
+             eprintln!("Error: cannot create the results JSON `{path}`: {e}");
+@@ -186,11 +191,6 @@ fn main() {
+         (path, file)
+     });
+ 
+-    if let Err(e) = processor.run() {
+-        eprintln!("Error: {e}");
+-        std::process::exit(1);
+-    }
+-
+     if let Some((path, file)) = results_json
+         && let Err(e) = write_results_json(&processor, file)
+     {

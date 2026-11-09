@@ -20,8 +20,10 @@
 //!   ppm0 in the normalized observables -- the per-row entropy offset is column-constant
 //!   so it cancels in the softmax normalization, a documented property -- but the ppm1
 //!   code path is asserted to run via `post_process_mode()`);
-//! - the `_MinNbOfFrames` guard (ppm2's `MinNbOfFrames 4` skips the 2-/3-row blocks);
-//! - `_DumpLIDInternals` writes the `features_<n>` + `matNb` `.mat` (value round-trip).
+//! - the `_MinNbOfFrames` guard (ppm2's `MinNbOfFrames 4` skips the 2-/3-row blocks).
+//!
+//! The `_DumpLIDInternals` `.mat` dump is not ported since issue #135: ppm2's
+//! `BLSTM_LID_DumpInternals true` is unread.
 
 mod common;
 
@@ -189,105 +191,6 @@ fn post_process_mode_all_three_covered() {
             "ppm1 should near-coincide with ppm0 (offset-cancellation): {a} vs {b}"
         );
     }
-}
-
-/// Minimal MAT v5 reader for THIS test's own dump only, matching `io/matfile.rs`'s
-/// writer exactly (fixed 128-byte header, sequential uncompressed miMATRIX elements,
-/// no compression). NOT a general reader -- the crate deliberately ships none (S6,
-/// see `io/matfile.rs`'s module doc); this stays test-local, just enough to pull one
-/// named variable's payload back out for a real value check instead of a
-/// presence-only text scan.
-fn read_mat_matrix(bytes: &[u8], name: &str) -> (usize, usize, Vec<f64>) {
-    let u32_at = |o: usize| u32::from_le_bytes(bytes[o..o + 4].try_into().unwrap());
-    let mut off = 128usize; // fixed text/version/endian header (matfile.rs::create)
-    while off + 8 <= bytes.len() {
-        let ty = u32_at(off);
-        let payload_size = u32_at(off + 4) as usize;
-        assert_eq!(ty, 14, "expected miMATRIX tag at offset {off}");
-        let mut p = off + 8;
-        let flags_size = u32_at(p + 4) as usize;
-        p += 8 + flags_size.div_ceil(8) * 8;
-        let dims_size = u32_at(p + 4) as usize;
-        let rows = i32::from_le_bytes(bytes[p + 8..p + 12].try_into().unwrap()) as usize;
-        let cols = i32::from_le_bytes(bytes[p + 12..p + 16].try_into().unwrap()) as usize;
-        p += 8 + dims_size.div_ceil(8) * 8;
-        let name_size = u32_at(p + 4) as usize;
-        let this_name = String::from_utf8_lossy(&bytes[p + 8..p + 8 + name_size]).into_owned();
-        p += 8 + name_size.div_ceil(8) * 8;
-        let data_size = u32_at(p + 4) as usize;
-        let data_start = p + 8;
-        let n = data_size / 8;
-        if this_name == name {
-            let data: Vec<f64> = (0..n)
-                .map(|k| {
-                    let o = data_start + k * 8;
-                    f64::from_le_bytes(bytes[o..o + 8].try_into().unwrap())
-                })
-                .collect();
-            return (rows, cols, data);
-        }
-        off += 8 + payload_size;
-    }
-    panic!("variable {name:?} not found in MAT v5 buffer");
-}
-
-#[test]
-fn dump_lid_internals_written_and_valued() {
-    // ppm2 has DumpInternals true. The driver writes features_<n> (= [oF|oB]) + matNb.
-    let tmp = tempfile::tempdir().unwrap();
-    let lidw = lid_weights();
-    let mut drv =
-        TwinBlstmSpectralLid::from_legacy(&map_of("twin_mode7_ppm2"), None, Some(&lidw)).unwrap();
-    drv.set_dump_dir(tmp.path().to_string_lossy().into_owned());
-    let mut audio = phseq_audio("s1", 0, 1.0);
-    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
-    let mut segs: Vec<Segmentation> = (0..audio.data.nrows())
-        .map(|_| Segmentation::new(dur))
-        .collect();
-    drv.get_segmentation(&mut audio, &mut segs, None).unwrap();
-
-    // s1 = [bonjour(7), salut(5)]; MinNbOfFrames 4 keeps both -> matNb = 2, features_0/1.
-    // Legacy-faithful name (`TwinBLSTMSpectralLID.cpp:906-913`): `<audio basename minus 4
-    // trailing chars>_chan<c>_lid_dump.mat` -- audio_file_name's basename is "s1.phSeq"
-    // (8 chars), and the legacy strip is a LITERAL 4 trailing chars (not ".wav"-aware), so
-    // "s1.phSeq" -> "s1.p" (a load-bearing quirk, see IMPROVEMENTS.md).
-    let mat = tmp.path().join("s1.p_chan0_lid_dump.mat");
-    assert!(mat.exists(), "dump .mat not written at {mat:?}");
-    let bytes = std::fs::read(&mat).unwrap();
-    // MAT v5 header text + the variable names appear literally in the (uncompressed) file.
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(text.contains("MATLAB 5.0"), "not a MAT v5 file");
-    assert!(text.contains("features_0"), "missing features_0 variable");
-    assert!(text.contains("features_1"), "missing features_1 variable");
-    assert!(text.contains("matNb"), "missing matNb variable");
-
-    // Real VALUE check, not just presence: parse features_0's payload back out (our
-    // own writer's format) and pin it against the harness's real-compiled dump of
-    // the SAME case (`mode7_dump_s1.mat`, `tools/oracle_harness/main.cpp`'s
-    // DumpLIDInternals emitter, twin_mode7_ppm2/s1) -- element [0,0] (first
-    // forward-net output) AND [3,48] (the fwd|bwd hcat boundary column, so a
-    // concatenation-order bug is caught too, not just a scalar typo). Values
-    // extracted once via `scipy.io.loadmat("mode7_dump_s1.mat")`. Canary-gated:
-    // these flow through the LID net's asinh/sigmoid/softmax chain.
-    let (rows, cols, data) = read_mat_matrix(&bytes, "features_0");
-    assert_eq!((rows, cols), (7, 96), "features_0 shape");
-    let at = |r: usize, c: usize| data[c * rows + r]; // column-major
-    common::assert_oracle_eq_f64(
-        at(0, 0),
-        0.307_905_288_145_866_2,
-        "features_0[0,0] (oF start)",
-    );
-    common::assert_oracle_eq_f64(
-        at(3, 48),
-        -0.016_480_922_319_417_602,
-        "features_0[3,48] (oB start, hcat boundary)",
-    );
-
-    // matNb: the scalar VALUE (2 = both "bonjour"/7-row and "salut"/5-row blocks kept
-    // by MinNbOfFrames 4), not just "the variable name string appears".
-    let (mrows, mcols, mdata) = read_mat_matrix(&bytes, "matNb");
-    assert_eq!((mrows, mcols), (1, 1), "matNb shape");
-    assert_eq!(mdata[0], 2.0, "matNb value");
 }
 
 // === bit-exact goldens vs the REAL compiled getSegmentation ======================

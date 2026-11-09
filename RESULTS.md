@@ -4013,3 +4013,51 @@ Measured 2026-11-06: cargo 1413 -> 1411 passed (`--features test-support`, `--no
 two `prefix_basename` unit tests and `save_weights_writes_three_artifacts` retired,
 `best_pack_is_the_pre_update_pack_and_the_fold` added), pytest 1210 passed non-slow, unchanged;
 `run.py --check`: 186 mutations, 0 problems.
+
+## Issue #135 -- the MAT v5 result sink retired, `--results-json` in its place: the mutation battery
+
+**Live:** `tests/mutations/issue135/` (6 patches). One older patch moved: `issue83/2` is re-targeted
+(its trailing context was the deleted LID dump block), same catchers, same verdicts.
+
+Branch `feature/issue-135-retire-mat-sink`, off `main@24189da` (#136 merged). Every fold wrote
+`MultiConfigResults.mat` and nothing in production read it; the Twin's Mode 7 could also write a
+`_DumpLIDInternals` `.mat`. Both go with `io/matfile.rs`, the `multiConfigResultsOutputFile` key
+(its m/M/t/T truncation included) and `BLSTM_LID_DumpInternals`; the two `KEY_TABLE` rows go (188
+left), and a legacy `.config` still carrying either key loads byte-unchanged, the key unread. The
+CLI's result surface is `speech <mode> --results-json <path>`: the file is created before the run
+and receives, after it, the `results_matrix()` rows and the four `epoch_mems()` arrays as one JSON
+object. Proof of the move (ADR-0002, "a file side effect removed"): the goldens #134 re-pointed to
+the in-memory surface stay byte-green, and `binary_end_to_end` / `binary_e2e_mode7` read the same
+`.bin` fixture values through the JSON.
+
+`tests/mutations/run.py issue135` then `--changed-since origin/main` on macOS after
+the review fix: 10 and 251 verdicts, 0 differ from expected.
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `parse_cli` drops the `--results-json=<path>` form | `phase4a_cli::results_json_flag_is_not_a_config_override` | CAUGHT: `assertion left == right failed` (the flag became a config override) |
+| 2 | the first `--results-json` wins | the same | CAUGHT: `the last one wins` |
+| 3 | an empty `--results-json=` path is accepted | the same | CAUGHT: `unwrap_err() on an Ok value ... results_json: Some("")` |
+| 4 | the results file is created after the run | `phase4a_cli::results_json_unwritable_path_fails_before_the_run` (CAUGHT), `binary_end_to_end` (MISSED) | CAUGHT: `the run never started` |
+| 5 | the document lists each matrix by columns | `binary_end_to_end`, `phase4b_corpus_lid::binary_e2e_mode7` | CAUGHT by both: `shape mismatch`, `e2e MCR 2x23` |
+| 6 | the legacy m/M/t/T truncation comes back in the ctor | `phase4a_corpus_processor::mode_dispatch_matrix`, `tests/pyo3/test_fold_run.py::test_fold_run_needs_no_process_cwd` (CAUGHT), `test_fast_refusal.py::test_fast_refuses_gradient_check_epsilon_in_unit_test_mode` (MISSED) | CAUGHT: `train: the run writes no file but its VRCTS dumps, got ["MultiConfigResults.mat"]`, `no engine-written file in the workdir` |
+
+What the battery measured: the flag's grammar has one pin (rows 1-3), the fail-fast order its own
+(row 4: the end-to-end run cannot see when the file was opened), and the document's orientation is
+owned by the two binary tests against the fixtures (row 5). Row 6 is the absence claim: a returning
+legacy write is caught by the in-process dispatch test and by the fold run's workdir check, while
+the fast refusal stays blind to it by design, since the refusal fires before the bag exists and the
+write would follow it.
+
+Measured 2026-11-07: cargo 1411 -> 1405 passed (`--features test-support`, `--no-fail-fast`; retired:
+the four `phase4a_matfile` tests, `save_results_variables`, `bench_names_the_unwritable_output_path`,
+`dump_lid_internals_written_and_valued`, `fast_twin_bails_on_dump_internals`; added:
+`results_json_flag_is_not_a_config_override`, `results_json_unwritable_path_fails_before_the_run`),
+pytest 1210 -> 1208 passed non-slow (`test_phase4a_matfile.py` and the #134 bridge test retired),
+pyo3 296 -> 295; `run.py --check`: 192 mutations, 0 problems.
+
+Review fix 2026-11-09: `--results-json` refuses a path that reads as a flag or a config (a
+forgotten path swallowed the next argument and truncated it before the run; pinned in
+`results_json_flag_is_not_a_config_override`), and the writer serializes through
+`serde_json::to_vec` (same bytes), so patch 5 is re-targeted to it. `run.py issue135/1-5`: 7
+verdicts, 0 differ from expected; `run.py --check`: 192 mutations, 0 problems.

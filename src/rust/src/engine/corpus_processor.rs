@@ -1,6 +1,9 @@
 //! Top-level driver: build corpus + processors, walk files under the static-lane
 //! deterministic reduction, epoch training loop, finite-diff grad check, result
-//! reduction + `.mat` write.
+//! reduction. The legacy `saveResults` `.mat` is not written since issue #135: the
+//! result matrix and the per-epoch arrays are read off the engine
+//! ([`CorpusProcessor::results_matrix`], [`CorpusProcessor::epoch_mems`]), and the
+//! CLI writes them as JSON under `--results-json`.
 //!
 //! Ported from legacy C++: CorpusProcessor.* (replaces the OpenMP parallel-for
 //! with static lanes -- spec S3, the R6 determinism fix).
@@ -29,9 +32,8 @@
 //! (`[phase4a] static-lane deterministic reduction`).
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use indexmap::IndexMap;
 use ndarray::Array2;
 
@@ -40,7 +42,6 @@ use crate::engine::bag_of_processors::{BagOfProcessors, CostPair, training_polic
 use crate::engine::channel_result::ChannelResult;
 use crate::engine::corpus::Corpus;
 use crate::features::stats::InputStatistics;
-use crate::io::matfile::MatWriter;
 use crate::legacy_config::{get_default, get_f64_default};
 
 /// Result of the corpus-level gradient check (`gradCheck`, `:237-340`). The legacy
@@ -63,12 +64,11 @@ pub struct GradCheckReport {
 /// what epoch `e`'s `saveAndUpdate` wrote for every config (issue #134). Sized
 /// `1 x n` by the ctor, `run_solo` and the gradient check, `(N + 2) x n` by
 /// `train` (solo, `N` inner epochs, the final eval), and filled row by row, so
-/// after a solo or training `run()` every row is written and each array equals
-/// the variable `saveResults` writes last (`topRows(epoch + 1)` at the final
-/// epoch is the whole array). A gradient check resets them to `1 x n` zeros
-/// (legacy `:239-242`) and its sweep saves nothing, so after one they hold those
-/// zeros while the `.mat` on disk keeps the previous run's rows. Read through
-/// [`CorpusProcessor::epoch_mems`].
+/// after a solo or training `run()` every row is written (each array is what the
+/// legacy `saveResults` wrote last, `topRows(epoch + 1)` at the final epoch being
+/// the whole array). A gradient check resets them to `1 x n` zeros (legacy
+/// `:239-242`) and its sweep saves nothing, so after one they hold those zeros.
+/// Read through [`CorpusProcessor::epoch_mems`].
 #[derive(Debug, Clone)]
 pub struct EpochMems {
     pub cost: Array2<f64>,
@@ -87,9 +87,10 @@ impl EpochMems {
         }
     }
 
-    /// The four arrays under their `.mat` variable names, in the order
-    /// `saveResults` writes them (`:398-401`): the one name map the writer, the
-    /// seam's `Engine.epoch_mems()` dict and the goldens read.
+    /// The four arrays under their legacy variable names, in the order the
+    /// legacy `saveResults` wrote them (`:398-401`): the one name map the CLI's
+    /// `--results-json` document, the seam's `Engine.epoch_mems()` dict and the
+    /// goldens read.
     pub fn named(&self) -> [(&'static str, &Array2<f64>); 4] {
         [
             ("CostMem", &self.cost),
@@ -101,7 +102,7 @@ impl EpochMems {
 }
 
 /// Port of `CorpusProcessor` (`CorpusProcessor.h`/`.cpp`): mode dispatch, the epoch
-/// loop, corpus-level gradient check, and `.mat` result reduction.
+/// loop, corpus-level gradient check, and the result reduction.
 ///
 /// `results` is `file -> conf -> chan -> ChannelResult` (the legacy nested `map`
 /// keyed identically, its 18+N-col row rendered by `ChannelResult::to_row`).
@@ -115,7 +116,6 @@ pub struct CorpusProcessor {
     corpus: Corpus,
     processors: BagOfProcessors,
     mode: Mode,
-    output_file_name: String,
     results: BTreeMap<usize, BTreeMap<usize, BTreeMap<usize, ChannelResult>>>,
     results_e: Array2<f64>,
     mems: EpochMems,
@@ -167,24 +167,11 @@ impl CorpusProcessor {
 
         // legacy: :50 _Corpus = Corpus(configs[0]).
         let corpus = Corpus::from_config(&configs[0])?;
-        // legacy: :52 _OutputFileName default MultiConfigResults.mat -- read BEFORE
-        // the bag ctor clears no keys relevant to it.
-        let output_file_name = get_default::<String>(
-            &configs[0],
-            "multiConfigResultsOutputFile",
-            "MultiConfigResults.mat".into(),
-        )?;
+        // legacy: :52 `_OutputFileName` and the :53-59 m/M/t/T truncation of that
+        // file are not ported since issue #135 (the `.mat` sink is retired).
         // legacy: :51 _Processors = BagOfProcessors(configs, _Mode). The bag ctor
         // mutates each config map (key clears :21-23).
         let processors = BagOfProcessors::from_configs(&mut configs)?;
-
-        // legacy: :53-59 output-file TRUNCATION for m/M/t/T -- write a single space,
-        // so a subsequent read (or a run that never saves) sees a valid-but-empty
-        // file rather than a stale prior run's .mat.
-        if matches!(mode.kind, ModeKind::Multi | ModeKind::UnitTest) {
-            std::fs::write(&output_file_name, " ")
-                .with_context(|| format!("cannot create `{output_file_name}`"))?;
-        }
 
         // legacy: :60-62 epochs clamp (< 0 -> 0). get<T>(name, default) exits(1) on
         // a present-but-unparseable value -- ported as Err, not a silent fallback.
@@ -216,7 +203,6 @@ impl CorpusProcessor {
             corpus,
             processors,
             mode,
-            output_file_name,
             results: BTreeMap::new(),
             results_e: Array2::zeros((0, 0)),
             mems: EpochMems::zeros(1, nb_of_conf),
@@ -330,7 +316,8 @@ impl CorpusProcessor {
 
     /// Port of `CorpusProcessor::run(epoch, mode, backPropWeightsDerivatives,
     /// isLogActivated)` (`:140-235`): the static-lane file walk + deterministic fold,
-    /// `transformResults`, and the `saveAndUpdate` + `saveResults` gating.
+    /// `transformResults`, and the `saveAndUpdate` gating (the legacy `saveResults`
+    /// calls beside it are not ported since issue #135).
     ///
     /// `mode` is the epoch-local mode (the legacy passes `_Mode` here despite the
     /// `mode` param -- `:177` reads `_Mode`, NOT the passed `mode`; reproduced: the
@@ -497,12 +484,13 @@ impl CorpusProcessor {
         // back to the bag. See IMPROVEMENTS.md `[phase5] F10`.
         self.seam_derivs = derivs.clone();
 
-        // legacy: :215-234 transform + saveAndUpdate + saveResults gating.
+        // legacy: :215-234 transform + saveAndUpdate gating; an empty epoch
+        // (:232-234) only wrote the `.mat`, so it does nothing here.
         if !self.results.is_empty() {
             self.transform_results();
             if self.training_epochs > 0 {
-                // legacy: :217-224 training branch -- saveAndUpdate + saveResults
-                // ALWAYS (every epoch, including the final epoch > _TrainingEpochs).
+                // legacy: :217-224 training branch -- saveAndUpdate ALWAYS (every
+                // epoch, including the final epoch > _TrainingEpochs).
                 self.save_and_update_epoch(epoch, derivs);
                 #[cfg(feature = "test-support")]
                 {
@@ -522,18 +510,11 @@ impl CorpusProcessor {
                     self.epoch_best_cost_trace
                         .push(*self.best_cost.get(&0).unwrap_or(&f64::INFINITY));
                 }
-                self.save_results(epoch)?;
-            } else {
+            } else if epoch <= self.training_epochs {
                 // legacy: :226-230 non-training branch -- only when epoch <=
                 // _TrainingEpochs (i.e. epoch == 0, since _TrainingEpochs == 0).
-                if epoch <= self.training_epochs {
-                    self.save_and_update_epoch(epoch, derivs);
-                    self.save_results(epoch)?;
-                }
+                self.save_and_update_epoch(epoch, derivs);
             }
-        } else {
-            // legacy: :232-234 results EMPTY -> saveResults(epoch) still fires.
-            self.save_results(epoch)?;
         }
         Ok(())
     }
@@ -661,22 +642,6 @@ impl CorpusProcessor {
             return Array2::zeros((0, 0));
         }
         truncate_rows(&results_e, counter)
-    }
-
-    /// Port of `CorpusProcessor::saveResults(epoch)` (`:391-404`): the 5 named
-    /// variables in this exact order via [`MatWriter`], each `topRows(epoch+1)`.
-    /// The legacy `Mat_Create` failure -> `exit(1)`; here a create error bails.
-    fn save_results(&self, epoch: usize) -> Result<()> {
-        let mut w = MatWriter::create(Path::new(&self.output_file_name))?;
-        // legacy: :397 MultiConfigResults = _ResultsE (whole).
-        write_row_major(&mut w, "MultiConfigResults", &self.results_e)?;
-        // legacy: :398-401 each mem topRows(epoch+1).
-        let top = epoch + 1;
-        for (name, m) in self.mems.named() {
-            write_row_major(&mut w, name, &truncate_rows(m, top))?;
-        }
-        w.finish()?;
-        Ok(())
     }
 
     /// Port of `CorpusProcessor::gradCheck(epsilon)` (`:237-340`). Snapshots the
@@ -884,9 +849,9 @@ impl CorpusProcessor {
         out
     }
 
-    /// The four per-epoch result arrays (issue #134): the same numbers the `.mat`
-    /// variables `CostMem` / `BadClassifMem` / `CostLIDMem` / `BadClassifLIDMem`
-    /// carry, read off the engine. `1 x n` zeros before the first `run()`.
+    /// The four per-epoch result arrays (issue #134): the legacy `saveResults`
+    /// variables `CostMem` / `BadClassifMem` / `CostLIDMem` / `BadClassifLIDMem`,
+    /// read off the engine. `1 x n` zeros before the first `run()`.
     pub fn epoch_mems(&self) -> &EpochMems {
         &self.mems
     }
@@ -1175,30 +1140,11 @@ impl CorpusProcessor {
     }
 }
 
-/// Truncate an `Array2` to its first `n` rows (`conservativeResize(n, cols)`, and
-/// the legacy `topRows(n)`: the same first `n` rows), a plain row-slice copy. Live
-/// call sites shrink or keep, except the pathological gradcheck empty-results
-/// path, where `truncate_rows` can be asked for more rows than
-/// `m` has (e.g. a 1-row `mems.cost` with `epoch+1 == 2`) -- that indexes out of
-/// bounds here, mirroring legacy `topRows(2)`-on-1-row UB. Faithful to legacy UB,
-/// unreachable under non-empty corpora, panics by design if hit.
+/// Truncate an `Array2` to its first `n <= rows` rows (`conservativeResize(n,
+/// cols)`), a plain row-slice copy.
 fn truncate_rows(m: &Array2<f64>, n: usize) -> Array2<f64> {
     let cols = m.dim().1;
     Array2::from_shape_fn((n, cols), |(i, j)| m[[i, j]])
-}
-
-/// Write a row-major `Array2` to the (column-major) `MatWriter`, converting the
-/// storage order explicitly.
-fn write_row_major(w: &mut MatWriter, name: &str, m: &Array2<f64>) -> Result<()> {
-    let (rows, cols) = m.dim();
-    let mut col_major = Vec::with_capacity(rows * cols);
-    for j in 0..cols {
-        for i in 0..rows {
-            col_major.push(m[[i, j]]);
-        }
-    }
-    w.write_matrix(name, rows, cols, &col_major)?;
-    Ok(())
 }
 
 #[cfg(test)]

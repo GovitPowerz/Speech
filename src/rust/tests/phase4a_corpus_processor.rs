@@ -1,6 +1,6 @@
 //! Phase 4a Task 7: `CorpusProcessor` (`CorpusProcessor.cpp:48-404`) - mode
-//! dispatch, the static-lane epoch loop, `transformResults`, `saveResults`, and
-//! the corpus-level `gradCheck`.
+//! dispatch, the static-lane epoch loop, `transformResults`, and the corpus-level
+//! `gradCheck` (the `saveResults` `.mat` is not written since issue #135).
 //!
 //! The static lane model (spec S3, the R6 determinism fix) is the ONE deliberate
 //! deviation from legacy OpenMP parallelism: file `j` -> lane `j % N`; each lane
@@ -17,14 +17,13 @@ use std::sync::Mutex;
 
 use indexmap::IndexMap;
 
-use common::{mat_var_dims, mat_var_order};
 use speech::cli::{Mode, ModeKind};
 use speech::engine::channel_result::ChannelResult;
 use speech::engine::corpus_processor::CorpusProcessor;
 
-/// `set_current_dir` is process-global; the artifact-producing runs chdir into a
-/// tempdir (`save_and_update`/`save_results` write to relative filenames). Serialize
-/// against `cargo test`'s parallel threads.
+/// `set_current_dir` is process-global; the engine runs chdir into a tempdir (the
+/// relative listing rows resolve there). Serialize against `cargo test`'s parallel
+/// threads.
 static CWD_LOCK: Mutex<()> = Mutex::new(());
 
 struct CwdGuard {
@@ -124,64 +123,93 @@ fn tdc_corpus_config(dir: &Path, n: usize, epochs: i32) -> IndexMap<String, Stri
         "Neural_Networks_BackPropagation_Epochs".to_string(),
         epochs.to_string(),
     );
-    m.insert(
-        "multiConfigResultsOutputFile".to_string(),
-        "MultiConfigResults.mat".to_string(),
-    );
     m
 }
 
 // === mode_dispatch_matrix ====================================================
 // epsilon/epochs/mode-letter combinations select which private path runs. Solo
 // mode never trains (mode-letter gate); a scored mode with epochs>0 trains. We
-// probe the OBSERVABLE outcome: CostMem shape written to the .mat (solo -> 1 row;
-// train with N epochs -> N+2 rows). A 1-file TDC corpus in a tempdir.
+// probe the OBSERVABLE outcome off the engine: the CostMem shape (solo -> 1 row;
+// train with N epochs -> N+2 rows) and the result matrix. A 1-file TDC corpus in a
+// tempdir; since issue #135 a run writes nothing there but its VRCTS dumps (the
+// `.mat` sink is gone).
 #[test]
 fn mode_dispatch_matrix() {
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let listing = |dir: &Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        names
+    };
+    let only_vrcts_written = |dir: &Path, seeded: &[String], label: &str| {
+        let written: Vec<String> = listing(dir)
+            .into_iter()
+            .filter(|n| !seeded.contains(n))
+            .collect();
+        assert!(
+            written.iter().all(|n| n.ends_with(".xml")),
+            "{label}: the run writes no file but its VRCTS dumps, got {written:?}"
+        );
+    };
 
-    // -- Solo (-s), epochs 0: runSolo -> CostMem is 1x1. --
+    // -- Solo (-s), epochs 0: runSolo -> CostMem is 1x1; 1 file x 2 channels = 2
+    //    result rows of 3 ids + 18 result columns. --
     {
         let dir = tempfile::tempdir().unwrap();
         let cfg = tdc_corpus_config(dir.path(), 1, 0);
         let _cwd = CwdGuard::enter(dir.path());
+        let seeded = listing(dir.path());
         let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::Solo)).unwrap();
         cp.run().unwrap();
-        let bytes = std::fs::read("MultiConfigResults.mat").unwrap();
-        let (r, c) = mat_var_dims(&bytes, "CostMem").unwrap();
-        assert_eq!((r, c), (1, 1), "solo CostMem 1x1");
+        assert_eq!(cp.epoch_mems().cost.dim(), (1, 1), "solo CostMem 1x1");
+        assert_eq!(
+            cp.results_matrix().dim(),
+            (2, 21),
+            "solo result matrix 2x21"
+        );
+        only_vrcts_written(dir.path(), &seeded, "solo");
     }
 
-    // -- Multi (-m), epochs 2: train -> CostMem is (epochs+2)x1 = 4x1. --
+    // -- Multi (-m), epochs 2: train -> CostMem is (epochs+2)x1 = 4x1 (the final
+    //    epoch is _TrainingEpochs+1 == 3). --
     {
         let dir = tempfile::tempdir().unwrap();
         let cfg = tdc_corpus_config(dir.path(), 1, 2);
         let _cwd = CwdGuard::enter(dir.path());
+        let seeded = listing(dir.path());
         let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::Multi)).unwrap();
         cp.run().unwrap();
-        let bytes = std::fs::read("MultiConfigResults.mat").unwrap();
-        let (r, c) = mat_var_dims(&bytes, "CostMem").unwrap();
-        // train() writes topRows(epoch+1); the FINAL epoch is _TrainingEpochs+1
-        // == 3, so the last saveResults writes topRows(4) -> the full 4-row mem.
-        assert_eq!((r, c), (4, 1), "train CostMem (epochs+2)x1");
+        assert_eq!(
+            cp.epoch_mems().cost.dim(),
+            (4, 1),
+            "train CostMem (epochs+2)x1"
+        );
+        only_vrcts_written(dir.path(), &seeded, "train");
     }
 
     // -- Solo mode with epochs>0: the mode-letter gate blocks training (legacy
     //    cerr + continue), so it falls through to NO run at all (train not called,
     //    solo not called -- run() only calls runSolo in the else branch when
-    //    epochs==0). Observe: no .mat is written (no run happened). --
+    //    epochs==0). Observe: the result matrix keeps the ctor's empty seed. --
     {
         let dir = tempfile::tempdir().unwrap();
         let cfg = tdc_corpus_config(dir.path(), 1, 2);
         let _cwd = CwdGuard::enter(dir.path());
+        let seeded = listing(dir.path());
         let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::Solo)).unwrap();
         cp.run().unwrap();
-        // The ctor truncates the output file to a single space ONLY for m/M/t/T;
-        // solo mode does not, so no file exists (train was gated out, runSolo not
-        // reached because epochs>0).
-        assert!(
-            !Path::new("MultiConfigResults.mat").exists(),
-            "solo + epochs>0 -> mode gate blocks train, no run, no .mat"
+        assert_eq!(
+            cp.results_matrix().dim(),
+            (0, 0),
+            "solo + epochs>0 -> mode gate blocks train, no run"
+        );
+        assert_eq!(
+            listing(dir.path()),
+            seeded,
+            "no run: no engine-written file"
         );
     }
 }
@@ -282,44 +310,6 @@ fn lanes_n1_equals_sequential() {
     }
     // Non-vacuity: 3 files x 2 channels = 6 rows.
     assert_eq!(rows, 6, "3 files x 2 channels");
-}
-
-// === save_results_variables ==================================================
-// The 5 named matrices are written in order (MultiConfigResults, CostMem,
-// BadClassifMem, CostLIDMem, BadClassifLIDMem), each topRows(epoch+1). Read back
-// the .mat bytes with the local parser helpers.
-#[test]
-fn save_results_variables() {
-    let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = tempfile::tempdir().unwrap();
-    let cfg = tdc_corpus_config(dir.path(), 1, 0);
-    let _cwd = CwdGuard::enter(dir.path());
-    let mut cp = CorpusProcessor::new(vec![cfg], mode(ModeKind::Solo)).unwrap();
-    cp.run().unwrap();
-
-    let bytes = std::fs::read("MultiConfigResults.mat").unwrap();
-    let order = mat_var_order(&bytes);
-    assert_eq!(
-        order,
-        vec![
-            "MultiConfigResults",
-            "CostMem",
-            "BadClassifMem",
-            "CostLIDMem",
-            "BadClassifLIDMem"
-        ],
-        "5 named variables in the exact legacy order"
-    );
-    // Solo run: each mem matrix is topRows(0+1) = 1 row, 1 conf.
-    for name in ["CostMem", "BadClassifMem", "CostLIDMem", "BadClassifLIDMem"] {
-        assert_eq!(mat_var_dims(&bytes, name).unwrap(), (1, 1), "{name} 1x1");
-    }
-    // MultiConfigResults: 1 file x 2 channels = 2 rows, 3 id + 18 result = 21 cols.
-    assert_eq!(
-        mat_var_dims(&bytes, "MultiConfigResults").unwrap(),
-        (2, 21),
-        "MultiConfigResults file x chan rows, 21 cols"
-    );
 }
 
 // === grad_check_synthetic ====================================================
@@ -470,15 +460,8 @@ fn synthetic_signal_corpus_config(dir: &Path) -> IndexMap<String, String> {
         "Neural_Networks_Gradient_Check_Epsilon".to_string(),
         "1e-5".to_string(),
     );
-    m.insert(
-        "multiConfigResultsOutputFile".to_string(),
-        "MultiConfigResults.mat".to_string(),
-    );
     m
 }
-
-// `mat_var_order`/`mat_var_dims` are shared via `common`
-// (hoisted from four copy-pasted phase4a test files; see `tests/common/mod.rs`).
 
 // === epoch_mems_shape_and_fill ===============================================
 // Issue #134: the four per-epoch arrays have an in-memory surface. Shape: the
@@ -486,8 +469,7 @@ fn synthetic_signal_corpus_config(dir: &Path) -> IndexMap<String, String> {
 // (N+2) rows, every one written (the final epoch is N+1). Fill: TDC trains no
 // weights, so every epoch rescores the same hypothesis and a written row is
 // nonzero in at least one array (the values themselves are the goldens' business,
-// pinned against the `.bin` fixtures; the bit-identity with the written `.mat` is
-// the seam bridge test's, `tests/pyo3/test_seam_replay.py`). Reset: a gradient
+// pinned against the `.bin` fixtures). Reset: a gradient
 // check then zeroes them back to `1 x nb_conf` (legacy :239-242); TDC has no
 // backprop net, so its sweep is empty and only the reset runs.
 #[test]

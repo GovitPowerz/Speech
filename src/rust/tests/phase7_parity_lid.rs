@@ -588,18 +588,13 @@ fn fast_refuses_gradient_check_at_construction() {
     // Issue #110 decision 3: a gradient check (`epsilon > 0`, Epochs 0, every flag off) is
     // training-shaped. Before #110 a UnitTest-mode fast run reached `grad_check_full` past
     // both refusal sites and failed with "no backprop-activated network in config 0". Now
-    // construction refuses, naming the epsilon, before the UnitTest-mode output-file
-    // truncation runs: nothing is written.
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("MultiConfigResults.mat");
+    // construction refuses, naming the epsilon. (That it writes no file is the pyo3 twin's
+    // claim, `test_fast_refuses_gradient_check_epsilon_in_unit_test_mode`, which builds in
+    // the workdir; since issue #135 construction has no output to write.)
     let mut m = twin_map_fast();
     m.insert(
         "Neural_Networks_Gradient_Check_Epsilon".into(),
         "1e-4".into(),
-    );
-    m.insert(
-        "multiConfigResultsOutputFile".into(),
-        out.to_str().unwrap().into(),
     );
     let err = CorpusProcessor::new(vec![m], unit_test_mode())
         .err()
@@ -608,10 +603,6 @@ fn fast_refuses_gradient_check_at_construction() {
     assert!(
         msg.contains("Neural_Networks_Gradient_Check_Epsilon 0.0001"),
         "error must name the epsilon, got: {msg}"
-    );
-    assert!(
-        !out.exists(),
-        "the refusal precedes the output-file truncation"
     );
 }
 
@@ -777,19 +768,6 @@ fn fast_twin_pins_the_lid_pack_length_per_cell() {
             FastNetShape::BiCell(ct),
             "{cell}: dispatched arm"
         );
-    }
-}
-
-#[test]
-fn fast_twin_bails_on_dump_internals() {
-    let mut m = map_of("twin_mode7");
-    m.insert("BLSTM_LID_DumpInternals".into(), "true".into());
-    match build_fast_twin(&m) {
-        Err(e) => assert!(
-            e.to_string().contains("DumpInternals"),
-            "expected a dump-internals bail, got: {e}"
-        ),
-        Ok(_) => panic!("fast Twin + DumpInternals must bail"),
     }
 }
 

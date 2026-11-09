@@ -1,0 +1,16 @@
+mutation: parse_cli drops the `--results-json=<path>` form, so it falls through to the legacy grammar as a `--results-json` config override
+catcher: CAUGHT cargo --test phase4a_cli results_json_flag_is_not_a_config_override
+
+diff --git a/src/rust/src/cli.rs b/src/rust/src/cli.rs
+index b3f447b..61d7bb4 100644
+--- a/src/rust/src/cli.rs
++++ b/src/rust/src/cli.rs
+@@ -87,8 +87,6 @@ pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
+     while let Some(arg) = it.next() {
+         let path = if arg == "--results-json" {
+             it.next().map(String::as_str)
+-        } else if let Some(path) = arg.strip_prefix("--results-json=") {
+-            Some(path)
+         } else {
+             rest.push(arg.clone());
+             continue;

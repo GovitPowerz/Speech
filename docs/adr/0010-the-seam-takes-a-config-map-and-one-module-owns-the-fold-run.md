@@ -1,6 +1,6 @@
 # ADR-0010: The seam takes a config map, the process cwd is not part of the Python-side contract, and one module owns the fold run
 
-**Status:** accepted | **Date:** 2026-10-07 (issue #22, grilling outcome recorded there); the fast guard retired 2026-10-09 (issue #62)
+**Status:** accepted | **Date:** 2026-10-07 (issue #22, grilling outcome recorded there); the fast guard retired 2026-10-09 (issue #62); the results-file key retired 2026-11-07 (issue #135)
 
 ## Context
 
@@ -25,12 +25,12 @@ Three things, each owned once.
   `Engine`, `StreamingSession` and `StreamingLidSession`. Rust path semantics are unchanged: a
   relative path still resolves against the process cwd, as for the binary.
 - **The process cwd is not part of the Python-side contract.** `fold_run.FoldRun` resolves the
-  six config keys that name a file or directory (`fileslisting`, `language2classmapping`,
-  `BLSTM_weightsFile`, `BLSTM_LID_weightsFile`, `Dump_Directory`,
-  `multiConfigResultsOutputFile`) against the run's working directory before the map crosses
-  the seam; an absent `.mat` key defaults to the working directory's `MultiConfigResults.mat`,
-  an absent or empty `Dump_Directory` stays as given (empty is the engine's no-dump
-  sentinel). Production listings carry absolute rows (`dataprep/lre.py`), so nothing under
+  five config keys that name a file or directory (`fileslisting`, `language2classmapping`,
+  `BLSTM_weightsFile`, `BLSTM_LID_weightsFile`, `Dump_Directory`) against the run's working
+  directory before the map crosses the seam; an absent or empty `Dump_Directory` stays as given
+  (empty is the engine's no-dump sentinel). (Amended by issue #135: the sixth key,
+  `multiConfigResultsOutputFile`, and its default to the working directory's
+  `MultiConfigResults.mat` left with the `.mat` sink; the engine no longer reads it.) Production listings carry absolute rows (`dataprep/lre.py`), so nothing under
   `src/python/speech/` changes directory or writes a
   config file to run the engine. A committed fixture with relative listing rows keeps its cwd in
   the tests that use it.
