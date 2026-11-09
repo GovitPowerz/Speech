@@ -155,7 +155,7 @@ Speech/
   data/                                    # random_tables.bin (from Constants.h); the corpus is local and git-ignored
   legacy/                                  # git-ignored: where a regeneration run places the archive's vendored C++ src/ + Optimizer_V6.2.2 .m
   tools/                                   # git-ignored: where it places the archive's oracle harnesses (C++, Octave, Perl, the 2015 binary)
-  scripts/                                 # the port-side fixture extractors (the oracle-driven ones live in the archive)
+  scripts/                                 # the fixture extractors over tests/oracles/ (the legacy-harness-driven ones live in the archive)
   src/rust/                                # the engine (README.md: the module map)
     Cargo.toml  Cargo.lock  build.rs       # workspace: speech (lib+bin) + speech-py; build.rs bakes in the build provenance
     src/

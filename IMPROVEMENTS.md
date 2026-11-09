@@ -29,9 +29,10 @@ README.md/CLAUDE.md for the pointer). Every un-quirk task from here on follows t
 
 Oracle harnesses (the C++ `tools/oracle_harness/`, Octave `tools/octave_harness/`, Perl
 `tools/perl_oracle/`, and the resurrected-binary `tools/fsp_runtime/` families, archived in
-`GovitPowerz/speech-legacy-oracle` since issue #132; every `tools/...` path below is
-archive-relative) are NOT regenerated for fixed sites -- each fix's IMPROVEMENTS entry
-documents the now-deliberate divergence (the harness still describes the LEGACY behavior; the port has left it on purpose).
+`GovitPowerz/speech-legacy-oracle` since issue #132; every `tools/...` or `legacy/...` path
+below is archive-relative) are NOT regenerated for fixed sites -- each fix's IMPROVEMENTS
+entry documents the now-deliberate divergence (the harness still describes the LEGACY
+behavior; the port has left it on purpose).
 Entries below with no "FIXED (phase 5, ...)" flip are unchanged: reproduced bit-exactly on
 purpose, either kept-documented by the Phase 5 sweep's own adjudication or not yet swept.
 

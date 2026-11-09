@@ -13,7 +13,8 @@ delta formulas the harness main.cpp uses, so a Task 9 oracle replaying them must
 reproduce the committed derivs.
 
 All f64 values are stored as raw u64 bit patterns (hex) for exact JSON round-trip.
-Regenerate (AFTER extract_phase3_fixtures.py, which writes the bwd_*.bin goldens):
+Regenerate (AFTER extract_phase3_fixtures.py, archived in GovitPowerz/speech-legacy-oracle
+since issue #132, which writes the bwd_*.bin goldens):
 
     uv run python scripts/extract_phase3_oracle_cases.py
 """
