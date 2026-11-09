@@ -128,7 +128,7 @@ A legacy `.config` importer (`legacy_config.rs`, `configs/legacy/`) parses the o
 
 ## Validation
 
-Parity against the legacy was established as a ladder, each rung golden-tested bit-for-bit against an oracle before the next was trusted: features, the weight codec, the NN forward, the analytic gradient, one optimizer step, the decision and scoring layer, then whole-corpus runs against the resurrected 2015 binary. Since then every change is held to the standing gates: decisions identical, numbers pinned, streaming bit-equal, gradients finite-difference-checked, and a mutation battery per phase. [docs/validation.md](docs/validation.md) has the oracle tiers and the gates in full; [RESULTS.md](RESULTS.md) the measurements.
+Parity against the legacy was established as a ladder, each rung golden-tested bit-for-bit against an oracle before the next was trusted: features, the weight codec, the NN forward, the analytic gradient, one optimizer step, the decision and scoring layer, then whole-corpus runs against the resurrected 2015 binary. Since then every change is held to the standing gates: decisions identical, numbers pinned, streaming bit-equal, gradients finite-difference-checked, and a mutation battery per phase. [docs/validation.md](docs/validation.md) has the oracle tiers and the gates in full; [RESULTS.md](RESULTS.md) the measurements. The oracles themselves (the vendored legacy sources, the C++/Octave/Perl harnesses, the resurrected 2015 binary and the extractors that drove them) are archived in the private repository [`GovitPowerz/speech-legacy-oracle`](https://github.com/GovitPowerz/speech-legacy-oracle) at its commit `336c511`; this tree keeps only the fixtures they produced.
 
 ## Roadmap
 
@@ -153,9 +153,9 @@ Speech/
     superpowers/{specs,plans}/             # one dated design spec + plan per phase (README.md indexes them)
   configs/{lid,training}/*.toml            # TOML canonical; configs/legacy/ holds a sample .config
   data/                                    # random_tables.bin (from Constants.h); the corpus is local and git-ignored
-  legacy/                                  # git-ignored: the vendored C++ src/ + Optimizer_V6.2.2 .m
-  tools/                                   # local-only oracle harnesses (C++, Octave, Perl, the 2015 binary)
-  scripts/                                 # the fixture extractors that drive the harnesses
+  legacy/                                  # git-ignored: where a regeneration run places the archive's vendored C++ src/ + Optimizer_V6.2.2 .m
+  tools/                                   # git-ignored: where it places the archive's oracle harnesses (C++, Octave, Perl, the 2015 binary)
+  scripts/                                 # the fixture extractors over tests/oracles/ (the legacy-harness-driven ones live in the archive)
   src/rust/                                # the engine (README.md: the module map)
     Cargo.toml  Cargo.lock  build.rs       # workspace: speech (lib+bin) + speech-py; build.rs bakes in the build provenance
     src/

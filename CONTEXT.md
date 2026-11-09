@@ -290,7 +290,7 @@ Agreement with a reference: bit-exact where feasible, otherwise measured, then p
 A committed fixture an oracle produced, compared bit-for-bit (or canary-gated) by a test.
 
 **Oracle**:
-The harness that produced a golden: the strict-IEEE C++ rebuild, Octave, Perl, or the resurrected 2015 binary. Local-only; CI consumes only their committed output.
+The harness that produced a golden: the strict-IEEE C++ rebuild, Octave, Perl, or the resurrected 2015 binary. Archived in `GovitPowerz/speech-legacy-oracle` since issue #132; CI consumes only their committed output.
 
 **Legacy-truth**:
 The golden regime of the port (Roadmap 1): the legacy's output is right by definition, bugs included. Frozen at tag `legacy-parity-v1`.
