@@ -117,6 +117,20 @@ pub fn fixture_phase4d(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Absolute path to a file under `tests/reference_data/phase8/` (the port-truth
+/// exact type-1 posterior and boundary pins, issue #140).
+pub fn fixture_phase8(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data/phase8")
+        .join(name)
+}
+
+/// Load a phase8 `.bin` fixture (column-major f64) into an `Array2<f64>` (rows x cols).
+pub fn load_bin_phase8(name: &str) -> Array2<f64> {
+    let (rows, cols, data) = speech::io::binary::read_matrix(&fixture_phase8(name)).unwrap();
+    Array2::from_shape_vec((rows, cols).f(), data).unwrap()
+}
+
 /// `compute_errors` per channel: each hypothesis scored against its reference, in
 /// channel order (the drivers' `get_segmentation` sanitizes `hyp` in place first).
 pub fn score_channels(
