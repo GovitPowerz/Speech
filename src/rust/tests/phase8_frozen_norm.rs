@@ -9,7 +9,7 @@
 //! frozen-stats mode a streaming session needs, since no whole-file lookahead
 //! exists online.
 //!
-//! Seven tests: (1)/(2) `read_audio`-level RED->GREEN pins (inert when absent,
+//! Eight tests and one `#[ignore]`d fixture writer: (1)/(2) `read_audio`-level RED->GREEN pins (inert when absent,
 //! exact raw/gain when present); (3) a `BagOfProcessors`-level thread proof (the
 //! config key genuinely reaches the internal `read_audio` call in
 //! `segmentation_function`, not merely stored inertly); (3b) T1-review hardening
@@ -31,7 +31,9 @@
 //! T1-review hardening (finding 2): commits the T1 report's adjudication claim
 //! in-tree -- the EXACT tree, run on the SAME staged frozen config, reproduces
 //! the fast path's boundary-row count and agrees on posteriors within a
-//! measured-then-pinned bound.
+//! measured-then-pinned bound; (7) issue #140: that same exact leg pinned
+//! bit-for-bit to a port-truth fixture under `tests/reference_data/phase8/`,
+//! written once by the ignored `write_type1_exact_fixtures`.
 
 mod common;
 
@@ -445,6 +447,29 @@ fn run_fast(
     (row, seg.remove(0))
 }
 
+/// The exact-tree twin of [`run_fast`]: the same staged config with `Inference_Path`
+/// overridden to `exact` (the ONE variable that differs between the two legs), the
+/// PRE-convolution posterior row of channel 0 and the decided segmentation.
+fn run_exact(
+    map: &mut IndexMap<String, String>,
+    wav: &Path,
+    gain: Option<f64>,
+) -> (Vec<f64>, Segmentation) {
+    map.insert("Inference_Path".into(), "exact".into());
+    let mut bag = BagOfProcessors::from_configs(std::slice::from_mut(map)).unwrap();
+    let mut audio = read_audio(wav, 0.0, 3600.0, 0, gain).unwrap();
+    let dur = (audio.data.ncols() as f64 - 1.0) / audio.sample_rate as f64;
+    let mut seg = vec![Segmentation::new(dur)];
+    bag.run_get_segmentation(0, &mut audio, &mut seg).unwrap();
+    // Dispatch guard (#95): the leg ran on this variant, read off the `processor` test-support hook.
+    assert!(
+        matches!(bag.processor(0), Processor::Spectral(_)),
+        "expected Spectral (exact) for the frozen staged config"
+    );
+    let row = bag.processor(0).driver().last_result_rows()[0].clone();
+    (row, seg.remove(0))
+}
+
 #[test]
 fn causality_cost_frozen_vs_self_norm() {
     // Spec S1.7 (REPORTED, not gated): the offline fast path under FROZEN stats
@@ -587,23 +612,8 @@ fn frozen_norm_exact_matches_fast_adjudication_pin() {
     // exact leg: the SAME frozen stats, only `Inference_Path` overridden -- the
     // ONE variable that differs between the two legs.
     let mut map_exact = speech::legacy_config::parse_legacy_config(&frozen_text);
-    map_exact.insert("Inference_Path".into(), "exact".into());
-    let mut bag_exact =
-        BagOfProcessors::from_configs(std::slice::from_mut(&mut map_exact)).unwrap();
-    let mut audio_exact =
-        read_audio(&stage.wav_path, 0.0, 3600.0, 0, Some(stage.fixed_gain)).unwrap();
-    let dur = (audio_exact.data.ncols() as f64 - 1.0) / audio_exact.sample_rate as f64;
-    let mut seg_exact_vec = vec![Segmentation::new(dur)];
-    bag_exact
-        .run_get_segmentation(0, &mut audio_exact, &mut seg_exact_vec)
-        .unwrap();
-    // Dispatch guard (#95): the leg ran on this variant, read off the `processor` test-support hook.
-    assert!(
-        matches!(bag_exact.processor(0), Processor::Spectral(_)),
-        "expected Spectral (exact) for the frozen staged config"
-    );
-    let post_exact = bag_exact.processor(0).driver().last_result_rows()[0].clone();
-    let seg_exact = seg_exact_vec.remove(0);
+    let (post_exact, seg_exact) =
+        run_exact(&mut map_exact, &stage.wav_path, Some(stage.fixed_gain));
 
     assert_eq!(
         post_exact.len(),
@@ -641,4 +651,84 @@ fn frozen_norm_exact_matches_fast_adjudication_pin() {
         "exact-vs-fast posterior max_abs {max_abs} exceeds pin {POST_ABS_PIN} \
          under the frozen-stats config"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Issue #140: the exact type-1 forward pinned bit-for-bit (port-truth).
+// ---------------------------------------------------------------------------
+
+/// The exact leg of the frozen stage as the pair the fixtures hold: the posterior
+/// row as a `1 x T` matrix, the decided boundaries as a `rows x 2` matrix of
+/// `[begin_s, class discriminant]`.
+fn exact_type1_leg() -> (Array2<f64>, Array2<f64>) {
+    let dir = tempfile::tempdir().unwrap();
+    let stage = common::stage_frozen_tier2(dir.path());
+    let frozen_text = std::fs::read_to_string(&stage.config_path).unwrap();
+    let mut map = speech::legacy_config::parse_legacy_config(&frozen_text);
+    let (post, seg) = run_exact(&mut map, &stage.wav_path, Some(stage.fixed_gain));
+    let post = Array2::from_shape_vec((1, post.len()), post).unwrap();
+    let bounds = Array2::from_shape_fn((seg.segments().len(), 2), |(i, j)| {
+        let s = &seg.segments()[i];
+        if j == 0 { s.begin } else { s.ty as i32 as f64 }
+    });
+    (post, bounds)
+}
+
+/// `write_matrix` takes column-major data; `.t().iter()` walks an array that way.
+/// Refuses an existing file: the fixture is a measure-before-delete pin, so a
+/// `--include-ignored` run on a later commit must not re-baseline it.
+fn write_fixture(name: &str, m: &Array2<f64>) {
+    let path = common::fixture_phase8(name);
+    assert!(
+        !path.exists(),
+        "{} exists; delete it by hand to re-baseline the pin",
+        path.display()
+    );
+    let data: Vec<f64> = m.t().iter().copied().collect();
+    speech::io::binary::write_matrix(&path, m.nrows(), m.ncols(), &data).unwrap();
+}
+
+const TYPE1_POSTERIORS: &str = "type1_exact_posteriors.bin";
+const TYPE1_BOUNDARIES: &str = "type1_exact_boundaries.bin";
+
+/// Issue #140 (decision 1): the exact tree under `BLSTM_InputNormalizationType 1`
+/// had no bit-exact observation before the dead input-statistics chain was cut --
+/// the committed goldens run no type-1 config, and the two exact type-1 reads above
+/// are `1e-5` parity pins against the fast twin. This test pins the exact leg of the
+/// frozen stage to a PORT-TRUTH fixture written on the pre-cut commit (the #88
+/// measure-before-delete pattern): the PRE-convolution posterior row through the
+/// standing oracle comparator (bit-exact on the oracle host, the canary-gated hybrid
+/// bound elsewhere -- the leg runs the whole spectral front end), the decided
+/// boundaries by identity (count, begin times, classes: the SAD tier's own rule).
+/// On this uncalibrated stage the boundaries are the untouched two-row seed
+/// (Other at 0, End at the audio duration, zero detections), so they pin only that
+/// nothing crosses the threshold; the posterior row carries the observation.
+#[test]
+fn exact_type1_posteriors_are_port_truth_pinned() {
+    let (post, bounds) = exact_type1_leg();
+    common::assert_oracle_eq(
+        &post,
+        &common::load_bin_phase8(TYPE1_POSTERIORS),
+        "exact type-1 posterior row",
+    );
+    assert_bits_eq(
+        &bounds,
+        &common::load_bin_phase8(TYPE1_BOUNDARIES),
+        "exact type-1 decided boundaries",
+    );
+}
+
+/// The fixture writer for the test above. Run ONCE, on the commit the fixture
+/// describes, with `cargo test --test phase8_frozen_norm write_type1_exact_fixtures
+/// -- --ignored` from `src/rust/`; never as part of a suite run. (The posterior row
+/// is a Rust-side test hook, `Segmenter::last_result_rows`, which the PyO3 seam does
+/// not expose, so the fixture cannot come from a `scripts/extract_*.py` like the
+/// seam-tier families.)
+#[test]
+#[ignore = "fixture writer: run once on the producing commit, see its doc"]
+fn write_type1_exact_fixtures() {
+    let (post, bounds) = exact_type1_leg();
+    std::fs::create_dir_all(common::fixture_phase8("")).unwrap();
+    write_fixture(TYPE1_POSTERIORS, &post);
+    write_fixture(TYPE1_BOUNDARIES, &bounds);
 }

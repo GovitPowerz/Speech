@@ -1,38 +1,20 @@
 //! Task 3: NN lifecycle surface goldens.
 //!
-//! Covers `BlstmNetwork` InputStatistics accumulation across files (STRICT bits vs a
-//! hand-chained `from_matrix`+`update`) and the `<prefix>_weightsFile` load semantics
-//! (empty skip / too-few error / too-many truncate) transcribed from
-//! `BLSTMNeuralNetwork.cpp:122-150,385-417`. The `saveWeights` three-artifact write
-//! (`:312-331`) is gone (issue #136); its successor, the bag's in-memory best pack, is
-//! pinned in `phase4a_save_update.rs`.
+//! Covers the `<prefix>_weightsFile` load semantics (empty skip / too-few error /
+//! too-many truncate) transcribed from `BLSTMNeuralNetwork.cpp:122-150`. The
+//! `saveWeights` three-artifact write (`:312-331`) is gone (issue #136); its
+//! successor, the bag's in-memory best pack, is pinned in `phase4a_save_update.rs`.
+//! The `analyseInputSeq` accumulation across files (`:385-417`) is gone too (issue
+//! #140, write-only once #136 retired its stats file).
 
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
-use ndarray::Array2;
-
-use speech::features::stats::InputStatistics;
 use speech::io::binary::write_matrix;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
 
 fn ref_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/reference_data/phase0")
-}
-
-/// Minimal type-1-normalized MLP net (LSTM `[0,3]` -> `_IsMLP`; output `[5,4,1]`,
-/// sub `[2,1]`), `input_size() == 5`. Type 1 is the branch whose scoring forward
-/// folds `analyseInputSeq` into `_InputStatistics` (`:728`).
-fn stats_net() -> BlstmNetwork {
-    let mut m: IndexMap<String, String> = IndexMap::new();
-    m.insert("SYNT_LSTMNeuronNb".into(), "0,3".into());
-    m.insert("SYNT_LSTMSubSampling".into(), "1".into());
-    m.insert("SYNT_OutputNeuronNb".into(), "5,4,1".into());
-    m.insert("SYNT_OutputSubSampling".into(), "2,1".into());
-    m.insert("SYNT_InputNormalizationType".into(), "1".into());
-    m.insert("SYNT_TwoSweeps".into(), "false".into());
-    let cfg = BlstmConfig::from_legacy(&m, "SYNT").unwrap();
-    BlstmNetwork::from_config(cfg).unwrap()
 }
 
 /// Build the real `BLSTM` net from `1_worker_1.config` (33,671 weights, `_IsMLP`
@@ -44,57 +26,6 @@ fn real_net_with_weights_file(value: &str) -> (IndexMap<String, String>, BlstmNe
     let cfg = BlstmConfig::from_legacy(&m, "BLSTM").unwrap();
     let net = BlstmNetwork::from_config(cfg).unwrap();
     (m, net)
-}
-
-#[test]
-fn input_stats_accumulate_across_files() {
-    // Two synthetic "files" scored through the net's type-1 forward: the resulting
-    // `_InputStatistics` must equal a hand-chained `from_matrix(a)` then
-    // `update(from_matrix(b))` on the SAME (cropped-to-input_size) matrices. STRICT
-    // bits: pure arithmetic, no libm in the stats merge.
-    let mut net = stats_net();
-    assert_eq!(net.input_statistics().n, 0);
-
-    // input_size() == 5; feed 5-column sequences so no crop occurs.
-    let a = Array2::from_shape_fn((6, 5), |(r, c)| (r * 5 + c) as f64 * 0.5 - 3.0);
-    let b = Array2::from_shape_fn((4, 5), |(r, c)| (2 * r + 3 * c) as f64 - 1.25);
-
-    // The scoring forward mutates `input` in place (type-1 normalization). Score
-    // each "file" once with no targets so only the stats accumulation runs.
-    let mut a_in = a.clone();
-    net.feed_forward_scoring(&mut a_in, 0, 0, -1, 0.0);
-    let mut b_in = b.clone();
-    net.feed_forward_scoring(&mut b_in, 0, 0, -1, 0.0);
-
-    // The stats are computed over the POST-normalization input the forward sees:
-    // reproduce the exact type-1 normalization on a copy, then chain.
-    let a_normed = type1_normalize(&a, net.normalize_input_mean(), net.normalize_input_std());
-    let b_normed = type1_normalize(&b, net.normalize_input_mean(), net.normalize_input_std());
-    let mut expected = InputStatistics::from_matrix(&a_normed);
-    expected.update(&InputStatistics::from_matrix(&b_normed));
-
-    assert_eq!(net.input_statistics(), &expected);
-    assert_eq!(net.input_statistics().n, 10);
-
-    // reset_input_statistics wipes back to n == 0 with empty mean/std.
-    net.reset_input_statistics();
-    assert_eq!(net.input_statistics().n, 0);
-    assert!(net.input_statistics().mean.is_empty());
-}
-
-/// Reproduce the type-1 in-place normalization (`BLSTMNeuralNetwork.cpp:720-723`):
-/// per column jj < min(cols, mean.len()), (x - mean_jj)/max(1e-12, std_jj).
-fn type1_normalize(m: &Array2<f64>, mean: &[f64], std: &[f64]) -> Array2<f64> {
-    let mut out = m.clone();
-    let (r, cols) = out.dim();
-    let max_col = cols.min(mean.len());
-    for jj in 0..max_col {
-        let denom = 1e-12_f64.max(std[jj]);
-        for row in 0..r {
-            out[[row, jj]] = (out[[row, jj]] - mean[jj]) / denom;
-        }
-    }
-    out
 }
 
 #[test]

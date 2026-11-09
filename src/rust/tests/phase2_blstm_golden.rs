@@ -286,18 +286,6 @@ fn mlp_mode_structural_shape() {
     }
 }
 
-#[test]
-fn reset_weights_derivatives_resets_input_statistics() {
-    let m = real_map();
-    let cfg = BlstmConfig::from_legacy(&m, "BLSTM").unwrap();
-    let mut net = BlstmNetwork::from_config(cfg).unwrap();
-    net.input_statistics.n = 42;
-    net.input_statistics.mean = vec![1.0, 2.0];
-    net.reset_weights_derivatives();
-    assert_eq!(net.input_statistics.n, 0);
-    assert!(net.input_statistics.mean.is_empty());
-}
-
 // ============================================================================
 // Task 8: input normalization + core forward + plain feed_forward_backward
 // ============================================================================

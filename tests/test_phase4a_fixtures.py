@@ -195,7 +195,7 @@ def test_tier2_mat_conversion_and_artifacts() -> None:
     """The tier-2 result .mat reproduces its converted .bin fixtures (same col-6 mask
     guard as tier-1); the bestNNWeight artifact split is present and coherent (the
     weights/derivs are io::binary despite the legacy .mat suffix; the stats .mat
-    carries an EMPTY InputStatistics -- type -1 never accumulates)."""
+    carries empty mean/std with n == 0 -- type -1 never accumulated)."""
     mat = scipy.io.loadmat(PHASE4A / "tier2_spectral.mat")
     for var in MAT_VARS:
         raw = cast(np.ndarray, mat[var]).astype("<f8").copy()

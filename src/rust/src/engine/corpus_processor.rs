@@ -41,7 +41,6 @@ use crate::cli::{Mode, ModeKind};
 use crate::engine::bag_of_processors::{BagOfProcessors, CostPair, training_policy};
 use crate::engine::channel_result::ChannelResult;
 use crate::engine::corpus::Corpus;
-use crate::features::stats::InputStatistics;
 use crate::legacy_config::{get_default, get_f64_default};
 
 /// Result of the corpus-level gradient check (`gradCheck`, `:237-340`). The legacy
@@ -906,14 +905,6 @@ impl CorpusProcessor {
             return d.clone();
         }
         self.processors.get_weights_derivatives(pos)
-    }
-
-    /// Config-`pos`'s per-network input-normalization statistics (algo 6 ->
-    /// `[sad, lid]`), a thin delegation to `BagOfProcessors::get_input_statistics`.
-    /// Added as a PyO3 seam surface in Phase 4c, but nothing in `speech-py` calls it
-    /// and, since issue #136, no epoch fold reads the statistics either.
-    pub fn input_statistics(&self, pos: usize) -> Vec<InputStatistics> {
-        self.processors.get_input_statistics(pos)
     }
 
     /// Corpus-level gradient check (`CorpusProcessor::gradCheck`, `:237-340`),
