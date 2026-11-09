@@ -675,10 +675,17 @@ fn exact_type1_leg() -> (Array2<f64>, Array2<f64>) {
 }
 
 /// `write_matrix` takes column-major data; `.t().iter()` walks an array that way.
+/// Refuses an existing file: the fixture is a measure-before-delete pin, so a
+/// `--include-ignored` run on a later commit must not re-baseline it.
 fn write_fixture(name: &str, m: &Array2<f64>) {
+    let path = common::fixture_phase8(name);
+    assert!(
+        !path.exists(),
+        "{} exists; delete it by hand to re-baseline the pin",
+        path.display()
+    );
     let data: Vec<f64> = m.t().iter().copied().collect();
-    speech::io::binary::write_matrix(&common::fixture_phase8(name), m.nrows(), m.ncols(), &data)
-        .unwrap();
+    speech::io::binary::write_matrix(&path, m.nrows(), m.ncols(), &data).unwrap();
 }
 
 const TYPE1_POSTERIORS: &str = "type1_exact_posteriors.bin";
@@ -693,6 +700,9 @@ const TYPE1_BOUNDARIES: &str = "type1_exact_boundaries.bin";
 /// standing oracle comparator (bit-exact on the oracle host, the canary-gated hybrid
 /// bound elsewhere -- the leg runs the whole spectral front end), the decided
 /// boundaries by identity (count, begin times, classes: the SAD tier's own rule).
+/// On this uncalibrated stage the boundaries are the untouched two-row seed
+/// (Other at 0, End at the audio duration, zero detections), so they pin only that
+/// nothing crosses the threshold; the posterior row carries the observation.
 #[test]
 fn exact_type1_posteriors_are_port_truth_pinned() {
     let (post, bounds) = exact_type1_leg();

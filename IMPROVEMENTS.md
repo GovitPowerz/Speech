@@ -411,11 +411,11 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
 - **[phase1] `InputStatistics::from_matrix` has no `n == 0` guard; empty batch yields NaN --
   RETIRED (issue #140, the kernel deleted with its one write-only caller)**
   (`features/stats.rs` `InputStatistics::from_matrix`, from `InputStatistics.cpp:8-16`): both the mean
-  and std finalization divide by `_NbOfValues` unconditionally; a zero-row input therefore produces
-  `0.0/0 = NaN` mean/std rather than a guarded zero or an error. Reproduced as-is -- callers must not
-  batch zero rows if they want a finite result (the merge path's `update()` handles the actual "no data
-  yet" case via the `n == 0` copy branch, not via a from-empty-matrix batch). *Fix candidate:* after
-  parity, either guard `n == 0` in `from_matrix` or make it return `Option`/`Result`.
+  and std finalization divided by `_NbOfValues` unconditionally; a zero-row input therefore produced
+  `0.0/0 = NaN` mean/std rather than a guarded zero or an error. Reproduced as-is while it lived --
+  callers never batched zero rows (the merge path's `update()` handled the actual "no data yet" case
+  via the `n == 0` copy branch, not via a from-empty-matrix batch). *Fix candidate:* none since #140;
+  the function is gone.
 
 - **[phase1] `InputStatistics::update` merge re-squares the STORED std (not variance) in a pinned
   op order -- RETIRED (issue #140, the kernel deleted with its one write-only caller)**
