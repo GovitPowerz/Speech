@@ -97,15 +97,6 @@ EXPECTED_SHAPES = {
     "tdc_chan1.bin": (1, 201),
     "pitch_chan1.bin": (1, 1),
     "perio_homothety_chan1.bin": (201, 129),
-    # Task 10: InputStatistics (real compiled legacy TU). Batch stats over the
-    # full synth_20x50 matrix (1x50 mean/std, 1x1 n); merged stats from two
-    # batches over row splits [0,7) and [7,20), update()'d together.
-    "stats_batch_mean.bin": (1, 50),
-    "stats_batch_std.bin": (1, 50),
-    "stats_batch_n.bin": (1, 1),
-    "stats_merged_mean.bin": (1, 50),
-    "stats_merged_std.bin": (1, 50),
-    "stats_merged_n.bin": (1, 1),
     # Task 11: end-to-end feature parity gate. Per variant: params (1x8 doubles:
     # order, window_size, bins, shift_frames, freq_beg, freq_end, ltsv_half_window,
     # ltsv_shift) + the assembled inputseq per channel. Widths: mfcc_deltas 39 DCT
