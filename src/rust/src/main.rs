@@ -206,29 +206,22 @@ fn main() {
 /// a list of rows. Floats round-trip exactly; a non-finite cell is written as `null`.
 fn write_results_json(processor: &CorpusProcessor, mut file: std::fs::File) -> std::io::Result<()> {
     use std::io::Write;
-    let rows = |m: &ndarray::Array2<f64>| -> serde_json::Value {
-        m.rows()
-            .into_iter()
-            .map(|r| r.to_vec())
-            .collect::<Vec<_>>()
-            .into()
+    let rows = |m: &ndarray::Array2<f64>| -> Vec<Vec<f64>> {
+        m.rows().into_iter().map(|r| r.to_vec()).collect()
     };
-    let mut doc = serde_json::Map::new();
-    doc.insert(
-        "MultiConfigResults".into(),
-        rows(processor.results_matrix()),
-    );
+    let mut doc = std::collections::BTreeMap::new();
+    doc.insert("MultiConfigResults", rows(processor.results_matrix()));
     for (name, m) in processor.epoch_mems().named() {
-        doc.insert(name.into(), rows(m));
+        doc.insert(name, rows(m));
     }
-    file.write_all(serde_json::Value::Object(doc).to_string().as_bytes())
+    file.write_all(&serde_json::to_vec(&doc)?)
 }
 
 /// Port of `print_usage` (`FastSpeechProcessing.cpp:78-87`), `.config` wording
 /// (this port has no `ConfigFile`-vs-TOML ambiguity at the CLI layer -- the
 /// legacy `.config` importer is the only format `parse_cli` reads).
 fn print_usage(progname: &str) {
-    eprintln!("\nUsage : {progname} mode [config_options] config_file\n");
+    eprintln!("\nUsage : {progname} mode [--results-json <path>] [config_options] config_file\n");
     eprintln!(
         "    mode syntax: -s single config, -i single config with image output, -t single config for unit testing, -m multiple config"
     );
@@ -236,11 +229,11 @@ fn print_usage(progname: &str) {
         "    mode syntax (verbose): -S single config, -I single config with image output, -T single config for unit testing, -M multiple config"
     );
     eprintln!("    config_options syntax: --<variable_name>=<variable_value>");
-    eprintln!(
-        "    --results-json <path>: write the result matrix and the per-epoch arrays as JSON"
-    );
     eprintln!("    whitespace not allowed in variable names or values");
     eprintln!("    all config_file variables overwritten by config_options");
     eprintln!("    setting <variable_value> = \"\" removes the variable from the config");
     eprintln!("    repeated variables overwritten by last specified");
+    eprintln!(
+        "    --results-json <path>: write the result matrix and the per-epoch arrays as JSON"
+    );
 }

@@ -79,7 +79,9 @@ pub struct CliInvocation {
 ///
 /// The port-only `--results-json <path>` (or `--results-json=<path>`, issue #135)
 /// is taken out of `args` before the legacy grammar runs, wherever it appears;
-/// the last one wins, as a repeated override does.
+/// the last one wins, as a repeated override does. A path that starts with `-` or
+/// ends in `.toml` / `.config` is refused (a forgotten path swallows the next
+/// argument, and `main` truncates the file before the run).
 pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
     let mut rest: Vec<String> = Vec::with_capacity(args.len());
     let mut results_json = None;
@@ -97,6 +99,13 @@ pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
             Some(p) if !p.is_empty() => results_json = Some(p.to_string()),
             _ => bail!("--results-json needs a path"),
         }
+    }
+    // The space form takes the next argument as it comes: refuse one that reads as a
+    // flag, an override or a config, which `main` would otherwise truncate.
+    if let Some(p) = &results_json
+        && (p.starts_with('-') || p.ends_with(".toml") || p.ends_with(".config"))
+    {
+        bail!("--results-json `{p}` reads as a flag or a config file, not an output path");
     }
     let args = rest.as_slice();
     if args.len() < 2 {

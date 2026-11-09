@@ -130,6 +130,18 @@ fn results_json_flag_is_not_a_config_override() {
             "{bad:?}: {err}"
         );
     }
+
+    // A forgotten path swallows the next argument: a config (which `main` would
+    // truncate before the run) or an override is refused, in either form.
+    let toml_form = format!("--results-json={}", dir.path().join("base.toml").display());
+    for bad in [
+        &["-m", "--results-json", cfg, cfg][..],
+        &["-s", "--results-json", "--numOuterThreads=4", cfg],
+        &["-s", toml_form.as_str(), cfg],
+    ] {
+        let err = parse_cli(&args(bad)).unwrap_err().to_string();
+        assert!(err.contains("not an output path"), "{bad:?}: {err}");
+    }
 }
 
 #[test]

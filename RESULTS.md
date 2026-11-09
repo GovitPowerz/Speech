@@ -4055,3 +4055,9 @@ the four `phase4a_matfile` tests, `save_results_variables`, `bench_names_the_unw
 `results_json_flag_is_not_a_config_override`, `results_json_unwritable_path_fails_before_the_run`),
 pytest 1210 -> 1208 passed non-slow (`test_phase4a_matfile.py` and the #134 bridge test retired),
 pyo3 296 -> 295; `run.py --check`: 192 mutations, 0 problems.
+
+Review fix 2026-11-09: `--results-json` refuses a path that reads as a flag or a config (a
+forgotten path swallowed the next argument and truncated it before the run; pinned in
+`results_json_flag_is_not_a_config_override`), and the writer serializes through
+`serde_json::to_vec` (same bytes), so patch 5 is re-targeted to it. `run.py issue135/1-5`: 7
+verdicts, 0 differ from expected; `run.py --check`: 192 mutations, 0 problems.
