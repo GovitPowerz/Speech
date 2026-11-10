@@ -4076,7 +4076,10 @@ different win predicate, so it was an oracle of nothing. `config_bridge.parse_le
 deleted with no oracle copy either: the tests and `scripts/extract_phase9_fixtures.py` read a
 config file with `dict(speech_rs.load_config(str(path)))` and config text with
 `speech_rs.parse_legacy_config(text)` (42 call sites in 24 test files and the extractor: 38 file
-reads and 4 text reads), so the engine's parser is the only one left. The two parsers differed
+reads and 4 text reads), so the engine's parser is the only one left. Two file reads that already
+went through the text binding (`test_channel_results.py`, `test_engine_smoke.py`) use
+`speech_rs.load_config` as well; the two that remain are the comparison side of a loader pin
+(`test_load_config_toml_matches_legacy_parse`, the renamed #150 leg below). The two parsers differed
 where the old mirror pin never looked: `str.splitlines()` splits on more separators than Rust's
 `lines()` (a lone `\r`, `\x0b`, `\x0c`, `\x1c`-`\x1e`, `\x85`, U+2028, U+2029), and Python counts
 `\x1c`-`\x1f` as token whitespace where Rust's `char::is_whitespace` does not. None of the 66

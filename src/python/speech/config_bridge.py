@@ -1,5 +1,5 @@
-"""What Python declares about a config: the (cell x direction) vocabulary and the boolean
-flag rule, both over an already-parsed KEY -> value map.
+"""What Python declares about a config: the (cell x direction) vocabulary, and the boolean
+flag rule over an already-parsed KEY -> value map.
 
 Config text and config files are parsed by the engine alone, on the seam:
 `speech_rs.load_config(path)` for a file (`.toml` or legacy `.config`, issue #150) and
