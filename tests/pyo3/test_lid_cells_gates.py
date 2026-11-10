@@ -35,7 +35,8 @@ from tests.conftest import CORPUS_ROOT, GateRecorder, requires_corpus
 
 pytest.importorskip("speech_rs")
 
-from speech.config_bridge import CELL_TYPES, DIRECTIONS, parse_legacy_config  # noqa: E402
+import speech_rs  # noqa: E402
+from speech.config_bridge import CELL_TYPES, DIRECTIONS  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import Arm, BaselineSpec  # noqa: E402
 from speech.drivers.train import _init_weights_from_scratch  # noqa: E402
@@ -199,7 +200,7 @@ def test_lid_slstm_forward_trains_and_scores(tmp_path: Path, arm: str, gate_reco
     arm_obj = B.ARMS[cast(Arm, arm)]
     assert isinstance(arm_obj, B.LidArm)
     test_name = f"{arm_obj.stem}_test.flst"
-    cfg = parse_legacy_config((res.out_dir / "base.config").read_text())
+    cfg = dict(speech_rs.load_config(str(res.out_dir / "base.config")))
     packs = (res.checkpoint_dir / "best_sad.bin", res.checkpoint_dir / "best_lid.bin")
     scored: dict[str, ChannelResults] = {}
     for path, extra in (("exact", {}), ("fast", {"Inference_Path": "fast"})):

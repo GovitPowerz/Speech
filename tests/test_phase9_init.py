@@ -20,7 +20,6 @@ from typing import cast
 import numpy as np
 import pytest
 import speech_rs
-from speech import config_bridge
 from speech.drivers import baseline
 from speech.init_weights import init_weights
 
@@ -28,7 +27,7 @@ from tests.layout_helpers import block_of, block_slice, draw, layer0, layout_of,
 
 REF = Path("tests/reference_data/phase4d")
 
-TUPLE_A = config_bridge.parse_legacy_config((REF / "tupleA_1_worker_1.config").read_text())
+TUPLE_A = dict(speech_rs.load_config(str(REF / "tupleA_1_worker_1.config")))
 
 
 def cell_cfg(cell: str, direction: str = "bidirectional", lstm: str = "5,3,4", **geometry: str) -> dict[str, str]:

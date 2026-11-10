@@ -29,7 +29,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 from numpy.typing import NDArray
-from speech.config_bridge import parse_legacy_config
 from speech.drivers.train import _tail_lengths
 from speech.engine import ChannelResults
 from speech.fold_run import FoldRun, _config_text
@@ -70,7 +69,7 @@ def _seed_tier2_spectral(dst: Path) -> dict[str, str]:
         shutil.copy(PHASE4A / f, dst / f)
     shutil.copy(PHASE0 / "NNweights_config1.bin", dst / "NNweights_config1.bin")
     (dst / "vrcts_tier2").mkdir(exist_ok=True)
-    return parse_legacy_config((dst / "tier2_spectral.config").read_text())
+    return dict(speech_rs.load_config(str(dst / "tier2_spectral.config")))
 
 
 def _assert_same_results(a: ChannelResults, b: ChannelResults) -> None:
@@ -231,7 +230,7 @@ def test_fold_run_refuses_a_wrong_length_pack_on_both_trees(tmp_path: Path, leg:
     differently."""
     fixture, packs = _WRONG_LENGTH[leg]
     (seed_twin_mode7 if fixture.startswith("twin") else seed_sad)(tmp_path, fixture)
-    cfg = parse_legacy_config((tmp_path / f"{fixture}.config").read_text())
+    cfg = dict(speech_rs.load_config(str(tmp_path / f"{fixture}.config")))
     nets = packs(tmp_path)
     messages = []
     with chdir(tmp_path):
@@ -272,7 +271,7 @@ def test_tail_lengths_strip_the_engine_packs_normalize_tail(tmp_path: Path, leg:
         cfg, algo, prefixes = _seed_tier2_spectral(tmp_path), 3, ["BLSTM"]
     elif leg == "twin_algo6":
         _seed_twin_gradcheck(tmp_path)
-        cfg, algo, prefixes = parse_legacy_config((tmp_path / "twin_gradcheck.config").read_text()), 6, ["BLSTM", "BLSTM_LID"]
+        cfg, algo, prefixes = dict(speech_rs.load_config(str(tmp_path / "twin_gradcheck.config"))), 6, ["BLSTM", "BLSTM_LID"]
     else:
         cfg, algo, prefixes = _seed_sad_lineage(tmp_path, "lre_sad.toml" if leg == "lre_sad_v1" else "lre_sad_v2.toml"), 3, ["BLSTM"]
         listing = tmp_path / "listing.csv"

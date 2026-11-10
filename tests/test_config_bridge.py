@@ -15,7 +15,7 @@ def test_parse_last_wins() -> None:
 
 
 def test_blstm_config_from_real_config() -> None:
-    cfg = config_bridge.parse_legacy_config(FIX.read_text())
+    cfg = dict(speech_rs.load_config(str(FIX)))
     spec = speech_rs.blstm_config(cfg, "BLSTM")
     assert spec["LSTMNeuronNb"] == [23, 24, 24]
     assert spec["LSTMSubSampling"] == [4, 1]

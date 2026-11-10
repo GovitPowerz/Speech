@@ -377,7 +377,7 @@ def test_same_seed_determinism(tmp_path_factory: pytest.TempPathFactory) -> None
 
 def _tier2_fold(dst: Path) -> FoldRun:
     _seed_tier2_spectral(dst)
-    return FoldRun(parse_legacy_config_py((dst / "tier2_spectral.config").read_text()), dst, backprop=True)
+    return FoldRun(dict(speech_rs.load_config(str(dst / "tier2_spectral.config"))), dst, backprop=True)
 
 
 def test_forward_backward_tier2_determinism(tmp_path_factory: pytest.TempPathFactory) -> None:

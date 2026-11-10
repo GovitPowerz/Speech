@@ -33,8 +33,8 @@ from typing import cast
 
 import numpy as np
 import pytest
+import speech_rs
 from numpy.typing import NDArray
-from speech.config_bridge import parse_legacy_config
 from speech.genome import LidNetSpec, RunConfig, _fmt_scalar, genome_length, vec2struct
 
 PHASE4C = Path(__file__).resolve().parent / "reference_data" / "phase4c"
@@ -204,7 +204,7 @@ def test_count_param_matches(name: str) -> None:
 def test_configstruct_fields_match(name: str) -> None:
     """Every emitted key/value string-exact vs the printConfig golden, in insertion order."""
     cfg, _, _, _ = _run(name)
-    golden = parse_legacy_config((PHASE4C / f"genome_{name}.config").read_text())
+    golden = dict(speech_rs.load_config(str(PHASE4C / f"genome_{name}.config")))
     assert list(cfg.items()) == list(golden.items()), f"{name}: config dict mismatch"
 
 
@@ -354,5 +354,5 @@ def test_fmt_scalar_boundary_matches_octave(name: str, value: float) -> None:
     real-printConfig.m call (TIER 1) over integers (incl. -0 and a big exact integer that
     must not flip to e-notation), negatives, the 1e-5/1e+5 magnitude boundaries on both
     sides, a round(v)==v near-integer decode edge, and long-precision fractions."""
-    cfg = parse_legacy_config(FMT_SCALAR_BOUNDARIES_CONFIG.read_text())
+    cfg = dict(speech_rs.load_config(str(FMT_SCALAR_BOUNDARIES_CONFIG)))
     assert _fmt_scalar(value) == cfg[name], f"{name}: _fmt_scalar({value!r}) = {_fmt_scalar(value)!r} != octave {cfg[name]!r}"

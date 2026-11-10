@@ -133,7 +133,6 @@ from typing import Any, cast
 import numpy as np
 import pytest
 from numpy.typing import NDArray
-from speech.config_bridge import parse_legacy_config
 from speech.engine import ChannelResults
 from speech.init_weights import init_weights
 from speech.weight_bridge import read_weight_vector, write_bin
@@ -266,7 +265,7 @@ def layout_blocks(config: Path, prefix: str) -> dict[str, tuple[int, int]]:
     """A pack's blocks as `label -> (start, n)`: `fwd.<name>` / `bwd.<name>` for the (single)
     recurrent layer of each stack, `out.W` / `out.b` for the (single) output layer, `norm.mean`
     / `norm.std` for the tail -- every fixture here has one layer per stack."""
-    layout = cast(list[dict[str, Any]], speech_rs.weight_layout(parse_legacy_config(config.read_text()), prefix))
+    layout = cast(list[dict[str, Any]], speech_rs.weight_layout(dict(speech_rs.load_config(str(config))), prefix))
     tag = {"forward": "fwd", "backward": "bwd", "output": "out", "tail": "norm"}
     blocks: dict[str, tuple[int, int]] = {}
     for b in layout:
@@ -1205,7 +1204,7 @@ def test_no_fixture_config_reroutes_run_into_the_engine_gradcheck() -> None:
     read whichever line it hit first.
     """
     for name in sorted(cast(dict[str, Any], MANIFEST["fixtures"])):
-        flat = parse_legacy_config((PHASE9 / f"{name}.config").read_text())
+        flat = dict(speech_rs.load_config(str(PHASE9 / f"{name}.config")))
         assert "Neural_Networks_Gradient_Check_Epsilon" not in flat, f"{name}.config carries a gradient-check epsilon -- run() is no longer a forward fold"
         assert flat.get("Neural_Networks_BackPropagation_Epochs") == "0", (
             f"{name}.config: effective Epochs is {flat.get('Neural_Networks_BackPropagation_Epochs')!r}, not 0"
@@ -1269,7 +1268,7 @@ def test_epochs_zero_with_backprop_on_still_returns_a_real_gradient(name: str, t
     pack = load_pack(name)
     seed_sad(tmp_path, name)
     cfg = tmp_path / f"{name}.config"
-    flat = parse_legacy_config(cfg.read_text())
+    flat = dict(speech_rs.load_config(str(cfg)))
     assert flat["BLSTM_BackPropagationActivated"] == "true", f"{name}: this leg needs a backprop-ON config"
     # Last-wins parser: appending re-states Epochs 0 in this config's own text, so the leg
     # does not lean on the fixture generator having written it.

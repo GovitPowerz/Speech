@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from speech.config_bridge import parse_legacy_config
 
 speech_rs = pytest.importorskip("speech_rs")
 
@@ -31,13 +30,13 @@ def _built_width(flat: dict[str, str], prefix: str) -> int:
 
 @pytest.mark.parametrize(("prefix", "width"), [("BLSTM_LID", 36), ("BLSTM", 11)])
 def test_the_committed_lid_twin_declares_no_input_size_and_both_nets_report_the_engines_width(prefix: str, width: int) -> None:
-    flat = parse_legacy_config(LID_TWIN.read_text())
+    flat = dict(speech_rs.load_config(str(LID_TWIN)))
     assert f"{prefix}_NNetInputSize" not in flat
     assert _config(flat, prefix)["NNetInputSize"] == _built_width(flat, prefix) == width
 
 
 def test_an_mlp_net_without_the_key_reports_its_output_net_width() -> None:
-    flat = parse_legacy_config(WORKER.read_text())
+    flat = dict(speech_rs.load_config(str(WORKER)))
     del flat["BLSTM_NNetInputSize"]
     flat["BLSTM_LSTMNeuronNb"] = "0,24"
     flat["BLSTM_LSTMSubSampling"] = "1"
@@ -47,7 +46,7 @@ def test_an_mlp_net_without_the_key_reports_its_output_net_width() -> None:
 
 def test_a_declared_input_size_is_returned_as_declared() -> None:
     """Even one the engine does not build: the exact net ignores the key (issue #99)."""
-    flat = parse_legacy_config(WORKER.read_text())
+    flat = dict(speech_rs.load_config(str(WORKER)))
     assert flat["BLSTM_NNetInputSize"] == "23"
     assert _config(flat, "BLSTM")["NNetInputSize"] == 23
     flat["BLSTM_NNetInputSize"] = "11"
@@ -56,7 +55,7 @@ def test_a_declared_input_size_is_returned_as_declared() -> None:
 
 
 def test_a_malformed_declared_input_size_raises_naming_the_key() -> None:
-    flat = parse_legacy_config(WORKER.read_text())
+    flat = dict(speech_rs.load_config(str(WORKER)))
     flat["BLSTM_NNetInputSize"] = "2E"
     with pytest.raises(ValueError, match="BLSTM_NNetInputSize"):
         speech_rs.blstm_config(flat, "BLSTM")

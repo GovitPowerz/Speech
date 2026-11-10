@@ -50,8 +50,8 @@ from tests.conftest import CORPUS_ROOT, requires_corpus
 
 pytest.importorskip("speech_rs")
 
+import speech_rs  # noqa: E402
 from speech.batching import read_listing  # noqa: E402 -- after importorskip, matching the pyo3-suite convention
-from speech.config_bridge import parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import BaselineSpec  # noqa: E402
 from speech.engine import ChannelResults  # noqa: E402
@@ -167,7 +167,7 @@ def _eval_config(a: _Arm, inference_path: str, *, twin: bool) -> dict[str, str]:
     deployment loads them. In Mode 7 the SAD net is frozen (`best_sad == sad_seed`), so
     `BLSTM_weightsFile` is weight-neutral there; `BLSTM_LID_weightsFile` carries the
     trained LID net."""
-    cfg = dict(parse_legacy_config(a.base_config.read_text()))
+    cfg = dict(speech_rs.load_config(str(a.base_config)))
     cfg["fileslisting"] = a.test_listing.name
     cfg["BLSTM_weightsFile"] = str((a.ckpt / "best_sad.bin").resolve())
     cfg["BLSTM_BackPropagationActivated"] = "false"
@@ -261,7 +261,7 @@ def _score_sad(a: _Arm, inference_path: str, tag: str) -> tuple[B.DcfReport, Cha
     segmentation off the fold result's `hypothesis` rows, pooled `dcf` over the windowed
     `.part.xml` refs, issue #86). Returns the pooled DcfReport + the rows (the per-file
     boundaries, for the comparison)."""
-    cfg = dict(parse_legacy_config(a.base_config.read_text()))
+    cfg = dict(speech_rs.load_config(str(a.base_config)))
     # Point the weight-file key at the TRAINED checkpoint so the base config itself names the
     # net under test on both paths. `_held_out_fold` injects the same pack again through
     # `set_weights` on both paths (issue #62), so this repoint is redundant with the fold run

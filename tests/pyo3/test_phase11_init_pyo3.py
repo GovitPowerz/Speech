@@ -29,7 +29,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from speech import config_bridge
 from speech.init_weights import init_weights
 
 speech_rs = pytest.importorskip("speech_rs")
@@ -73,7 +72,7 @@ def _seed_tier2_transformer(dst: Path, extra: dict[str, str]) -> dict[str, str]:
     cfg_path = dst / "tier2_spectral.config"
     lines = [f"{k} {v}" for k, v in {"BLSTM_Cell_Type": "transformer", **extra}.items()]
     cfg_path.write_text(cfg_path.read_text() + "\n" + "\n".join(lines) + "\n")
-    return config_bridge.parse_legacy_config(cfg_path.read_text())
+    return dict(speech_rs.load_config(str(cfg_path)))
 
 
 @pytest.mark.parametrize("scheme", ["xavier", "he"])

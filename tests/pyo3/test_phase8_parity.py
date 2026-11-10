@@ -59,7 +59,6 @@ from tests.conftest import CORPUS_ROOT, requires_corpus
 pytest.importorskip("speech_rs")
 
 import speech_rs  # noqa: E402
-from speech.config_bridge import parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
 from speech.evaluate import load_vrcts_hyp  # noqa: E402
 from speech.weight_bridge import read_weight_vector  # noqa: E402
@@ -145,7 +144,7 @@ def _holdback_from_config(cfg: dict[str, str]) -> float:
 
 
 def _base_cfg(arm: _Arm) -> dict[str, str]:
-    return dict(parse_legacy_config(arm.base_config.read_text()))
+    return dict(speech_rs.load_config(str(arm.base_config)))
 
 
 def _frozen_cfg(arm: _Arm, gain: float, *, fileslisting: str, dump_dir: Path | None) -> dict[str, str]:

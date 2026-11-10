@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-from speech.config_bridge import parse_legacy_config
 
 speech_rs = pytest.importorskip("speech_rs")
 
@@ -28,7 +27,7 @@ KINDS = {"weight", "bias", "gain", "peephole", "stat"}
 
 
 def _layout(path: Path, prefix: str) -> list[dict[str, Any]]:
-    return cast(list[dict[str, Any]], speech_rs.weight_layout(parse_legacy_config(path.read_text()), prefix))
+    return cast(list[dict[str, Any]], speech_rs.weight_layout(dict(speech_rs.load_config(str(path))), prefix))
 
 
 def _assert_well_formed(layout: list[dict[str, Any]], pack_length: int) -> None:
@@ -82,7 +81,7 @@ def test_the_real_2015_shapes_tile_their_packs(config: str, pack_length: int) ->
 
 
 def test_output_sub_sampling_widens_the_output_fan() -> None:
-    cfg = parse_legacy_config((PHASE4D / "tupleA_1_worker_1.config").read_text())
+    cfg = dict(speech_rs.load_config(str(PHASE4D / "tupleA_1_worker_1.config")))
     base = speech_rs.weight_layout(cfg, "BLSTM")
     cfg["BLSTM_OutputSubSampling"] = "2,1"
     wide = speech_rs.weight_layout(cfg, "BLSTM")
@@ -92,7 +91,7 @@ def test_output_sub_sampling_widens_the_output_fan() -> None:
 
 
 def test_mlp_mode_keeps_the_tail_at_the_output_input_width() -> None:
-    cfg = parse_legacy_config((PHASE4D / "tupleA_1_worker_1.config").read_text())
+    cfg = dict(speech_rs.load_config(str(PHASE4D / "tupleA_1_worker_1.config")))
     cfg["BLSTM_LSTMNeuronNb"] = "0,24"
     cfg["BLSTM_LSTMSubSampling"] = "1"
     layout = speech_rs.weight_layout(cfg, "BLSTM")
@@ -110,7 +109,7 @@ def test_mlp_mode_keeps_the_tail_at_the_output_input_width() -> None:
     ],
 )
 def test_a_config_the_engine_refuses_raises_value_error(key: str, value: str, match: str) -> None:
-    cfg = parse_legacy_config((PHASE4D / "tupleA_1_worker_1.config").read_text())
+    cfg = dict(speech_rs.load_config(str(PHASE4D / "tupleA_1_worker_1.config")))
     cfg[key] = value
     with pytest.raises(ValueError, match=match):
         speech_rs.weight_layout(cfg, "BLSTM")
@@ -118,7 +117,7 @@ def test_a_config_the_engine_refuses_raises_value_error(key: str, value: str, ma
 
 def test_the_twin_prefix_selects_the_lid_net() -> None:
     info = FIXTURES["twin_mode7_lid_slstm"]
-    cfg = parse_legacy_config((PHASE9 / info["config"]).read_text())
+    cfg = dict(speech_rs.load_config(str(PHASE9 / info["config"])))
     sad = speech_rs.weight_layout(cfg, "BLSTM")
     lid = speech_rs.weight_layout(cfg, "BLSTM_LID")
     assert sum(b["len"] for b in sad) == info["sad_pack_length"]

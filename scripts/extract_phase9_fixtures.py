@@ -69,7 +69,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src" / "python"))
 
-from speech.config_bridge import parse_legacy_config  # noqa: E402
+import speech_rs  # noqa: E402
 from speech.init_weights import init_weights  # noqa: E402
 from speech.weight_bridge import write_bin  # noqa: E402
 
@@ -361,7 +361,7 @@ def twin_mode7_config(name: str, cell: str = "slstm", direction: str = "bidirect
     )
     derived = ""
     if direction == "forward":
-        flat = parse_legacy_config(text)
+        flat = speech_rs.parse_legacy_config(text)
         hidden = int(flat["BLSTM_LID_LSTMNeuronNb"].split(",")[-1])
         outn = flat["BLSTM_LID_OutputNeuronNb"].split(",")[1:]
         derived = f"BLSTM_LID_Direction forward\nBLSTM_LID_OutputNeuronNb {','.join([str(hidden), *outn])}\nBLSTM_LID_window 0\n"
@@ -392,7 +392,7 @@ def build(out_dir: Path) -> dict[str, object]:
     for name, cell, direction in specs:
         text = sad_config(cell, direction, name)
         (out_dir / f"{name}.config").write_text(text)
-        pack = init_weights(parse_legacy_config(text), "BLSTM", np.random.default_rng(SEEDS[name]), "xavier", True)[0]
+        pack = init_weights(speech_rs.parse_legacy_config(text), "BLSTM", np.random.default_rng(SEEDS[name]), "xavier", True)[0]
         write_bin(pack.shape[0], 1, pack, out_dir / f"{name}_seed.bin")
         fixtures[name] = {
             "config": f"{name}.config",
@@ -430,7 +430,7 @@ def build(out_dir: Path) -> dict[str, object]:
     rows = [(name, text, mode, lid_cell, "bidirectional") for name, text, mode, lid_cell in twins] + list(issue57)
     for name, text, mode, lid_cell, lid_direction in rows:
         (out_dir / f"{name}.config").write_text(text)
-        flat = parse_legacy_config(text)
+        flat = speech_rs.parse_legacy_config(text)
         lid_pack = init_weights(flat, "BLSTM_LID", np.random.default_rng(SEEDS[name]), "xavier", True)[0]
         write_bin(lid_pack.shape[0], 1, lid_pack, out_dir / f"{name}_seed.bin")
         fixtures[name] = {

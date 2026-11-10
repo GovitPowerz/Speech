@@ -21,7 +21,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 import speech_rs
-from speech import config_bridge
 from speech.drivers import baseline
 from speech.init_weights import init_weights
 
@@ -231,7 +230,7 @@ def test_a_non_dividing_head_count_is_refused() -> None:
 
 
 def _tuple_a_cfg() -> dict[str, str]:
-    return config_bridge.parse_legacy_config((REF / "tupleA_1_worker_1.config").read_text())
+    return dict(speech_rs.load_config(str(REF / "tupleA_1_worker_1.config")))
 
 
 def test_blstm_config_defaults_to_the_sized_geometry() -> None:

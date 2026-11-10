@@ -18,7 +18,7 @@ import types
 from pathlib import Path
 
 import numpy as np
-from speech.config_bridge import parse_legacy_config
+import speech_rs
 from speech.drivers import train as T
 from speech.drivers.state import ps_from_config
 from speech.genome import genome_length
@@ -32,7 +32,7 @@ ALGO6_CONFIG = PHASE4B / "twin_train.config"
 
 
 def _cfg(path: Path) -> dict[str, str]:
-    return parse_legacy_config(path.read_text())
+    return dict(speech_rs.load_config(str(path)))
 
 
 # ---- ps_from_config: the lid=None arm for algo != 6 -------------------------------------

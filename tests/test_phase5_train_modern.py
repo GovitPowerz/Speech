@@ -21,9 +21,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import speech_rs
 from pydantic import ValidationError
 from speech.batching import read_listing
-from speech.config_bridge import parse_legacy_config
 from speech.drivers.state import ModernRun, ModernTrainParams
 from speech.drivers.train import train_modern
 from speech.weight_bridge import read_bin
@@ -39,7 +39,7 @@ def _algo3_run(tmp: Path) -> ModernRun:
     tmp.mkdir(parents=True, exist_ok=True)
     for f in ("tier2_spectral.config", "language2classmapping.csv", "tier2_fileslisting.csv"):
         shutil.copy(PHASE4A / f, tmp / f)
-    cfg = parse_legacy_config((tmp / "tier2_spectral.config").read_text())
+    cfg = dict(speech_rs.load_config(str(tmp / "tier2_spectral.config")))
     return ModernRun(cfg=cfg, workdir=tmp, out_dir=tmp / "run", listing=read_listing(tmp / cfg["fileslisting"]))
 
 
