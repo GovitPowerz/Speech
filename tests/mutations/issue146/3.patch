@@ -1,0 +1,18 @@
+mutation: MambaLayer::feed_backward gates the adapter_w derivative accumulation along with the input deltas
+catcher: CAUGHT cargo --lib nn::blstm::input_delta_gate_tests::weight_derivatives_are_bit_identical_with_the_gate_back_on
+catcher: CAUGHT cargo --test stack_derivative_pins mamba_stack_derivatives_are_port_truth_pinned
+catcher: CAUGHT cargo --lib nn::cells::tests::a_gated_cell_skips_its_input_deltas_only_as_the_last_backward_layer
+
+diff --git a/src/rust/src/nn/cells/mamba.rs b/src/rust/src/nn/cells/mamba.rs
+index a95da2a..dd08729 100644
+--- a/src/rust/src/nn/cells/mamba.rs
++++ b/src/rust/src/nn/cells/mamba.rs
+@@ -1278,7 +1278,7 @@ impl MambaLayer {
+                 for m in 0..dm {
+                     acc.adapter_b[[0, m]] += d_xa[[t, m]];
+                 }
+-                for k in 0..isz {
++                for k in 0..if skip_input_deltas { 0 } else { isz } {
+                     for m in 0..dm {
+                         acc.adapter_w[[k, m]] += recon_input[[t, k]] * d_xa[[t, m]];
+                     }

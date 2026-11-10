@@ -1,0 +1,18 @@
+mutation: LstmLayer::new builds the input-delta gate OFF (the legacy contract is on); the layer golden calls with last_layer false, where the gate is inert
+catcher: CAUGHT cargo --test phase3_network_backward_golden lstm_net_subsample_inversion_fwd
+catcher: CAUGHT cargo --lib nn::cells::tests::a_gated_cell_skips_its_input_deltas_only_as_the_last_backward_layer
+catcher: MISSED cargo --test phase3_lstm_backward_golden backward_peep_all
+
+diff --git a/src/rust/src/nn/layers.rs b/src/rust/src/nn/layers.rs
+index 192dd0c..a1275ce 100644
+--- a/src/rust/src/nn/layers.rs
++++ b/src/rust/src/nn/layers.rs
+@@ -152,7 +152,7 @@ impl LstmLayer {
+             peep_weight_derivatives: Array2::zeros((12, output_size)),
+             biases_derivatives: Array2::zeros((1, 4 * output_size)),
+             nb_of_seq_fed_backward: 0,
+-            input_deltas: true,
++            input_deltas: false,
+         }
+     }
+ 

@@ -1,0 +1,18 @@
+mutation: BlstmNetwork::from_config leaves the input-delta gate on (the skip is lost; no value moves, so only the gate-state test sees it)
+catcher: CAUGHT cargo --lib nn::blstm::input_delta_gate_tests::a_built_net_gates_every_stack_cell_off
+catcher: MISSED cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: MISSED cargo --lib nn::blstm::input_delta_gate_tests::weight_derivatives_are_bit_identical_with_the_gate_back_on
+
+diff --git a/src/rust/src/nn/blstm.rs b/src/rust/src/nn/blstm.rs
+index 38aaeae..aa71f7c 100644
+--- a/src/rust/src/nn/blstm.rs
++++ b/src/rust/src/nn/blstm.rs
+@@ -808,7 +808,7 @@ impl BlstmNetwork {
+             .flatten()
+         {
+             for cell in stack.layers_mut() {
+-                cell.set_input_deltas(false);
++                cell.set_input_deltas(true);
+             }
+         }
+         Ok(net)
