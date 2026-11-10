@@ -581,8 +581,8 @@ def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Pa
     _sad_corpus_tree(root, 20)
     _fake_engine(monkeypatch, _SAD_FLAT)
     hist = [
-        EpochRecord(epoch=0, train_cost=0.9, val_cost=0.8, confusion_error=None, is_best=True),
-        EpochRecord(epoch=1, train_cost=0.7, val_cost=0.6, confusion_error=None, is_best=True),
+        EpochRecord(epoch=0, train_cost=0.9, val_cost=0.8, lid_error=None, is_best=True),
+        EpochRecord(epoch=1, train_cost=0.7, val_cost=0.6, lid_error=None, is_best=True),
     ]
     monkeypatch.setattr(
         B,

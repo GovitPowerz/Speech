@@ -1,0 +1,24 @@
+mutation: validate scores the per-epoch LID error with the confusionThresh.m hit rule again (only target classes 0 and 1 can count as hits)
+catcher: CAUGHT pytest tests/test_issue149_val_lid_error.py::test_every_class_counts
+catcher: CAUGHT pytest tests/test_issue149_val_lid_error.py::test_three_misses_in_twelve_are_25_percent
+catcher: CAUGHT pytest tests/test_issue149_val_lid_error.py::test_a_tie_won_by_the_first_maximum
+
+diff --git a/src/python/speech/drivers/train.py b/src/python/speech/drivers/train.py
+index da598f0..93acd30 100644
+--- a/src/python/speech/drivers/train.py
++++ b/src/python/speech/drivers/train.py
+@@ -663,7 +663,13 @@ def _make_default_validate(run: ModernRun, params: ModernTrainParams) -> Validat
+         if algo != 6 or len(res.results) == 0:
+             return float(val_cost), None
+         r = res.results.for_config(0)
+-        return float(val_cost), lid_error(r.lid_scores, r.lid_target)
++        from speech.scoring import confusion_matrix
++
++        conf = confusion_matrix(r.lid_target, r.lid_scores, 50.0)
++        n = r.lid_scores.shape[1]
++        hits = sum(conf[k, k] for k in range(1, n + 1))
++        trials = sum(conf[k, n + 1] for k in range(1, n + 1))
++        return float(val_cost), 100.0 * (1.0 - hits / trials)
+ 
+     return validate
+ 

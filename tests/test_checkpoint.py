@@ -45,8 +45,8 @@ def test_history_round_trips_through_train_history_json(tmp_path: Path) -> None:
         epochs_run=2,
         stopped_early=False,
         history=[
-            EpochRecord(epoch=0, train_cost=1.0, val_cost=0.9, confusion_error=None, is_best=True),
-            EpochRecord(epoch=1, train_cost=0.8, val_cost=0.5, confusion_error=None, is_best=True),
+            EpochRecord(epoch=0, train_cost=1.0, val_cost=0.9, lid_error=None, is_best=True),
+            EpochRecord(epoch=1, train_cost=0.8, val_cost=0.5, lid_error=None, is_best=True),
         ],
         checkpoint_dir=str(tmp_path),
     )
@@ -59,7 +59,7 @@ def test_resume_reloads_last_packs_and_continues_at_epochs_run(tmp_path: Path) -
     ckpt = Checkpoint(tmp_path, ["sad"])
     ckpt.save("last", [np.array([4.0])])
     ckpt.save("best", [np.array([2.0])])
-    hist = [EpochRecord(epoch=e, train_cost=float(e), val_cost=float(3 - e), confusion_error=None, is_best=True) for e in range(3)]
+    hist = [EpochRecord(epoch=e, train_cost=float(e), val_cost=float(3 - e), lid_error=None, is_best=True) for e in range(3)]
     ckpt.write_history(ModernTrainResult(best_epoch=2, best_val_cost=1.0, epochs_run=3, stopped_early=False, history=hist, checkpoint_dir=str(tmp_path)))
     weights, history, best_val, best_epoch, start_epoch = ckpt.resume()
     assert [float(x) for x in weights[0]] == [4.0]

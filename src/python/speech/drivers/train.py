@@ -40,12 +40,13 @@ from numpy.typing import NDArray
 from speech.batching import Batches, create_batches, get_new_batch, write_weighted_listing
 from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult, net_names
 from speech.drivers.state import BALANCE_BACKPROP, ModernRun, ModernTrainParams, RunState, TrainResult, default_balance
-from speech.engine import ChannelResults, CostParams, compute_cost, forward_backward
+from speech.engine import CostParams, compute_cost, forward_backward
+from speech.evaluate import lid_error
 from speech.fold_run import FoldRun
 from speech.genome import RunConfig, genome_length, vec2struct, weight_block_mask
 from speech.init_weights import init_weights
 from speech.optimizers import QpsoParams, QpsoResult, Smorms3, quantum_pso
-from speech.scoring import confusion_matrix, masking_validation
+from speech.scoring import masking_validation
 from speech.weight_bridge import write_bin
 
 # Modern-loop hook types (Phase 5 Task 8): the engine-backed defaults are injectable so the
@@ -589,28 +590,6 @@ def _init_weights_from_scratch(run: ModernRun, params: ModernTrainParams) -> lis
     return weights
 
 
-def _confusion_error(results: ChannelResults, algo: int) -> float | None:
-    """The FIXED (F5) confusion misclassification rate on the validation results, Twin-only
-    (single-net SAD algos carry no LID confusion -> None). Reads config 0's decoded
-    `lid_target` / `lid_scores` and derives `1 - hits/trials` from
-    `scoring.confusion_matrix`. Returns None on any degeneracy (algo != 6, <2 classes,
-    no rows) -- it is a recorded side-metric, never the early-stop signal."""
-    if algo != 6 or len(results) == 0:
-        return None
-    r = results.for_config(0)
-    scores = r.lid_scores
-    if scores.shape[1] < 2:
-        return None
-    try:
-        conf = confusion_matrix(r.lid_target, scores, 50.0)
-    except ValueError:
-        return None
-    class_nb = scores.shape[1]
-    hits = float(sum(conf[k, k] for k in range(1, class_nb + 1)))
-    trials = float(sum(conf[k, class_nb + 1] for k in range(1, class_nb + 1)))
-    return None if trials <= 0.0 else 1.0 - hits / trials
-
-
 def _make_default_train_epoch(run: ModernRun, params: ModernTrainParams, tails: list[int]) -> TrainEpochFn:
     """The engine-backed per-epoch trainer: `steps_per_epoch` SMORMS3 steps over
     `forward_backward` (backprop ON), seeded from the CURRENT weights. When `minibatch > 0`
@@ -647,7 +626,7 @@ def _make_default_train_epoch(run: ModernRun, params: ModernTrainParams, tails: 
 def _make_default_validate(run: ModernRun, params: ModernTrainParams) -> ValidateFn:
     """The engine-backed forward-only validator: a forward-only fold on `valid_listing`
     (defaults to the training listing when unset) at the current weights, then the
-    validation cost + the FIXED confusion metric off its results.
+    validation cost + the Twin's LID error off its results (`evaluate.lid_error`, issue #149).
 
     `params.val_metric` selects the early-stop cost (Phase 6 Task 6, a Phase-5 carry-forward):
 
@@ -680,7 +659,11 @@ def _make_default_validate(run: ModernRun, params: ModernTrainParams) -> Validat
             val_cost = res.nn_cost  # NNCostSeg (+ NNCostLID on the Twin): forward_backward's f
         else:
             val_cost, _ = compute_cost(res.results, 0, balance, CostParams(mode=0, balance_backprop=bbp, algo=algo))
-        return float(val_cost), _confusion_error(res.results, algo)
+        # The held-out LID error (issue #149): config 0's argmax error, in percent, Twin only.
+        if algo != 6 or len(res.results) == 0:
+            return float(val_cost), None
+        r = res.results.for_config(0)
+        return float(val_cost), lid_error(r.lid_scores, r.lid_target)
 
     return validate
 
@@ -698,7 +681,7 @@ def train_modern(
     patience -> best/last checkpoints (`best_<net>.bin`, `last_<net>.bin`, `train_history.json`).
 
     The engine work is behind two injectable hooks -- `train_epoch(weights, epoch) ->
-    (new_weights, train_cost)` and `validate(weights, epoch) -> (val_cost, confusion_error)`
+    (new_weights, train_cost)` and `validate(weights, epoch) -> (val_cost, lid_error)`
     -- each defaulting to an engine-backed implementation. The unit tests pass STUBS, so the
     epoch/validation/early-stop/checkpoint/resume STATE MACHINE is exercised with no engine.
 
@@ -740,7 +723,7 @@ def train_modern(
     stopped_early = False
     for epoch in range(start_epoch, params.epochs):
         weights, train_cost = train_epoch(weights, epoch)
-        val_cost, conf_err = validate(weights, epoch)
+        val_cost, val_lid_error = validate(weights, epoch)
 
         ckpt.save("last", weights)
         is_best = val_cost < best_val
@@ -748,7 +731,7 @@ def train_modern(
             best_val, best_epoch = val_cost, epoch
             ckpt.save("best", weights)
 
-        history.append(EpochRecord(epoch=epoch, train_cost=float(train_cost), val_cost=float(val_cost), confusion_error=conf_err, is_best=is_best))
+        history.append(EpochRecord(epoch=epoch, train_cost=float(train_cost), val_cost=float(val_cost), lid_error=val_lid_error, is_best=is_best))
         _write_history(stopped=False)  # per-epoch, so a resume sees the latest bookkeeping
 
         # Early-stop: `patience` epochs since the best (best_epoch < 0 only if val never finite).

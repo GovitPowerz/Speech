@@ -30,16 +30,16 @@ def net_names(algo: int) -> list[str]:
 
 
 class EpochRecord(BaseModel):
-    """One epoch's recorded metrics in `train_history.json`. `confusion_error` is the
-    FIXED (F5) confusion misclassification rate on the validation set (algo 6 only; `None`
-    for the single-net SAD algos, which carry no LID confusion)."""
+    """One epoch's recorded metrics in `train_history.json`. `lid_error` is the validation
+    set's closed-set LID error in percent, `evaluate.lid_error` (issue #149: the held-out
+    score's definition); algo 6 only, `None` for the single-net SAD algos."""
 
     model_config = ConfigDict(extra="forbid")
 
     epoch: int
     train_cost: float
     val_cost: float
-    confusion_error: float | None
+    lid_error: float | None
     is_best: bool
 
 
