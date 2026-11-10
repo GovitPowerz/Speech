@@ -231,20 +231,14 @@ mod tests {
         assert_eq!(confusion, want);
     }
 
-    /// BOTH-LANGUAGE IDENTITY (F5): the Rust `confusion_from_results` and the
-    /// Python `speech.scoring.confusion_matrix` are DIFFERENT legacy sources
-    /// (`PrintConfusionMatrix`'s `score_target > max_competitor` win vs
-    /// `confusionThresh.m`'s asymmetric-threshold hit), so they only produce an
-    /// identical matrix on an input where the win/hit decisions coincide -- but
-    /// the SHARED F5 fix (per-row decode + skip no-target rows) is exercised
-    /// identically. This crafted 2-class input is engineered so both agree: row0
-    /// has a col-1 target (score 60) that clears BOTH win rules (60 > competitor
-    /// 5, and 60 > thresh 10), and row1 has no target so BOTH skip it. There is
-    /// no PyO3 seam for confusion (it is not on the `speech_rs.Engine` surface),
-    /// so the identity is pinned by this Rust test plus its byte-identical mirror
-    /// `test_confusion_cross_language_identity_no_target_skip`
-    /// (`tests/test_phase4c_scoring.py`) -- the two hardcode the SAME expected
-    /// matrix.
+    /// F5 on a crafted 2-class input: row0 has a col-1 target (score 60) that
+    /// wins against its competitor (5), row1 has no target and is skipped
+    /// (per-row decode, the header never polluted). The name is the test's
+    /// history: until issue #155 it had a mirror on the Python side, the
+    /// `confusionThresh.m` port `speech.scoring.confusion_matrix` (a different
+    /// legacy source with an asymmetric-threshold hit rule), and the two
+    /// hardcoded this same expected matrix. The Python port had no caller and
+    /// was retired with its tests; this side stays.
     #[test]
     fn cross_language_identity_no_target_skip() {
         let input = [

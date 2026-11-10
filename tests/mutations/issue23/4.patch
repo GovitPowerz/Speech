@@ -1,10 +1,4 @@
 mutation: tests/_result_rows.py decodes the in-band LID target as v - 150 instead of v - 200
-catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_labels_and_shape
-catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_hit_when_target_clears_threshold
-catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_miss_charges_best_non_target
-catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_no_target_row_skipped
-catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_cross_language_identity_no_target_skip
-catcher: MISSED pytest tests/test_phase4c_scoring.py::test_confusion_matrix_class_nb_le_1_raises
 catcher: CAUGHT pytest tests/test_phase4c_engine_cost.py::test_balance10_two_class_cutoff_search
 catcher: CAUGHT pytest tests/test_phase4c_engine_cost.py::test_balance10_three_class_else_branch
 catcher: CAUGHT pytest tests/test_phase4c_engine_cost.py::test_balance10_two_class_zero_zero_interior_cutoff
