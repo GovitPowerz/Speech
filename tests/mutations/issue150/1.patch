@@ -1,19 +1,17 @@
-mutation: RunState.from_config reads every config through the Python legacy .config parser again (a TOML config dies on KeyError 'Algo_choice')
+mutation: RunState.from_config reads every config as legacy .config text again, through the seam's text binding since #155 retired the Python parser (a TOML config dies on KeyError 'Algo_choice')
 catcher: CAUGHT pytest tests/test_issue150_toml_init.py::test_init_reads_a_toml_config[lid_blstm]
 catcher: CAUGHT pytest tests/test_issue150_toml_init.py::test_init_reads_a_toml_config[lre_sad]
 
 diff --git a/src/python/speech/drivers/state.py b/src/python/speech/drivers/state.py
-index be3642e..c09bfc0 100644
+index 81efcae..aecf3dd 100644
 --- a/src/python/speech/drivers/state.py
 +++ b/src/python/speech/drivers/state.py
-@@ -172,7 +172,9 @@ class RunState(BaseModel):
+@@ -172,7 +172,7 @@ class RunState(BaseModel):
          one loader (`speech_rs.load_config`, issue #150)."""
          import speech_rs  # local: `import speech` stays free of the extension for the modules that never touch it
  
 -        return cls.from_parsed(dict(speech_rs.load_config(str(config))), config, out_dir)
-+        from speech.config_bridge import parse_legacy_config
-+
-+        return cls.from_parsed(parse_legacy_config(Path(config).read_text()), config, out_dir)
++        return cls.from_parsed(dict(speech_rs.parse_legacy_config(Path(config).read_text())), config, out_dir)
  
      @classmethod
      def from_parsed(cls, cfg: dict[str, str], config: Path, out_dir: Path) -> RunState:

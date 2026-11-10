@@ -42,7 +42,6 @@ from typing import Any, cast
 import numpy as np
 import pytest
 from numpy.typing import NDArray
-from speech.config_bridge import parse_legacy_config as parse_legacy_config_py
 from speech.engine import forward_backward
 from speech.fold_run import FoldRun
 from speech.optimizers import Smorms3
@@ -477,9 +476,10 @@ def test_set_weights_roundtrip(tmp_path: Path) -> None:
 
 
 def test_parse_legacy_config_binding() -> None:
-    """`speech_rs.parse_legacy_config` (the Rust binding) must agree key-for-key
-    (and in insertion order) with the Python mirror `config_bridge.parse_legacy_config`
-    on the same last-wins/comment-skipping semantics."""
+    """`speech_rs.parse_legacy_config` (the Rust binding) on comment skipping, last-wins
+    (the duplicate keeps its FIRST position), a key with no value and trimmed values: the
+    map and its insertion order, pinned literally since issue #155 retired the Python
+    mirror this test compared against."""
     text = "\n".join(
         [
             "# a comment line, skipped",
@@ -491,20 +491,21 @@ def test_parse_legacy_config_binding() -> None:
             "  BLSTM_shift   0.1  ",
         ]
     )
-    got = dict(speech_rs.parse_legacy_config(text))
-    want = parse_legacy_config_py(text)
-    assert got == want
-    assert list(got.keys()) == list(want.keys()), "insertion order must match"
-    assert got["Algo_choice"] == "4", "last-wins duplicate key"
-    assert got["key_with_no_value"] == ""
+    got = speech_rs.parse_legacy_config(text)
+    assert list(got.items()) == [
+        ("Algo_choice", "4"),
+        ("BLSTM_window", "3.25"),
+        ("key_with_no_value", ""),
+        ("BLSTM_shift", "0.1"),
+    ]
 
 
-def test_load_config_reads_a_legacy_config_as_the_python_mirror() -> None:
+def test_load_config_reads_a_legacy_config_as_the_text_binding() -> None:
     """`speech_rs.load_config` (issue #150) reads a non-`.toml` path through the legacy
     importer: on the committed `LID_BLSTM.config` (it carries a duplicate key) the map
-    equals the Python mirror's, key for key and in insertion order."""
+    equals the text binding's on the file's text, key for key and in insertion order."""
     path = REPO_ROOT / "configs" / "legacy" / "LID_BLSTM.config"
     got = dict(speech_rs.load_config(str(path)))
-    want = parse_legacy_config_py(path.read_text())
+    want = dict(speech_rs.parse_legacy_config(path.read_text()))
     assert got == want
     assert list(got.keys()) == list(want.keys()), "insertion order must match"
