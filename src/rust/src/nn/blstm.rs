@@ -2855,8 +2855,6 @@ mod direction_tests {
     }
 }
 
-// ==== Phase 10 Task 9 / spec S7: the inference-only construction site ====
-
 /// Issue #146: the stacks' layer-0 input deltas are gated off, and no weight
 /// derivative moves for it.
 #[cfg(test)]
@@ -2920,9 +2918,14 @@ mod input_delta_gate_tests {
         let mut output = Array2::<f64>::zeros((rows, CLASSES));
         net.feed_forward_backward(&mut input, 0, 0, &mut output, &target);
         let d = net.get_weights_derivatives();
+        // The pack opens with the forward stack's layer 0, the cell the gate acts on:
+        // a gradient there, not just in the output MLP, is what keeps the leg honest.
+        let layer0 = crate::nn::network::Layer::nb_of_weights(
+            &net.forward_network.as_ref().unwrap().layers()[0],
+        );
         assert!(
-            d.column(0).iter().any(|v| *v != 0.0),
-            "no gradient: the leg is vacuous"
+            d.column(0).iter().take(layer0).any(|v| *v != 0.0),
+            "no gradient on the gated cell: the leg is vacuous"
         );
         d.iter().map(|v| v.to_bits()).collect()
     }
@@ -2938,7 +2941,7 @@ mod input_delta_gate_tests {
                 let mut seen = 0;
                 for stack in stacks(&mut net) {
                     for layer in stack.layers_mut() {
-                        assert!(!layer.input_deltas(), "{cell} {direction}");
+                        assert!(!layer.computes_input_deltas(), "{cell} {direction}");
                         seen += 1;
                     }
                 }
@@ -2972,6 +2975,8 @@ mod input_delta_gate_tests {
         }
     }
 }
+
+// ==== Phase 10 Task 9 / spec S7: the inference-only construction site ====
 
 #[cfg(test)]
 mod inference_only_tests {

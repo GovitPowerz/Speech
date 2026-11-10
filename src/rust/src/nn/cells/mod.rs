@@ -134,8 +134,9 @@ impl CellLayer {
 
     /// The input-delta gate (issue #146, port-only): whether this cell computes the
     /// deltas it propagates to the previous layer when it runs as its container's LAST
-    /// backward layer. `true`, the default, is the legacy behaviour and the contract
-    /// the container and layer goldens read. `BlstmNetwork::from_config` switches it
+    /// backward layer. `true`, the default, is what every backward computed before the
+    /// gate (the legacy behaviour, on the LSTM) and the contract the container and
+    /// layer goldens read. `BlstmNetwork::from_config` switches it
     /// off on every cell of its stacks, because nothing upstream of a stack trains:
     /// the deltas a stack returns have no reader.
     ///
@@ -163,13 +164,13 @@ impl CellLayer {
     }
 
     /// The gate's state.
-    pub fn input_deltas(&self) -> bool {
+    pub fn computes_input_deltas(&self) -> bool {
         match self {
-            CellLayer::Lstm(l) => l.input_deltas(),
-            CellLayer::Slstm(l) => l.input_deltas(),
-            CellLayer::Mamba(l) => l.input_deltas(),
-            CellLayer::Cfc(l) => l.input_deltas(),
-            CellLayer::Transformer(l) => l.input_deltas(),
+            CellLayer::Lstm(l) => l.computes_input_deltas(),
+            CellLayer::Slstm(l) => l.computes_input_deltas(),
+            CellLayer::Mamba(l) => l.computes_input_deltas(),
+            CellLayer::Cfc(l) => l.computes_input_deltas(),
+            CellLayer::Transformer(l) => l.computes_input_deltas(),
         }
     }
 
@@ -445,9 +446,13 @@ mod tests {
                     let mut cell = proto.clone();
                     let w = weights(Layer::nb_of_weights(&cell));
                     Layer::set_weights(&mut cell, &w);
-                    assert!(cell.input_deltas(), "{name}: the gate defaults on");
+                    assert!(cell.computes_input_deltas(), "{name}: the gate defaults on");
                     cell.set_input_deltas(gate);
-                    assert_eq!(cell.input_deltas(), gate, "{name}: the gate reads back");
+                    assert_eq!(
+                        cell.computes_input_deltas(),
+                        gate,
+                        "{name}: the gate reads back"
+                    );
 
                     let input = seq(T, width, 0.4);
                     let deltas = seq(T, O, -0.2);

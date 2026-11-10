@@ -316,7 +316,7 @@ impl CfcLayer {
         self.input_deltas = on;
     }
 
-    pub fn input_deltas(&self) -> bool {
+    pub fn computes_input_deltas(&self) -> bool {
         self.input_deltas
     }
 

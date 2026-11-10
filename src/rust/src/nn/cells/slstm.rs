@@ -221,10 +221,9 @@ pub struct SlstmLayer {
     biases_derivatives: Array2<f64>,
     nb_of_seq_fed_backward: i64,
 
-    /// The input-delta gate (issue #146, port-only): `true`, the default, is the
-    /// legacy behaviour. `false` makes `feed_backward` skip the deltas it would
-    /// propagate to the previous layer when it runs as the container's LAST backward
-    /// layer (`last_layer`), where the only reader is the container's caller. See
+    /// The input-delta gate (issue #146, port-only): `true`, the default, computes the
+    /// deltas propagated to the previous layer. `false` skips them when this layer
+    /// runs as the container's LAST backward layer. See
     /// [`super::CellLayer::set_input_deltas`].
     input_deltas: bool,
 }
@@ -260,7 +259,7 @@ impl SlstmLayer {
         self.input_deltas = on;
     }
 
-    pub fn input_deltas(&self) -> bool {
+    pub fn computes_input_deltas(&self) -> bool {
         self.input_deltas
     }
 
