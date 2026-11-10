@@ -4105,3 +4105,19 @@ ignored unchanged (`--features test-support`, `--no-fail-fast`); `scripts/extrac
 --check`: 39 files byte-identical; `run.py --check`: 194 mutations, 0 problems; the close run
 `--changed-since origin/main` is recorded in the pull request. No ledger record: no measured number
 moves.
+
+## Issue #146 -- the stacks' layer-0 input deltas gated off: the bench and the mutation battery
+
+### The net-level criterion target
+
+`cargo bench --bench kernels -- blstm_fwd_bwd` (`src/rust/benches/kernels.rs::bench_blstm_fwd_bwd`):
+one `BlstmNetwork` forward plus backward over one 327-frame window (the overlap window of the SAD
+training configs at 8 kHz), the net built from the committed training config as written with
+backprop on and a deterministic synthetic pack, the plain path driven directly. It is the first
+criterion target above a kernel; the windowing drivers, the front end and the fold around the net
+are not in it. Measured (100 samples per target, Apple M4 Pro, `bench` profile, rustc 1.99.1):
+
+| target | config | scope | before (`bcd2518`) |
+|---|---|---|---|
+| `blstm_fwd_bwd_v1` | `configs/training/lre_sad.toml` | LSTM `23,24,24`, sub-sampling `4,1`, output `48,12,1`, 327 frames | 4.467 ms |
+| `blstm_fwd_bwd_v2` | `configs/training/lre_sad_v2.toml` | LSTM `11,24,24`, sub-sampling `4,1`, output `48,12,1`, 327 frames | 3.262 ms |
