@@ -10,22 +10,20 @@ records that share (label, path, host, SHA, build).
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 from pathlib import Path
 
 from speech.ledger.schema import REPO, BenchPayload, BenchRecipe, BenchRecord, BenchRun, Build, Lineage, git_state, host_info, now_utc
 
 BINARY = REPO / "src" / "rust" / "target" / "release" / "speech"
-# The legacy `numOuterThreads N` line or the TOML `num_outer_threads = N` key.
-_LANES = re.compile(r"^\s*(?:numOuterThreads\s+|num_outer_threads\s*=\s*)(\d+)\s*$", re.MULTILINE)
 
 
 def lanes_of(config: Path) -> int:
-    """The config's `numOuterThreads` (`.config`) or `num_outer_threads` (`.toml`), last-wins like
-    the legacy reader; 1 when unset."""
-    found = _LANES.findall(config.read_text())
-    return int(found[-1]) if found else 1
+    """The config's `numOuterThreads` as the engine reads it (`speech_rs.load_config`, issue #150);
+    1 when unset."""
+    import speech_rs  # local: `import speech` stays free of the extension for the modules that never touch it
+
+    return int(speech_rs.load_config(str(config)).get("numOuterThreads", "1"))
 
 
 def bench_json(binary: Path, config: Path, path: str, label: str, *, repeat: int = 1) -> dict[str, object]:

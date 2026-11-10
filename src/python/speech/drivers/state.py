@@ -153,7 +153,7 @@ class RunState(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    config_path: str  # absolute path to the engine .config (its dir holds the corpus)
+    config_path: str  # absolute path to the engine config, `.toml` or `.config` (its dir holds the corpus)
     out_dir: str  # where checkpoints land
     base_config: dict[str, str]  # the parsed engine config (the byte-known-good base)
     ps: RunConfig  # the vec2struct genome spec

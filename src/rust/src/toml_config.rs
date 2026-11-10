@@ -545,5 +545,15 @@ mod tests {
             err.contains("cannot read config file") && err.contains(&missing),
             "{err}"
         );
+
+        let dir = tempfile::tempdir().unwrap();
+        let invalid = dir.path().join("invalid.toml");
+        std::fs::write(&invalid, "[engine\n").unwrap();
+        let invalid = invalid.to_str().unwrap();
+        let err = load_config(invalid).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid TOML config") && err.contains(invalid),
+            "{err}"
+        );
     }
 }
