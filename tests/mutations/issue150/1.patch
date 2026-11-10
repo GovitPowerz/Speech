@@ -3,7 +3,7 @@ catcher: CAUGHT pytest tests/test_issue150_toml_init.py::test_init_reads_a_toml_
 catcher: CAUGHT pytest tests/test_issue150_toml_init.py::test_init_reads_a_toml_config[lre_sad]
 
 diff --git a/src/python/speech/drivers/state.py b/src/python/speech/drivers/state.py
-index 81efcae..aecf3dd 100644
+index 81efcae..9a8970d 100644
 --- a/src/python/speech/drivers/state.py
 +++ b/src/python/speech/drivers/state.py
 @@ -172,7 +172,7 @@ class RunState(BaseModel):
@@ -11,7 +11,7 @@ index 81efcae..aecf3dd 100644
          import speech_rs  # local: `import speech` stays free of the extension for the modules that never touch it
  
 -        return cls.from_parsed(dict(speech_rs.load_config(str(config))), config, out_dir)
-+        return cls.from_parsed(dict(speech_rs.parse_legacy_config(Path(config).read_text())), config, out_dir)
++        return cls.from_parsed(speech_rs.parse_legacy_config(Path(config).read_text()), config, out_dir)
  
      @classmethod
      def from_parsed(cls, cfg: dict[str, str], config: Path, out_dir: Path) -> RunState:

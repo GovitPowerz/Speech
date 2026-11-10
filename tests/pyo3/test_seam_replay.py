@@ -506,6 +506,6 @@ def test_load_config_reads_a_legacy_config_as_the_text_binding() -> None:
     equals the text binding's on the file's text, key for key and in insertion order."""
     path = REPO_ROOT / "configs" / "legacy" / "LID_BLSTM.config"
     got = dict(speech_rs.load_config(str(path)))
-    want = dict(speech_rs.parse_legacy_config(path.read_text()))
+    want = speech_rs.parse_legacy_config(path.read_text())
     assert got == want
     assert list(got.keys()) == list(want.keys()), "insertion order must match"
