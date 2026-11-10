@@ -32,7 +32,8 @@ def net_names(algo: int) -> list[str]:
 class EpochRecord(BaseModel):
     """One epoch's recorded metrics in `train_history.json`. `lid_error` is the validation
     set's closed-set LID error in percent, `evaluate.lid_error` (issue #149: the held-out
-    score's definition); algo 6 only, `None` for the single-net SAD algos."""
+    score's definition); algo 6 only, `None` for the single-net SAD algos and on an empty
+    validation result."""
 
     model_config = ConfigDict(extra="forbid")
 

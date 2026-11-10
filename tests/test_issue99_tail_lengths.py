@@ -30,7 +30,7 @@ CASES: dict[str, tuple[Path, int, list[int]]] = {
 
 
 def _cfg(path: Path) -> dict[str, str]:
-    return cast(dict[str, str], speech_rs.load_config(str(path)))
+    return dict(speech_rs.load_config(str(path)))
 
 
 def _engine_tail(cfg: dict[str, str], prefix: str) -> int:

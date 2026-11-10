@@ -16,7 +16,7 @@ from speech.drivers.state import RunState
 
 
 def init_run(config: Path, out_dir: Path) -> RunState:
-    """Parse the engine `.config`, read its corpus listing, build the typed `RunState`,
+    """Read the engine config (`.toml` or `.config`), read its corpus listing, build the typed `RunState`,
     create `out_dir`, and persist the state as `out_dir/run_state.json`. The config's
     OWN directory stays the corpus root (the listing/weight paths are resolved relative
     to it at train time); `out_dir` only holds the orchestrator's checkpoints."""

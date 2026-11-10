@@ -12,6 +12,10 @@
 //! `tests/phase4c_toml.rs` for the round-trip proof through a real duplicate-key
 //! fixture, `configs/legacy/LID_BLSTM.config`).
 //!
+//! It also holds the crate's one config-FILE reader, [`load_config`] (issue #150): a `.toml`
+//! path is flattened here, any other path goes to the legacy importer, and the CLI, `bench`,
+//! both streaming CLIs and the PyO3 seam all read a config file through it.
+//!
 //! ## The table
 //!
 //! [`KEY_TABLE`] is the single declarative `(legacy_key, toml_section, toml_key)`

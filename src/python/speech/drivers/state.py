@@ -98,7 +98,7 @@ def ps_from_config(
     balance: int | None = None,
 ) -> RunConfig:
     """Build the vec2struct `RunConfig` (the fields `vec2struct` reads) from a parsed
-    engine `.config`. The DSP/net-size/flag fields come from the config; the outer
+    engine config map. The DSP/net-size/flag fields come from the config; the outer
     optimizer knobs (`adim`, `coeff_NN`, `balance`, `BalanceBackProp`) are NOT engine
     config keys -- they carry the Train_BLSTM.m defaults (algo 6 -> balance 10, the LID
     calibration objective). NNType 0 only (SRN/CWRNN unported)."""
