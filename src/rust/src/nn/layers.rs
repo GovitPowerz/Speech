@@ -111,6 +111,13 @@ pub struct LstmLayer {
     peep_weight_derivatives: Array2<f64>,
     biases_derivatives: Array2<f64>,
     nb_of_seq_fed_backward: i64,
+
+    /// The input-delta gate (issue #146, port-only): `true`, the default, is the
+    /// legacy behaviour. `false` makes `feed_backward` skip the deltas it would
+    /// propagate to the previous layer when it runs as the container's LAST backward
+    /// layer (`last_layer`), where the only reader is the container's caller. See
+    /// `CellLayer::set_input_deltas`.
+    input_deltas: bool,
 }
 
 impl LstmLayer {
@@ -145,7 +152,19 @@ impl LstmLayer {
             peep_weight_derivatives: Array2::zeros((12, output_size)),
             biases_derivatives: Array2::zeros((1, 4 * output_size)),
             nb_of_seq_fed_backward: 0,
+            input_deltas: true,
         }
+    }
+
+    /// Switch the input-delta gate (see the field). Off, a `feed_backward` called
+    /// with `last_layer` returns a `0 x 0` array and every weight derivative it
+    /// accumulates is unchanged.
+    pub fn set_input_deltas(&mut self, on: bool) {
+        self.input_deltas = on;
+    }
+
+    pub fn input_deltas(&self) -> bool {
+        self.input_deltas
     }
 
     /// `getNbOfWeights` (`LSTMLayer.cpp:205-207`):
@@ -469,6 +488,10 @@ impl LstmLayer {
     /// ascending-loop contract); the rank-1 outer-product deriv accumulations
     /// (`input.col(row)*deltasX`, `output.col(row-1)*deltasX`) are k=1, done as
     /// explicit scalar loops (bit-identical to the legacy Eigen product at k=1).
+    ///
+    /// `last_layer` is unused by the legacy body. The port reads it for one thing: with
+    /// the input-delta gate off (issue #146), the last backward layer skips the `:707`
+    /// product and returns a `0 x 0` array.
     pub fn feed_backward(
         &mut self,
         input: &Array2<f64>,
@@ -477,7 +500,6 @@ impl LstmLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let _ = last_layer; // lastLayer is UNUSED in the LSTM backward (signature parity).
         let o = self.output_size;
         let i = self.input_size;
         let cols = input.dim().1;
@@ -789,9 +811,14 @@ impl LstmLayer {
             }
         }
 
-        // :707 deltasPreviousLayer = (_InputWeights * testM)^T -> T x I.
-        let dpl = matmul_seq(&self.input_weights, &test_m); // I x T
-        let deltas_previous_layer = dpl.t().to_owned();
+        // :707 deltasPreviousLayer = (_InputWeights * testM)^T -> T x I. Skipped when
+        // the gate is off at the last backward layer: its one reader discards it.
+        let deltas_previous_layer = if last_layer && !self.input_deltas {
+            Array2::zeros((0, 0))
+        } else {
+            let dpl = matmul_seq(&self.input_weights, &test_m); // I x T
+            dpl.t().to_owned()
+        };
 
         // :710-715 invSubSamplingRatio > 1 scales all four deriv blocks.
         if inv_sub_sampling_ratio > 1 {

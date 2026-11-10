@@ -132,6 +132,41 @@ impl CellLayer {
         }
     }
 
+    /// The input-delta gate (issue #146, port-only): whether this cell computes the
+    /// deltas it propagates to the previous layer when it runs as its container's LAST
+    /// backward layer. `true`, the default, is the legacy behaviour and the contract
+    /// the container and layer goldens read. `BlstmNetwork::from_config` switches it
+    /// off on every cell of its stacks, because nothing upstream of a stack trains:
+    /// the deltas a stack returns have no reader.
+    ///
+    /// THE CONTRACT. Off, a `feed_backward` / `feed_backward_reverse` called with
+    /// `last_layer` returns a `0 x 0` array; every weight derivative it accumulates is
+    /// the same bits as with the gate on (`nn::blstm`'s differential leg). The gate is
+    /// keyed on `last_layer`, which the container passes `true` at layer 0 only, so a
+    /// cell above layer 0 is unaffected whatever its gate says: an upper layer can
+    /// never hand empty deltas to the layer below.
+    ///
+    /// An INHERENT method like `set_retain_cache`, for the same reason: the `Layer`
+    /// trait stays the ten methods the seam defined and `Network<L>` never learns the
+    /// gate exists. The Mamba, CfC and transformer arms are no-ops for now, which is
+    /// the safe direction (always compute).
+    pub fn set_input_deltas(&mut self, on: bool) {
+        match self {
+            CellLayer::Lstm(l) => l.set_input_deltas(on),
+            CellLayer::Slstm(l) => l.set_input_deltas(on),
+            CellLayer::Mamba(_) | CellLayer::Cfc(_) | CellLayer::Transformer(_) => {}
+        }
+    }
+
+    /// The gate's state; `true` for a cell whose arm above is a no-op.
+    pub fn input_deltas(&self) -> bool {
+        match self {
+            CellLayer::Lstm(l) => l.input_deltas(),
+            CellLayer::Slstm(l) => l.input_deltas(),
+            CellLayer::Mamba(_) | CellLayer::Cfc(_) | CellLayer::Transformer(_) => true,
+        }
+    }
+
     /// The cell's weight-layout blocks (issue #27), in the order its `set_weights`
     /// consumes them -- an INHERENT method like `set_retain_cache`, not a `Layer` method:
     /// the trait stays the ten the seam defined, and the exhaustive match here is what
@@ -347,6 +382,71 @@ mod tests {
         Array2::from_shape_fn((rows, cols), |(r, c)| {
             seed + 0.13 * (r as f64) - 0.29 * (c as f64) + 0.017 * ((r * cols + c) as f64)
         })
+    }
+
+    /// Every cell the input-delta gate covers (issue #146), bare, at `I -> O`.
+    fn gated_cells() -> Vec<(&'static str, CellLayer)> {
+        vec![
+            ("lstm", CellLayer::Lstm(bare())),
+            ("slstm", CellLayer::Slstm(SlstmLayer::new(I, O))),
+        ]
+    }
+
+    fn bits(m: &Array2<f64>) -> Vec<u64> {
+        m.iter().map(|v| v.to_bits()).collect()
+    }
+
+    /// The gate's contract (issue #146). It defaults on. Switched off, a cell returns a
+    /// `0 x 0` array only as the container's last backward layer (`last_layer`), and
+    /// the ungated deltas anywhere else; the derivative rows are the same bits in all
+    /// three runs.
+    #[test]
+    fn a_gated_cell_skips_its_input_deltas_only_as_the_last_backward_layer() {
+        for (name, proto) in gated_cells() {
+            for reverse in [false, true] {
+                let run = |gate: bool, last_layer: bool| {
+                    let mut cell = proto.clone();
+                    let w = weights(Layer::nb_of_weights(&cell));
+                    Layer::set_weights(&mut cell, &w);
+                    assert!(cell.input_deltas(), "{name}: the gate defaults on");
+                    cell.set_input_deltas(gate);
+                    assert_eq!(cell.input_deltas(), gate, "{name}: the gate reads back");
+
+                    let input = seq(T, I, 0.4);
+                    let deltas = seq(T, O, -0.2);
+                    let mut out = Array2::zeros((T, O));
+                    let dpl = if reverse {
+                        Layer::feed_forward_reverse(&mut cell, &input, &mut out, last_layer);
+                        Layer::feed_backward_reverse(
+                            &mut cell, &input, &out, &deltas, 1, last_layer,
+                        )
+                    } else {
+                        Layer::feed_forward(&mut cell, &input, &mut out, last_layer);
+                        Layer::feed_backward(&mut cell, &input, &out, &deltas, 1, last_layer)
+                    };
+                    let mut rows = Vec::new();
+                    Layer::get_weights_derivatives(&cell, &mut rows);
+                    let rows: Vec<[u64; 2]> = rows
+                        .iter()
+                        .map(|r| [r[0].to_bits(), r[1].to_bits()])
+                        .collect();
+                    (dpl, rows)
+                };
+                let label = format!("{name} (reverse={reverse})");
+
+                let (on, rows_on) = run(true, true);
+                assert_eq!(on.dim(), (T, I), "{label}: ungated deltas are T x I");
+                assert!(on.iter().any(|v| *v != 0.0), "{label}: vacuous deltas");
+
+                let (off_last, rows_off_last) = run(false, true);
+                assert_eq!(off_last.dim(), (0, 0), "{label}: gated, last layer");
+                assert_eq!(rows_off_last, rows_on, "{label}: derivatives, last layer");
+
+                let (off_inner, rows_off_inner) = run(false, false);
+                assert_eq!(bits(&off_inner), bits(&on), "{label}: gated, inner layer");
+                assert_eq!(rows_off_inner, rows_on, "{label}: derivatives, inner layer");
+            }
+        }
     }
 
     /// The wrap is an indirection ONLY: forward + reverse forward through
