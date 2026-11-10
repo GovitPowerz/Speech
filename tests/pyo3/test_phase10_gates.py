@@ -384,7 +384,7 @@ def _arch(arm: str, cell: str, direction: str) -> _Arch:
 
     repo_root = Path(__file__).resolve().parents[2]
     toml_path = repo_root / ARM_CONFIG[arm]  # type: ignore[index]
-    flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
+    flat = dict(speech_rs.load_config(str(toml_path)))
     flat.update(B.cell_overlay(dict(flat), cell, direction))
     layout = cast(list[dict[str, Any]], speech_rs.weight_layout(flat, "BLSTM"))
     lstm = [int(x) for x in flat["BLSTM_LSTMNeuronNb"].split(",")]

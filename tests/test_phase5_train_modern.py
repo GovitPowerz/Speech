@@ -102,7 +102,7 @@ def test_early_stop_patience_triggers_at_crafted_epoch(tmp_path: Path) -> None:
     assert res.history[2].is_best is True
     assert res.history[3].is_best is False
     assert res.history[4].val_cost == 5.0
-    assert res.history[0].confusion_error is None  # single-net: no LID confusion recorded
+    assert res.history[0].lid_error is None  # single-net: no LID error recorded
     # best checkpoint holds epoch-2 weights, last holds epoch-4 weights.
     assert _ckpt_vec(res.checkpoint_dir, "best_sad.bin") == [2.0]
     assert _ckpt_vec(res.checkpoint_dir, "last_sad.bin") == [4.0]

@@ -24,7 +24,7 @@ use speech::fast::stream_lid::{LidAggregate, StreamingLidSession as RsStreamingL
 use speech::legacy_config::{parse_legacy_config as parse_legacy_config_rs, parse_usize};
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
 use speech::stream_cli::class_str;
-use speech::toml_config::toml_to_map as toml_to_map_rs;
+use speech::toml_config::load_config as load_config_rs;
 
 /// Convert an engine error into a Python `RuntimeError`, formatting the FULL
 /// chain via the alternate `Display` (`{:#}`, which `anyhow::Error` renders as
@@ -39,21 +39,6 @@ fn to_pyerr<E: std::fmt::Display>(e: E) -> PyErr {
 /// functions, never a default (ADR-0006).
 fn to_value_err<E: std::fmt::Display>(e: E) -> PyErr {
     PyValueError::new_err(format!("{e:#}"))
-}
-
-/// Read a config FILE into the flat `IndexMap` the engine takes, dispatched by
-/// extension like `cli::parse_cli`: a `.toml` path goes through
-/// `toml_config::toml_to_map`, anything else through `parse_legacy_config`. The
-/// one loader behind `Engine::new` and both streaming sessions (issue #22).
-fn load_config_map(path: &str) -> PyResult<IndexMap<String, String>> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| PyRuntimeError::new_err(format!("cannot read config file '{path}': {e}")))?;
-    if path.ends_with(".toml") {
-        toml_to_map_rs(&text)
-            .map_err(|e| PyRuntimeError::new_err(format!("invalid TOML config '{path}': {e:#}")))
-    } else {
-        Ok(parse_legacy_config_rs(&text))
-    }
 }
 
 /// A Python `dict[str, str]` as the flat config map, insertion order preserved
@@ -99,17 +84,14 @@ fn parse_legacy_config<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, 
     Ok(dict)
 }
 
-/// Load a canonical TOML config FILE (Phase 4c Task 5) into a `dict[str, str]`,
-/// flattened through `toml_config::toml_to_map` -- the same shape
-/// `parse_legacy_config` produces, regardless of which format the config is
-/// authored in. Takes a PATH (not text): unlike `parse_legacy_config`, the TOML
-/// side has no meaningful "text with no file" use case in this API since the
-/// canonical workflow is always a config file on disk.
+/// Read a config FILE into a `dict[str, str]` through the engine's one config reader,
+/// `toml_config::load_config` (issue #150): a `.toml` path is flattened through the
+/// canonical `KEY_TABLE`, anything else parsed as a legacy `.config`; both give the
+/// legacy key shape `Engine.from_map` takes. An unreadable file or invalid TOML is a
+/// `RuntimeError`.
 #[pyfunction]
-fn load_toml_config<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyDict>> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| PyRuntimeError::new_err(format!("cannot read config file '{path}': {e}")))?;
-    let map = toml_to_map_rs(&text).map_err(to_pyerr)?;
+fn load_config<'py>(py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyDict>> {
+    let map = load_config_rs(path).map_err(to_pyerr)?;
     let dict = PyDict::new(py);
     for (k, v) in &map {
         dict.set_item(k, v)?;
@@ -261,7 +243,7 @@ impl Engine {
 #[pymethods]
 impl Engine {
     /// Build from config PATHS + a CLI mode flag (`"-m"`, `"-s"`, ...; parsed
-    /// via `cli::Mode::from_flag`). Each path is read through `load_config_map`
+    /// via `cli::Mode::from_flag`). Each path is read through `toml_config::load_config`
     /// (`.toml` / `.config` dispatched by extension). An empty `config_paths` is
     /// NOT checked here -- `CorpusProcessor::new` already bails with its own "at
     /// least one config is required" message, so a redundant pre-check here would
@@ -270,7 +252,7 @@ impl Engine {
     fn new(config_paths: Vec<String>, mode: String) -> PyResult<Self> {
         let configs = config_paths
             .iter()
-            .map(|p| load_config_map(p))
+            .map(|p| load_config_rs(p).map_err(to_pyerr))
             .collect::<PyResult<Vec<_>>>()?;
         Self::build(configs, &mode)
     }
@@ -522,14 +504,14 @@ struct StreamingSession {
 
 #[pymethods]
 impl StreamingSession {
-    /// Build from a config PATH (read through `load_config_map`, the same loader as
+    /// Build from a config PATH (read through `toml_config::load_config`, the same loader as
     /// `Engine::new`), the stream
     /// `rate` (Hz) and source `channels` count -- both read from the wav header by the
     /// caller (the session is mono-first; `channels != 1` bails). COPY: the config is
     /// read from disk + parsed into an owned map.
     #[new]
     fn new(config_path: &str, rate: f64, channels: usize) -> PyResult<Self> {
-        let map = load_config_map(config_path)?;
+        let map = load_config_rs(config_path).map_err(to_pyerr)?;
         let inner = RsStreamingSession::new(&map, rate, channels).map_err(to_pyerr)?;
         Ok(StreamingSession { inner })
     }
@@ -631,7 +613,7 @@ struct StreamingLidSession {
 
 #[pymethods]
 impl StreamingLidSession {
-    /// Build from a config PATH (read through `load_config_map`, the same loader as
+    /// Build from a config PATH (read through `toml_config::load_config`, the same loader as
     /// `Engine::new`/`StreamingSession::new`), the stream `rate` (Hz), and the eval
     /// target `lang_index`
     /// (clamped into `[0, class_nb)` by the Rust session -- a negative value targets
@@ -641,7 +623,7 @@ impl StreamingLidSession {
     /// checks a non-empty `BLSTM_weightsFile`, issue #65).
     #[new]
     fn new(config_path: &str, rate: f64, lang_index: i32) -> PyResult<Self> {
-        let map = load_config_map(config_path)?;
+        let map = load_config_rs(config_path).map_err(to_pyerr)?;
         let inner = RsStreamingLidSession::new(&map, rate, lang_index, None).map_err(to_pyerr)?;
         Ok(StreamingLidSession { inner })
     }
@@ -689,7 +671,7 @@ fn speech_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(build_info, m)?)?;
     m.add_function(wrap_pyfunction!(parse_legacy_config, m)?)?;
-    m.add_function(wrap_pyfunction!(load_toml_config, m)?)?;
+    m.add_function(wrap_pyfunction!(load_config, m)?)?;
     m.add_function(wrap_pyfunction!(weight_layout, m)?)?;
     m.add_function(wrap_pyfunction!(blstm_config, m)?)?;
     m.add_class::<Engine>()?;

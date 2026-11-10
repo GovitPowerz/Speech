@@ -497,3 +497,14 @@ def test_parse_legacy_config_binding() -> None:
     assert list(got.keys()) == list(want.keys()), "insertion order must match"
     assert got["Algo_choice"] == "4", "last-wins duplicate key"
     assert got["key_with_no_value"] == ""
+
+
+def test_load_config_reads_a_legacy_config_as_the_python_mirror() -> None:
+    """`speech_rs.load_config` (issue #150) reads a non-`.toml` path through the legacy
+    importer: on the committed `LID_BLSTM.config` (it carries a duplicate key) the map
+    equals the Python mirror's, key for key and in insertion order."""
+    path = REPO_ROOT / "configs" / "legacy" / "LID_BLSTM.config"
+    got = dict(speech_rs.load_config(str(path)))
+    want = parse_legacy_config_py(path.read_text())
+    assert got == want
+    assert list(got.keys()) == list(want.keys()), "insertion order must match"

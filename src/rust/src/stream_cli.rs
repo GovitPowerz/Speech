@@ -33,9 +33,9 @@ use std::time::Instant;
 
 use anyhow::{Result, bail};
 
-use crate::cli::load_config;
 use crate::fast::stream::{EmittedSegment, StreamingSession};
 use crate::tasks::segmentation::SegClass;
+use crate::toml_config::load_config;
 
 /// The `Speech`/`Other` label for a SAD partition segment (the SAD decision layer
 /// only ever labels these two; anything else falls back to its debug name). Exported

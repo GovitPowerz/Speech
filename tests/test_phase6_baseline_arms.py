@@ -334,13 +334,13 @@ def _spec(arm: str, corpus_root: Path, out_dir: Path, **over: object) -> Baselin
 
 
 def _fake_engine(monkeypatch: pytest.MonkeyPatch, flat: dict[str, str]) -> None:
-    """Stub the engine boundary `prepare` touches: a fake `speech_rs` whose `load_toml_config`
+    """Stub the engine boundary `prepare` touches: a fake `speech_rs` whose `load_config`
     returns `flat`, and seed packs that are paths only (no `init_weights`, so no engine layout)."""
     import sys
     import types
 
     fake_rs = types.ModuleType("speech_rs")
-    setattr(fake_rs, "load_toml_config", lambda p: flat)  # noqa: B010 -- dynamic attr on a fake module
+    setattr(fake_rs, "load_config", lambda p: flat)  # noqa: B010 -- dynamic attr on a fake module
     monkeypatch.setitem(sys.modules, "speech_rs", fake_rs)
     monkeypatch.setattr(B, "_generate_seed_packs", lambda flat, out, seed, init_scheme, nets: [out / name for _, name in nets])
 
@@ -581,8 +581,8 @@ def test_run_baseline_scores_the_best_checkpoint_and_the_seed_packs(tmp_path: Pa
     _sad_corpus_tree(root, 20)
     _fake_engine(monkeypatch, _SAD_FLAT)
     hist = [
-        EpochRecord(epoch=0, train_cost=0.9, val_cost=0.8, confusion_error=None, is_best=True),
-        EpochRecord(epoch=1, train_cost=0.7, val_cost=0.6, confusion_error=None, is_best=True),
+        EpochRecord(epoch=0, train_cost=0.9, val_cost=0.8, lid_error=None, is_best=True),
+        EpochRecord(epoch=1, train_cost=0.7, val_cost=0.6, lid_error=None, is_best=True),
     ]
     monkeypatch.setattr(
         B,

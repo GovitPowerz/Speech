@@ -1,6 +1,6 @@
 # ADR-0010: The seam takes a config map, the process cwd is not part of the Python-side contract, and one module owns the fold run
 
-**Status:** accepted | **Date:** 2026-10-07 (issue #22, grilling outcome recorded there); the fast guard retired 2026-10-09 (issue #62); the results-file key retired 2026-11-07 (issue #135)
+**Status:** accepted | **Date:** 2026-10-07 (issue #22, grilling outcome recorded there); the fast guard retired 2026-10-09 (issue #62); the results-file key retired 2026-11-07 (issue #135); the binding's loader folded into the crate's `toml_config::load_config` 2026-11-10 (issue #150)
 
 ## Context
 
@@ -21,8 +21,9 @@ Three things, each owned once.
 - **The seam takes a map.** `Engine.from_map(configs: list[dict[str, str]], mode)` mirrors the
   path constructor; the map is the flattened legacy key shape the `KEY_TABLE` already produces
   (ADR-0006, no second vocabulary) and dict insertion order is preserved into the `IndexMap`.
-  One `load_config_map(path)` in `speech-py` replaces the three read-and-dispatch copies behind
-  `Engine`, `StreamingSession` and `StreamingLidSession`. Rust path semantics are unchanged: a
+  One loader in `speech-py` replaces the three read-and-dispatch copies behind
+  `Engine`, `StreamingSession` and `StreamingLidSession` (since issue #150 it is the crate's
+  `toml_config::load_config`, also exposed as `speech_rs.load_config`). Rust path semantics are unchanged: a
   relative path still resolves against the process cwd, as for the binary.
 - **The process cwd is not part of the Python-side contract.** `fold_run.FoldRun` resolves the
   five config keys that name a file or directory (`fileslisting`, `language2classmapping`,

@@ -46,9 +46,9 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 
 use crate::audio::read_audio;
-use crate::cli::load_config;
 use crate::fast::stream_lid::{StreamingLidSession, UtteranceScore};
 use crate::legacy_config::get_default;
+use crate::toml_config::load_config;
 
 /// Write one `UTT` line and flush it.
 fn print_utt(out: &mut impl Write, idx: usize, sc: &UtteranceScore) -> Result<()> {

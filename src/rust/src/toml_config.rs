@@ -12,6 +12,10 @@
 //! `tests/phase4c_toml.rs` for the round-trip proof through a real duplicate-key
 //! fixture, `configs/legacy/LID_BLSTM.config`).
 //!
+//! It also holds the crate's one config-FILE reader, [`load_config`] (issue #150): a `.toml`
+//! path is flattened here, any other path goes to the legacy importer, and the CLI, `bench`,
+//! both streaming CLIs and the PyO3 seam all read a config file through it.
+//!
 //! ## The table
 //!
 //! [`KEY_TABLE`] is the single declarative `(legacy_key, toml_section, toml_key)`
@@ -86,6 +90,8 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use indexmap::IndexMap;
+
+use crate::legacy_config::parse_legacy_config;
 
 /// One entry of the bidirectional legacy-key <-> TOML `section.key` table.
 /// `(legacy_key, toml_section, toml_key)`.
@@ -450,6 +456,21 @@ pub fn toml_to_map(text: &str) -> Result<IndexMap<String, String>> {
     Ok(out)
 }
 
+/// Read a config FILE into the flat map the engine takes, dispatched on the extension: a
+/// `.toml` path through [`toml_to_map`], anything else (the legacy extensionless or
+/// `.config` convention) through the legacy whitespace importer. The one config reader
+/// (issue #150): the CLI, `bench`, both streaming CLIs and the PyO3 seam
+/// (`speech_rs.load_config`, behind `Engine` and both streaming sessions) all call it.
+pub fn load_config(path: &str) -> Result<IndexMap<String, String>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow!("cannot read config file '{path}': {e}"))?;
+    if path.ends_with(".toml") {
+        toml_to_map(&text).map_err(|e| anyhow!("invalid TOML config '{path}': {e:#}"))
+    } else {
+        Ok(parse_legacy_config(&text))
+    }
+}
+
 /// Render a flat legacy `KEY -> value` map as a canonical TOML document: every key
 /// present in [`KEY_TABLE`] goes to its declared `[section]`, in `KEY_TABLE`'s
 /// declared order; every other key (the escape hatch) goes to `[legacy.raw]`,
@@ -500,4 +521,39 @@ pub fn map_to_toml(map: &IndexMap<String, String>) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REPO: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
+
+    #[test]
+    fn load_config_dispatches_on_the_extension() {
+        let toml = format!("{REPO}/configs/lid/lid_blstm.toml");
+        let text = std::fs::read_to_string(&toml).unwrap();
+        assert_eq!(load_config(&toml).unwrap(), toml_to_map(&text).unwrap());
+
+        let legacy = format!("{REPO}/configs/legacy/LID_BLSTM.config");
+        let text = std::fs::read_to_string(&legacy).unwrap();
+        assert_eq!(load_config(&legacy).unwrap(), parse_legacy_config(&text));
+
+        let missing = format!("{REPO}/configs/no_such_config.toml");
+        let err = load_config(&missing).unwrap_err().to_string();
+        assert!(
+            err.contains("cannot read config file") && err.contains(&missing),
+            "{err}"
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let invalid = dir.path().join("invalid.toml");
+        std::fs::write(&invalid, "[engine\n").unwrap();
+        let invalid = invalid.to_str().unwrap();
+        let err = load_config(invalid).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid TOML config") && err.contains(invalid),
+            "{err}"
+        );
+    }
 }

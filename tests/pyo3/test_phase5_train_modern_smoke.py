@@ -89,7 +89,7 @@ def test_train_modern_algo3_smoke(tmp_path: Path) -> None:
     for r in res.history:
         assert np.isfinite(r.val_cost), f"forward-only validation cost must be finite: {r}"
         assert np.isfinite(r.train_cost), f"train cost must be finite: {r}"
-        assert r.confusion_error is None  # single-net SAD: no LID confusion
+        assert r.lid_error is None  # single-net SAD: no LID error
 
     ckpt = Path(res.checkpoint_dir)
     for name in ("best_sad.bin", "last_sad.bin", "train_history.json"):
@@ -110,6 +110,7 @@ def test_train_modern_twin_smoke_writes_both_nets(tmp_path: Path) -> None:
     assert res.epochs_run == 2
     for r in res.history:
         assert np.isfinite(r.val_cost), f"twin validation cost must be finite: {r}"
+        assert r.lid_error is not None and 0.0 <= r.lid_error <= 100.0, f"twin LID error is a percent: {r}"
     # both nets checkpointed (best + last).
     ckpt = Path(res.checkpoint_dir)
     for name in ("best_sad.bin", "best_lid.bin", "last_sad.bin", "last_lid.bin"):

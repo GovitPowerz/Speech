@@ -1066,7 +1066,7 @@ def test_real_lre_sad_config_defaults_to_lstm_bidirectional(tmp_path: Path) -> N
     runtime placeholders `drivers.baseline` rewrites, so the listing/mapping are staged here
     from the committed synthetic tier-2 corpus rather than anything corpus-derived.
     """
-    flat = dict(speech_rs.load_toml_config(str(REPO_ROOT / "configs" / "training" / "lre_sad.toml")))
+    flat = dict(speech_rs.load_config(str(REPO_ROOT / "configs" / "training" / "lre_sad.toml")))
     assert "BLSTM_Cell_Type" not in flat, "lre_sad.toml gained a cell-type key -- this default-identity pin needs revisiting"
     assert "BLSTM_Direction" not in flat, "lre_sad.toml gained a direction key -- this default-identity pin needs revisiting"
 

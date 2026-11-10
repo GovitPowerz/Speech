@@ -43,7 +43,7 @@
 # Value convention (toml_config.rs KEY_TABLE): booleans/integers native TOML;
 # floats/comma-lists/words/paths are quoted strings carrying the decimal text
 # verbatim. `speech.drivers.baseline.run_baseline` flattens this via
-# `speech_rs.load_toml_config` and OVERRIDES the [corpus] paths + weight files at
+# `speech_rs.load_config` and OVERRIDES the [corpus] paths + weight files at
 # runtime (license hygiene: no corpus path/filename is committed here).
 
 [engine]

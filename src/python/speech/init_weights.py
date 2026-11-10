@@ -167,10 +167,10 @@ def init_weights(
 ) -> list[NDArray[np.float64]]:
     """Seeded init for the `prefix` net's flat pack (see the module docstring).
 
-    `config` is the flat legacy-key map the engine reads (`parse_legacy_config` /
-    `load_toml_config`); the architecture, direction and per-cell geometry are resolved by
-    the engine itself through `speech_rs.weight_layout`, so a config the engine refuses
-    raises `ValueError` here too, never a default."""
+    `config` is the flat legacy-key map the engine reads (`speech_rs.load_config`); the
+    architecture, direction and per-cell geometry are resolved by the engine itself through
+    `speech_rs.weight_layout`, so a config the engine refuses raises `ValueError` here too,
+    never a default."""
     _check_scheme(scheme)
     import speech_rs  # local: `import speech` stays free of the extension for the modules that never touch it
 

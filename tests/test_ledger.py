@@ -625,6 +625,10 @@ def test_lanes_of_is_last_wins(tmp_path: Path) -> None:
     toml = tmp_path / "x.toml"
     toml.write_text("[engine]\nnum_outer_threads = 4\n")
     assert lanes_of(toml) == 4
+    toml.write_text("[engine]\nnum_outer_threads = 4  # lanes\n")
+    assert lanes_of(toml) == 4
+    toml.write_text('[legacy.raw]\nnumOuterThreads = "4"\n')
+    assert lanes_of(toml) == 4
 
 
 def test_wrap_reads_the_build_from_the_document_and_strips_the_run_path() -> None:

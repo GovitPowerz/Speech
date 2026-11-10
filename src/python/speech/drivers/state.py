@@ -21,7 +21,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from speech.batching import read_listing
-from speech.config_bridge import parse_legacy_config, read_flag
+from speech.config_bridge import read_flag
 from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult, net_names
 from speech.genome import LidNetSpec, RunConfig
 from speech.init_weights import Scheme
@@ -98,7 +98,7 @@ def ps_from_config(
     balance: int | None = None,
 ) -> RunConfig:
     """Build the vec2struct `RunConfig` (the fields `vec2struct` reads) from a parsed
-    engine `.config`. The DSP/net-size/flag fields come from the config; the outer
+    engine config map. The DSP/net-size/flag fields come from the config; the outer
     optimizer knobs (`adim`, `coeff_NN`, `balance`, `BalanceBackProp`) are NOT engine
     config keys -- they carry the Train_BLSTM.m defaults (algo 6 -> balance 10, the LID
     calibration objective). NNType 0 only (SRN/CWRNN unported)."""
@@ -153,7 +153,7 @@ class RunState(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    config_path: str  # absolute path to the engine .config (its dir holds the corpus)
+    config_path: str  # absolute path to the engine config, `.toml` or `.config` (its dir holds the corpus)
     out_dir: str  # where checkpoints land
     base_config: dict[str, str]  # the parsed engine config (the byte-known-good base)
     ps: RunConfig  # the vec2struct genome spec
@@ -168,7 +168,11 @@ class RunState(BaseModel):
 
     @classmethod
     def from_config(cls, config: Path, out_dir: Path) -> RunState:
-        return cls.from_parsed(parse_legacy_config(Path(config).read_text()), config, out_dir)
+        """The state of a config FILE, `.toml` or legacy `.config`, read through the engine's
+        one loader (`speech_rs.load_config`, issue #150)."""
+        import speech_rs  # local: `import speech` stays free of the extension for the modules that never touch it
+
+        return cls.from_parsed(dict(speech_rs.load_config(str(config))), config, out_dir)
 
     @classmethod
     def from_parsed(cls, cfg: dict[str, str], config: Path, out_dir: Path) -> RunState:

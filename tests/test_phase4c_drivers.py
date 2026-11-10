@@ -258,8 +258,8 @@ def test_evaluate_exact_injects_resolved_packs(tmp_path: Path, monkeypatch: pyte
     """Exact path: the resolved packs, read against the caller's cwd (not the config dir the
     fold resolves its paths against), go through `set_weights`; the map is inference-shaped
     and its paths are the config dir's, not the cwd's."""
-    seen = _fake_speech_rs(monkeypatch)
     state, ckpt = _twin_state_and_ckpt(tmp_path, monkeypatch)
+    seen = _fake_speech_rs(monkeypatch)
 
     evaluate(state, Checkpoint(ckpt, net_names(state.ps.algo)).packs())
 
@@ -274,8 +274,8 @@ def test_evaluate_fast_injects_through_set_weights(tmp_path: Path, monkeypatch: 
     """Fast path, the exact route since issue #62: the checkpoint packs go through
     `set_weights` too (a fast processor rebuilds its net from them) -- not ignored, and no
     pack is written beside the config."""
-    seen = _fake_speech_rs(monkeypatch)
     state, ckpt = _twin_state_and_ckpt(tmp_path, monkeypatch)
+    seen = _fake_speech_rs(monkeypatch)
     state.base_config["Inference_Path"] = "fast"
     before = set((tmp_path / "cfg").iterdir())
 
