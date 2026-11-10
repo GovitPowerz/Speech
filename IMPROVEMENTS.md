@@ -2169,7 +2169,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   DRIVER per-file confusion (`tasks/lid.rs`, `_LIDSegmentsConfusion`) is a SEPARATE path (it knows
   the target index `ti` directly, no sticky sentinel scan, no no-target case) and is UNAFFECTED;
   the all-target corpus goldens (`lid5_*`/`twin_mode*`/`mode7_*`/`twin_train_epoch_weights_golden`)
-  never hit a no-target row, so they stay green.
+  never hit a no-target row, so they stay green. *Issue #155:* the Python half
+  (`scoring.py::confusion_matrix` and its two F5 tests) was retired with the port, which had no
+  caller after issue #149; from then on the fix stood in `engine/confusion.rs` alone.
 
 - **[phase4b] An exact score tie sends the target to the MISS branch (strict `>` only) -- kept by decision, phase 5**
   (`engine/confusion.rs::confusion_from_results`, from `BagOfProcessors.cpp:524`): the win
@@ -4730,7 +4732,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   commit's `test_fold_run_forces_epochs_zero_on_every_fold`. Item 5's throwaway test went with its
   builder in 42e23f3; its claim is rebuilt on the committed gate, whose own trainer is made
   stagnant (`opt.optimize(0)`) and must fail `test_from_scratch_sad_converges`; the zero-margin
-  half of the demonstration has no patch.
+  half of the demonstration has no patch. `7-python` was retired in issue #155 with the Python
+  port it mutated (10 patches from then on; `7-rust` unchanged).
 
 ### Mutation battery (Phase 6)
 

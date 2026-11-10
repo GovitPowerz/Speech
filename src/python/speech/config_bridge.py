@@ -1,8 +1,10 @@
-"""Config writer/reader: legacy .config <-> typed spec.
+"""What Python declares about a config: the (cell x direction) vocabulary, and the boolean
+flag rule over an already-parsed KEY -> value map.
 
-Ported from legacy MATLAB: readConfig.m / printConfig.m and C++ ConfigFile.cpp.
-The .config is plain-text KEY value, last-wins, comma-vectors, # comments,
-_-in-key rest-of-line continuation. See design spec section 4.
+Config text and config files are parsed by the engine alone, on the seam:
+`speech_rs.load_config(path)` for a file (`.toml` or legacy `.config`, issue #150) and
+`speech_rs.parse_legacy_config(text)` for legacy text. The Python `.config` parser that
+lived here (the `readConfig.m` / `ConfigFile.cpp` mirror) was retired in issue #155.
 """
 
 from typing import Literal, get_args
@@ -16,21 +18,6 @@ CellType = Literal["lstm", "slstm", "mamba", "cfc", "transformer"]
 Direction = Literal["bidirectional", "forward"]
 CELL_TYPES: tuple[str, ...] = get_args(CellType)
 DIRECTIONS: tuple[str, ...] = get_args(Direction)
-
-
-def parse_legacy_config(text: str) -> dict[str, str]:
-    """Parse legacy KEY value config text; last duplicate key wins, # lines skipped."""
-    out: dict[str, str] = {}
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = line.split(None, 1)
-        name = parts[0]
-        if name.startswith("#"):
-            continue
-        out[name] = parts[1] if len(parts) > 1 else ""
-    return out
 
 
 def read_flag(cfg: dict[str, str], key: str, default: bool) -> bool:

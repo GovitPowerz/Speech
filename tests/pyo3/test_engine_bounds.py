@@ -21,7 +21,6 @@ from typing import Any
 
 import numpy as np
 import pytest
-from speech.config_bridge import parse_legacy_config
 from speech.weight_bridge import read_weight_vector
 
 speech_rs = pytest.importorskip("speech_rs")
@@ -33,7 +32,7 @@ SINGLE = "slstm_forward"
 
 
 def _engine(tmp_path: Path, fixture: str, path: str) -> Any:
-    cfg = parse_legacy_config((tmp_path / f"{fixture}.config").read_text())
+    cfg = dict(speech_rs.load_config(str(tmp_path / f"{fixture}.config")))
     cfg["Inference_Path"] = path
     cfg["Neural_Networks_BackPropagation_Epochs"] = "0"
     cfg["BLSTM_BackPropagationActivated"] = "false"

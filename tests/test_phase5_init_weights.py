@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from speech.config_bridge import parse_legacy_config
+import speech_rs
 from speech.init_weights import init_weights
 
 from tests.layout_helpers import block_slice, layout_of
@@ -23,7 +23,7 @@ REF = Path("tests/reference_data/phase4d")
 
 
 def _cfg(name: str) -> dict[str, str]:
-    return parse_legacy_config((REF / name).read_text())
+    return dict(speech_rs.load_config(str(REF / name)))
 
 
 TUPLE_A = _cfg("tupleA_1_worker_1.config")

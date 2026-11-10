@@ -24,7 +24,7 @@ from typing import Any, cast
 
 import numpy as np
 import pytest
-from speech.config_bridge import parse_legacy_config
+import speech_rs
 from speech.init_weights import init_weights
 from speech.weight_bridge import read_bin
 
@@ -38,7 +38,7 @@ FIXTURES = cast(dict[str, dict[str, Any]], MANIFEST["fixtures"])
 @pytest.mark.parametrize("name", sorted(FIXTURES))
 def test_committed_seed_pack_regenerates_byte_identical(name: str) -> None:
     info = FIXTURES[name]
-    flat = parse_legacy_config((PHASE9 / info["config"]).read_text())
+    flat = dict(speech_rs.load_config(str(PHASE9 / info["config"])))
     rng = np.random.default_rng(info["seed"])
     packs = init_weights(flat, info["prefix"], rng, info["init_scheme"], info["forget_bias_one"])
     assert len(packs) == 1

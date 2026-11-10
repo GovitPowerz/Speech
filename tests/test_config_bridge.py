@@ -1,4 +1,4 @@
-"""Legacy .config parsing tests (Python side)."""
+"""`config_bridge` tests: a real config through the seam, the (cell x direction) vocabulary."""
 
 from pathlib import Path
 
@@ -8,14 +8,8 @@ from speech import config_bridge
 FIX = Path("tests/reference_data/phase0/1_worker_1.config")
 
 
-def test_parse_last_wins() -> None:
-    cfg = config_bridge.parse_legacy_config("a 1\n# c 2\na 3\n")
-    assert cfg["a"] == "3"
-    assert "c" not in cfg
-
-
 def test_blstm_config_from_real_config() -> None:
-    cfg = config_bridge.parse_legacy_config(FIX.read_text())
+    cfg = dict(speech_rs.load_config(str(FIX)))
     spec = speech_rs.blstm_config(cfg, "BLSTM")
     assert spec["LSTMNeuronNb"] == [23, 24, 24]
     assert spec["LSTMSubSampling"] == [4, 1]

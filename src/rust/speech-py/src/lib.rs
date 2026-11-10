@@ -72,7 +72,7 @@ fn build_info(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
 }
 
 /// Parse a legacy whitespace `.config` text into a `dict[str, str]` (last-wins,
-/// insertion order preserved). The Python mirror of the Rust
+/// insertion order preserved). The seam binding of the Rust
 /// `legacy_config::parse_legacy_config`.
 #[pyfunction]
 fn parse_legacy_config<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyDict>> {

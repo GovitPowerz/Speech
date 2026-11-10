@@ -7,7 +7,7 @@ the inverse write-back that mask-fixed / clamped / sorted fields impose.
 
 Two outputs matter for parity:
   * `configStruct` (returned here as the flat legacy KEY->value STRING dict, exactly the shape
-    `config_bridge.parse_legacy_config` produces): the engine-facing `.config`. printConfig
+    the seam's `speech_rs.parse_legacy_config` returns): the engine-facing `.config`. printConfig
     EXCLUDES the NN weight / output / normalization fields (they reach the engine through the
     `.bin` weight codec, not the text config) and renames the `AlgName_` prefix to the algo tag
     (`BLSTM_`/`LTSV_`/`TDC_`/`VRCTS_`). Numeric values are `%d` when integer-valued, `%15.15e`

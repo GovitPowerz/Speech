@@ -16,7 +16,7 @@ PEEPHOLE_KINDS = ("IsCellsPeepholesActive", "IsGatesPeepholesActive", "IsGatesRe
 
 
 def _twin() -> dict[str, str]:
-    return config_bridge.parse_legacy_config(TWIN_CONFIG.read_text())
+    return dict(speech_rs.load_config(str(TWIN_CONFIG)))
 
 
 def _with_peepholes(prefix: str, value: str | None) -> dict[str, str]:

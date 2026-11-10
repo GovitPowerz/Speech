@@ -3154,7 +3154,7 @@ it to one sentence rather than leaving it a question; see that section, not repe
 
 ## Issue #23 -- the typed channel result: the mutation battery
 
-**Live since issue #33:** `tests/mutations/issue23/` (4 patches). Items 3a and 3b now land on one site, `LidResult::correct_wire` (extracted in afe5d18, after this battery), so they are one patch, `3a-3b`, carrying both items' catchers with `aggregation_bit_exact` CAUGHT as 3b recorded it. The live run read one verdict differently: `update_called_with_neg_costlid` is MISSED, because its row carries no LID flag, and the 3b run's failure of it was the whole-file run's poisoned `CWD_LOCK` (`aggregation_bit_exact` panicked holding it), which a one-test-per-process catcher cannot reproduce. Item 1's blind tier-1 leg is `phase4a_tier1_e2e::solo_tdc_matches`.
+**Live since issue #33:** `tests/mutations/issue23/` (4 patches). Items 3a and 3b now land on one site, `LidResult::correct_wire` (extracted in afe5d18, after this battery), so they are one patch, `3a-3b`, carrying both items' catchers with `aggregation_bit_exact` CAUGHT as 3b recorded it. The live run read one verdict differently: `update_called_with_neg_costlid` is MISSED, because its row carries no LID flag, and the 3b run's failure of it was the whole-file run's poisoned `CWD_LOCK` (`aggregation_bit_exact` panicked holding it), which a one-test-per-process catcher cannot reproduce. Item 1's blind tier-1 leg is `phase4a_tier1_e2e::solo_tdc_matches`. Item 4's six `MISSED` `test_phase4c_scoring.py` catchers went in issue #155 with the tests they named; its four `CAUGHT` catchers stayed.
 
 The plan (`docs/superpowers/plans/2026-10-07-issue-23-typed-channel-result.md`, Task 7) named
 four items; item 3 is run twice, once at the wire (`to_row`) and once at the fold's own
@@ -4061,3 +4061,47 @@ forgotten path swallowed the next argument and truncated it before the run; pinn
 `results_json_flag_is_not_a_config_override`), and the writer serializes through
 `serde_json::to_vec` (same bytes), so patch 5 is re-targeted to it. `run.py issue135/1-5`: 7
 verdicts, 0 differ from expected; `run.py --check`: 192 mutations, 0 problems.
+
+## Issue #155 -- two Python ports with no caller retired: `confusion_matrix` and `parse_legacy_config`
+
+**Live:** no new patches. `tests/mutations/phase5/7-python.patch` is retired (ADR-0011: the site is
+gone) and `issue23/4` lost its six `MISSED` catchers with the tests they named. Two older patches
+are re-targeted, same catchers, same verdicts: `issue149/1` and `issue150/1`.
+
+Branch `feature/issue-155-retire-python-ports`, off `main@c696415` (#149 and #150 merged). Those
+two issues took the last production caller from each port. `scoring.confusion_matrix` (the
+`confusionThresh.m` port) is retired, not moved to `tests/oracles/`: it had six hand-verified unit
+tests, no Octave golden, and the Rust `engine/confusion.rs` ports a different legacy source with a
+different win predicate, so it was an oracle of nothing. `config_bridge.parse_legacy_config` is
+deleted with no oracle copy either: the tests and `scripts/extract_phase9_fixtures.py` read a
+config file with `dict(speech_rs.load_config(str(path)))` and config text with
+`speech_rs.parse_legacy_config(text)` (42 call sites in 24 test files and the extractor: 38 file
+reads and 4 text reads), so the engine's parser is the only one left. Two file reads that already
+went through the text binding (`test_channel_results.py`, `test_engine_smoke.py`) use
+`speech_rs.load_config` as well; the two that remain are the comparison side of a loader pin
+(`test_load_config_toml_matches_legacy_parse`, the renamed #150 leg below). The two parsers differed
+where the old mirror pin never looked: `str.splitlines()` splits on more separators than Rust's
+`lines()` (a lone `\r`, `\x0b`, `\x0c`, `\x1c`-`\x1e`, `\x85`, U+2028, U+2029), and Python counts
+`\x1c`-`\x1f` as token whitespace where Rust's `char::is_whitespace` does not. None of the 66
+committed `.config` files contains one of those characters. The seam's text binding stays and
+`test_parse_legacy_config_binding` now pins its map and key order literally;
+`test_parse_last_wins` went with the parser, last-wins staying pinned there and in
+`phase0_config.rs::parse_last_wins`. The #150 leg that compared `speech_rs.load_config` with the
+Python mirror on `LID_BLSTM.config` now compares it with the text binding and is renamed
+`test_load_config_reads_a_legacy_config_as_the_text_binding`: both sides run the one Rust parser,
+so it pins the extension dispatch and the file read, and parsing is owned by the literal pin and
+the Rust config goldens. The Rust test `cross_language_identity_no_target_skip` keeps its name;
+its doc no longer cites a Python mirror.
+
+The two re-targets are the finding. Each patch mutates a file this issue does not touch, but its
+`+` lines imported a function this issue deletes, so `git apply --check` passed and every catcher
+would have gone red on an `ImportError`: a `CAUGHT` that measures nothing. `issue149/1` now inlines
+the old hit rule (first failure line `assert 83.33333333333334 == 0.0`) and `issue150/1` reads the
+file through the seam's text binding (`KeyError: 'Algo_choice'`).
+
+Measured 2026-11-10: pytest 1211 -> 1204 passed non-slow (plus the one standing skip; retired: the
+six `confusion_matrix` tests and `test_parse_last_wins`), pyo3 296 unchanged, cargo 1386 passed + 2
+ignored unchanged (`--features test-support`, `--no-fail-fast`); `scripts/extract_phase9_fixtures.py
+--check`: 39 files byte-identical; `run.py --check`: 194 mutations, 0 problems; the close run
+`--changed-since origin/main` is recorded in the pull request. No ledger record: no measured number
+moves.

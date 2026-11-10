@@ -15,7 +15,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from speech import config_bridge
 from speech.init_weights import init_weights
 
 speech_rs = pytest.importorskip("speech_rs")
@@ -58,7 +57,7 @@ def test_init_weights_round_trips_through_engine_set_weights(tmp_path: Path, sch
     boundary; mirrors `test_seam_replay.py::test_set_weights_roundtrip`'s hand-crafted-
     pattern version, but exercising a real `init_weights` pack for both schemes)."""
     _seed_tier2_spectral(tmp_path)
-    cfg = config_bridge.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
+    cfg = dict(speech_rs.load_config(str(tmp_path / "tier2_spectral.config")))
 
     packs = init_weights(cfg, "BLSTM", np.random.default_rng(123), scheme=scheme)  # type: ignore[arg-type]
     assert len(packs) == 1
@@ -78,7 +77,7 @@ def test_init_weights_pack_is_the_engine_length_at_output_subsampling_2(tmp_path
     takes 33671 + 12*48 = 34247 weights: the `init_weights` pack round-trips through
     `set_weights`, and the same pack one element short is refused naming both lengths."""
     _seed_tier2_spectral(tmp_path)
-    cfg = config_bridge.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
+    cfg = dict(speech_rs.load_config(str(tmp_path / "tier2_spectral.config")))
     cfg["BLSTM_OutputSubSampling"] = "2,1"
     cfg["BLSTM_weightsFile"] = ""  # the committed 33671 pack is short for this net.
     packs = init_weights(cfg, "BLSTM", np.random.default_rng(123))

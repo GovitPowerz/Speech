@@ -105,7 +105,7 @@ def test_tier2_spectral_hypothesis_reads_as_the_dumped_vrcts(tmp_path: Path) -> 
     `sigdur` sliver exists on the xml door, a dropped rounding is caught, and an `Other` row
     counted as speech is caught."""
     _seed_tier2_spectral(tmp_path)
-    cfg = speech_rs.parse_legacy_config((tmp_path / "tier2_spectral.config").read_text())
+    cfg = speech_rs.load_config(str(tmp_path / "tier2_spectral.config"))
     cfg["Audio_max_duration"] = "1.7654"
     with chdir(tmp_path):
         eng = speech_rs.Engine.from_map([cfg], "-m")

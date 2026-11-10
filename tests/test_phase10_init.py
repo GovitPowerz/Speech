@@ -23,7 +23,6 @@ from typing import cast
 import numpy as np
 import pytest
 import speech_rs
-from speech import config_bridge
 from speech.drivers import baseline
 from speech.init_weights import init_weights
 
@@ -197,7 +196,7 @@ def test_determinism_same_seed_is_bit_identical() -> None:
 
 
 def _tuple_a_cfg() -> dict[str, str]:
-    return config_bridge.parse_legacy_config((REF / "tupleA_1_worker_1.config").read_text())
+    return dict(speech_rs.load_config(str(REF / "tupleA_1_worker_1.config")))
 
 
 def test_blstm_config_defaults_to_the_sized_geometry() -> None:

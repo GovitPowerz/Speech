@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from speech.config_bridge import parse_legacy_config
 
 speech_rs = pytest.importorskip("speech_rs")
 
@@ -34,7 +33,7 @@ REFUSAL = "Inference_Path fast is inference-only"
 
 def _cfg(tmp_path: Path, path: str, **overlay: str) -> dict[str, str]:
     seed_sad(tmp_path, FIXTURE)
-    cfg = parse_legacy_config((tmp_path / f"{FIXTURE}.config").read_text())
+    cfg = dict(speech_rs.load_config(str(tmp_path / f"{FIXTURE}.config")))
     cfg["Inference_Path"] = path
     cfg.update(overlay)
     return cfg

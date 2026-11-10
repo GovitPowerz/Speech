@@ -26,7 +26,7 @@ from typing import cast
 
 import numpy as np
 import pytest
-from speech.config_bridge import parse_legacy_config
+import speech_rs
 from speech.drivers.train import _hyperparam_overlay, build_hyperparam_mask
 from speech.genome import (
     RunConfig,
@@ -233,7 +233,7 @@ def test_vec2struct_4c_goldens_still_byte_green(name: str) -> None:
     cfg, out, count, _param = _run(name)
     expected = cast(dict[str, int], _manifest()["counts"])[name]
     assert count == expected, f"{name}: count_param regressed ({count} != {expected})"
-    golden = parse_legacy_config((PHASE4C / f"genome_{name}.config").read_text())
+    golden = dict(speech_rs.load_config(str(PHASE4C / f"genome_{name}.config")))
     assert list(cfg.items()) == list(golden.items()), f"{name}: configStruct regressed"
     gout = _read_bin(PHASE4C / f"genome_{name}_out_param.bin")
     assert out.shape == gout.shape

@@ -81,7 +81,6 @@ pytest.importorskip("speech_rs")
 
 import speech_rs  # noqa: E402
 from speech.batching import read_listing  # noqa: E402 -- after importorskip, matching the pyo3-suite convention
-from speech.config_bridge import parse_legacy_config  # noqa: E402
 from speech.drivers import baseline as B  # noqa: E402
 from speech.drivers.spec import BaselineSpec  # noqa: E402
 from speech.engine import ChannelResults  # noqa: E402
@@ -281,7 +280,7 @@ def _derive_causal_bound(cfg: dict[str, str], rate: float) -> dict[str, float]:
 
 
 def _base_cfg(arm: _CausalArm) -> dict[str, str]:
-    return dict(parse_legacy_config(arm.base_config.read_text()))
+    return dict(speech_rs.load_config(str(arm.base_config)))
 
 
 def _inference_cfg(arm: _CausalArm, overlay: dict[str, str], *, fileslisting: str | None = None, dump_dir: Path | None = None) -> dict[str, str]:

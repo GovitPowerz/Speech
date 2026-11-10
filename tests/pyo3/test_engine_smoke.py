@@ -125,7 +125,8 @@ def test_error_chain_surfaces(tmp_path: Path) -> None:
 # in Rust and has its own dedicated coverage (`src/rust/tests/phase4c_toml.rs`,
 # `src/rust/tests/phase4a_cli.rs::convert_config_binary_end_to_end`). These
 # pyo3 tests exercise a DIFFERENT seam: `load_config` / `Engine(["*.toml"])`
-# only ever READ TOML (`toml_config::toml_to_map`) -- there is no Python-side
+# READ a `.toml` (`toml_config::toml_to_map`; since issue #150 `load_config`
+# reads a legacy `.config` too, by extension) -- there is no Python-side
 # converter and no `--convert-config` involved. So the `.toml` fixtures here are
 # HAND-WRITTEN, entirely under the `[legacy.raw]` escape hatch (every legacy key
 # is a valid mapping regardless of section, per `toml_to_map`'s raw branch --
@@ -168,7 +169,7 @@ def test_engine_runs_tier1_tdc_toml(tmp_path: Path) -> None:
     # `.toml` extension-dispatch branch inside `Engine::new` (speech-py/src/lib.rs)
     # without any conversion step.
     _seed_tier1(tmp_path)
-    config_map = speech_rs.parse_legacy_config((tmp_path / "tier1_tdc.config").read_text())
+    config_map = speech_rs.load_config(str(tmp_path / "tier1_tdc.config"))
     (tmp_path / "tier1_tdc.toml").write_text(_raw_toml(config_map))
 
     with chdir(tmp_path):
