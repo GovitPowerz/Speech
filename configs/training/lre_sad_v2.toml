@@ -63,7 +63,7 @@
 #
 # Value convention (toml_config.rs KEY_TABLE): booleans/integers native TOML;
 # floats/comma-lists/words/paths are quoted strings carrying the decimal text
-# verbatim. run_baseline flattens this via `speech_rs.load_toml_config`.
+# verbatim. run_baseline flattens this via `speech_rs.load_config`.
 
 [engine]
 algo_choice = 3

@@ -124,7 +124,7 @@ def test_error_chain_surfaces(tmp_path: Path) -> None:
 # The Rust-side conversion table (`speech::toml_config::map_to_toml`) lives only
 # in Rust and has its own dedicated coverage (`src/rust/tests/phase4c_toml.rs`,
 # `src/rust/tests/phase4a_cli.rs::convert_config_binary_end_to_end`). These
-# pyo3 tests exercise a DIFFERENT seam: `load_toml_config` / `Engine(["*.toml"])`
+# pyo3 tests exercise a DIFFERENT seam: `load_config` / `Engine(["*.toml"])`
 # only ever READ TOML (`toml_config::toml_to_map`) -- there is no Python-side
 # converter and no `--convert-config` involved. So the `.toml` fixtures here are
 # HAND-WRITTEN, entirely under the `[legacy.raw]` escape hatch (every legacy key
@@ -150,14 +150,14 @@ def _raw_toml(pairs: dict[str, str]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def test_load_toml_config_matches_legacy_parse(tmp_path: Path) -> None:
+def test_load_config_toml_matches_legacy_parse(tmp_path: Path) -> None:
     config_path = PHASE4A / "tier1_tdc.config"
     want = speech_rs.parse_legacy_config(config_path.read_text())
 
     toml_path = tmp_path / "tier1_tdc.toml"
     toml_path.write_text(_raw_toml(want))
 
-    got = speech_rs.load_toml_config(str(toml_path))
+    got = speech_rs.load_config(str(toml_path))
     assert got == want
 
 

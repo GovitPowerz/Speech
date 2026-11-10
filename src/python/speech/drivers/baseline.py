@@ -316,7 +316,7 @@ def assemble_flat_config(
     extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Overlay the runtime corpus/weight/lane keys onto the TOML-flattened base config
-    (`speech_rs.load_toml_config` output). PURE -- no engine, no I/O -- so the unit tests
+    (`speech_rs.load_config` output). PURE -- no engine, no I/O -- so the unit tests
     exercise it with a synthetic flat dict. `dict(flat)` preserves the base key order
     (byte-stable), and each overwritten key already exists in the base so its position is
     kept. `numOuterThreads` = `lanes` records the N-lane fold width in the config the engine
@@ -932,7 +932,7 @@ def prepare(spec: BaselineSpec, *, console: Console | None = None) -> PreparedRu
     # --- 2. config assembly + the Modern run + training params + seed packs ---------------
     import speech_rs  # local: the pyo3 module is only needed on the engine path
 
-    flat = {k: str(v) for k, v in speech_rs.load_toml_config(str(toml_path)).items()}
+    flat: dict[str, str] = dict(speech_rs.load_config(str(toml_path)))
     # EMPTY at the default lstm/bidirectional knobs, so `extra` -- and therefore the whole
     # config text -- is byte-identical to a pre-phase-9 run.
     extra = dict(cell_overlay(flat, spec.cell, spec.direction, prefix=arm.prefix))

@@ -249,7 +249,7 @@ def _seed_sad_lineage(dst: Path, config: str) -> dict[str, str]:
     """A SAD lineage config (ADR-0008) made runnable on the phase-4a fixture corpus: the seed
     pack the config names is drawn through `init_weights` (the engine's own layout), the
     mapping is the fixture's. Returns the parsed config; the listing is overridden at the fold."""
-    cfg = dict(speech_rs.load_toml_config(str(CONFIGS / "training" / config)))
+    cfg = dict(speech_rs.load_config(str(CONFIGS / "training" / config)))
     corpus = dst / "corpus"
     corpus.mkdir(parents=True, exist_ok=True)
     for f in ("f1.wav", "f1.stm"):

@@ -16,7 +16,6 @@ from typing import Any, cast
 
 import pytest
 import speech_rs
-from speech.config_bridge import parse_legacy_config
 from speech.drivers.train import _tail_lengths
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -31,9 +30,7 @@ CASES: dict[str, tuple[Path, int, list[int]]] = {
 
 
 def _cfg(path: Path) -> dict[str, str]:
-    if path.suffix == ".toml":
-        return cast(dict[str, str], speech_rs.load_toml_config(str(path)))
-    return parse_legacy_config(path.read_text())
+    return cast(dict[str, str], speech_rs.load_config(str(path)))
 
 
 def _engine_tail(cfg: dict[str, str], prefix: str) -> int:

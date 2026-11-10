@@ -5,7 +5,7 @@
 use anyhow::{Result, bail};
 use indexmap::IndexMap;
 
-use crate::legacy_config::parse_legacy_config;
+use crate::toml_config::load_config;
 
 /// Run mode selected by the leading CLI flag, case dropped (the legacy `mode[1]`
 /// letter carries both the mode AND its case, e.g. `T`/`M`/`I` gate the verbose
@@ -138,25 +138,6 @@ pub fn parse_cli(args: &[String]) -> Result<CliInvocation> {
         configs,
         results_json,
     })
-}
-
-/// Load a config file, dispatching on extension: `.toml` -> the Phase 4c canonical
-/// TOML config (`toml_config::toml_to_map`); anything else (incl. the legacy
-/// extensionless / `.config` convention) -> the legacy whitespace importer
-/// unchanged. Both paths collapse to the same `IndexMap<String, String>` shape.
-///
-/// `pub(crate)` (Phase 7 Task 1): `bench.rs::run_bench` reuses this exact
-/// dispatch to load its own `<config>` argument, rather than re-implementing
-/// the `.toml`-vs-legacy extension check a second time.
-pub(crate) fn load_config(path: &str) -> Result<IndexMap<String, String>> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| anyhow::anyhow!("cannot read config file '{path}': {e}"))?;
-    if path.ends_with(".toml") {
-        crate::toml_config::toml_to_map(&text)
-            .map_err(|e| anyhow::anyhow!("invalid TOML config '{path}': {e:#}"))
-    } else {
-        Ok(parse_legacy_config(&text))
-    }
 }
 
 /// Apply one `--key=val` override to `map` (legacy `:47-52`): `arg` must start
