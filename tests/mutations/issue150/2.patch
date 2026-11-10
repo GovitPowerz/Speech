@@ -1,0 +1,21 @@
+mutation: toml_config::load_config drops its .toml branch: every config goes through the legacy importer
+catcher: CAUGHT cargo --lib toml_config::tests::load_config_dispatches_on_the_extension
+catcher: CAUGHT pytest tests/test_issue150_toml_init.py::test_init_reads_a_toml_config[lid_blstm]
+
+diff --git a/src/rust/src/toml_config.rs b/src/rust/src/toml_config.rs
+index b254156..785919c 100644
+--- a/src/rust/src/toml_config.rs
++++ b/src/rust/src/toml_config.rs
+@@ -460,11 +460,7 @@ pub fn toml_to_map(text: &str) -> Result<IndexMap<String, String>> {
+ pub fn load_config(path: &str) -> Result<IndexMap<String, String>> {
+     let text = std::fs::read_to_string(path)
+         .map_err(|e| anyhow!("cannot read config file '{path}': {e}"))?;
+-    if path.ends_with(".toml") {
+-        toml_to_map(&text).map_err(|e| anyhow!("invalid TOML config '{path}': {e:#}"))
+-    } else {
+-        Ok(parse_legacy_config(&text))
+-    }
++    Ok(parse_legacy_config(&text))
+ }
+ 
+ /// Render a flat legacy `KEY -> value` map as a canonical TOML document: every key

@@ -21,7 +21,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from speech.batching import read_listing
-from speech.config_bridge import parse_legacy_config, read_flag
+from speech.config_bridge import read_flag
 from speech.drivers.checkpoint import Checkpoint, EpochRecord, ModernTrainResult, net_names
 from speech.genome import LidNetSpec, RunConfig
 from speech.init_weights import Scheme
@@ -168,7 +168,11 @@ class RunState(BaseModel):
 
     @classmethod
     def from_config(cls, config: Path, out_dir: Path) -> RunState:
-        return cls.from_parsed(parse_legacy_config(Path(config).read_text()), config, out_dir)
+        """The state of a config FILE, `.toml` or legacy `.config`, read through the engine's
+        one loader (`speech_rs.load_config`, issue #150)."""
+        import speech_rs  # local: `import speech` stays free of the extension for the modules that never touch it
+
+        return cls.from_parsed(dict(speech_rs.load_config(str(config))), config, out_dir)
 
     @classmethod
     def from_parsed(cls, cfg: dict[str, str], config: Path, out_dir: Path) -> RunState:
