@@ -2869,7 +2869,7 @@ mod input_delta_gate_tests {
     const CLASSES: usize = 2;
     const T: usize = 12;
     /// The cells the gate covers.
-    const CELLS: [&str; 2] = ["lstm", "slstm"];
+    const CELLS: [&str; 5] = ["lstm", "slstm", "mamba", "cfc", "transformer"];
 
     /// A two-layer stack (so one cell is the last backward layer and one is not) over
     /// `cell`, backprop on, with layer-0 sub-sampling `sub`.

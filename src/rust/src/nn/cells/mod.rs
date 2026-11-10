@@ -148,22 +148,28 @@ impl CellLayer {
     ///
     /// An INHERENT method like `set_retain_cache`, for the same reason: the `Layer`
     /// trait stays the ten methods the seam defined and `Network<L>` never learns the
-    /// gate exists. The Mamba, CfC and transformer arms are no-ops for now, which is
-    /// the safe direction (always compute).
+    /// gate exists. What a gated cell saves differs: the LSTM and the sLSTM skip one
+    /// whole-sequence product, Mamba and the transformer the adapter back-projection,
+    /// and the CfC only a copy, because its input deltas come out of the same backbone
+    /// product as its recurrent carry.
     pub fn set_input_deltas(&mut self, on: bool) {
         match self {
             CellLayer::Lstm(l) => l.set_input_deltas(on),
             CellLayer::Slstm(l) => l.set_input_deltas(on),
-            CellLayer::Mamba(_) | CellLayer::Cfc(_) | CellLayer::Transformer(_) => {}
+            CellLayer::Mamba(l) => l.set_input_deltas(on),
+            CellLayer::Cfc(l) => l.set_input_deltas(on),
+            CellLayer::Transformer(l) => l.set_input_deltas(on),
         }
     }
 
-    /// The gate's state; `true` for a cell whose arm above is a no-op.
+    /// The gate's state.
     pub fn input_deltas(&self) -> bool {
         match self {
             CellLayer::Lstm(l) => l.input_deltas(),
             CellLayer::Slstm(l) => l.input_deltas(),
-            CellLayer::Mamba(_) | CellLayer::Cfc(_) | CellLayer::Transformer(_) => true,
+            CellLayer::Mamba(l) => l.input_deltas(),
+            CellLayer::Cfc(l) => l.input_deltas(),
+            CellLayer::Transformer(l) => l.input_deltas(),
         }
     }
 
@@ -246,13 +252,16 @@ impl Layer for CellLayer {
                 last_layer,
             ),
             // The CfC inherent backward takes only what it consumes (phase-10 T3
-            // rider I-1): `input`/`output`/`last_layer` are not arguments to narrow
-            // away here, they simply do not exist on that signature.
-            CellLayer::Cfc(l) => CfcLayer::feed_backward(l, deltas, inv_sub_sampling_ratio),
+            // rider I-1): `input`/`output` are not arguments to narrow away here, they
+            // simply do not exist on that signature. `last_layer` does since issue
+            // #146: the input-delta gate reads it.
+            CellLayer::Cfc(l) => {
+                CfcLayer::feed_backward(l, deltas, inv_sub_sampling_ratio, last_layer)
+            }
             // Same shape as the CfC arm and for the same reason (phase-11 S1.5): the
             // transformer backward reads only its own forward cache.
             CellLayer::Transformer(l) => {
-                TransformerLayer::feed_backward(l, deltas, inv_sub_sampling_ratio)
+                TransformerLayer::feed_backward(l, deltas, inv_sub_sampling_ratio, last_layer)
             }
         }
     }
@@ -290,10 +299,15 @@ impl Layer for CellLayer {
                 inv_sub_sampling_ratio,
                 last_layer,
             ),
-            CellLayer::Cfc(l) => CfcLayer::feed_backward_reverse(l, deltas, inv_sub_sampling_ratio),
-            CellLayer::Transformer(l) => {
-                TransformerLayer::feed_backward_reverse(l, deltas, inv_sub_sampling_ratio)
+            CellLayer::Cfc(l) => {
+                CfcLayer::feed_backward_reverse(l, deltas, inv_sub_sampling_ratio, last_layer)
             }
+            CellLayer::Transformer(l) => TransformerLayer::feed_backward_reverse(
+                l,
+                deltas,
+                inv_sub_sampling_ratio,
+                last_layer,
+            ),
         }
     }
 
@@ -384,11 +398,34 @@ mod tests {
         })
     }
 
-    /// Every cell the input-delta gate covers (issue #146), bare, at `I -> O`.
-    fn gated_cells() -> Vec<(&'static str, CellLayer)> {
+    /// Every cell the input-delta gate covers (issue #146), bare, with its input
+    /// width: `I -> O`, plus a Mamba at `O -> O`, the one shape with no width adapter
+    /// (its input deltas are then a copy, a separate branch).
+    fn gated_cells() -> Vec<(&'static str, CellLayer, usize)> {
+        let transformer = crate::nn::blstm::TransformerParams {
+            window: 3,
+            heads: 1,
+            d_ff: 4,
+        };
         vec![
-            ("lstm", CellLayer::Lstm(bare())),
-            ("slstm", CellLayer::Slstm(SlstmLayer::new(I, O))),
+            ("lstm", CellLayer::Lstm(bare()), I),
+            ("slstm", CellLayer::Slstm(SlstmLayer::new(I, O)), I),
+            (
+                "mamba",
+                CellLayer::Mamba(MambaLayer::new(I, O, 2, 2, 2, 0)),
+                I,
+            ),
+            (
+                "mamba, no adapter",
+                CellLayer::Mamba(MambaLayer::new(O, O, 2, 2, 2, 0)),
+                O,
+            ),
+            ("cfc", CellLayer::Cfc(CfcLayer::new(I, O, 4, 2)), I),
+            (
+                "transformer",
+                CellLayer::Transformer(TransformerLayer::new(I, O, &transformer)),
+                I,
+            ),
         ]
     }
 
@@ -402,7 +439,7 @@ mod tests {
     /// three runs.
     #[test]
     fn a_gated_cell_skips_its_input_deltas_only_as_the_last_backward_layer() {
-        for (name, proto) in gated_cells() {
+        for (name, proto, width) in gated_cells() {
             for reverse in [false, true] {
                 let run = |gate: bool, last_layer: bool| {
                     let mut cell = proto.clone();
@@ -412,7 +449,7 @@ mod tests {
                     cell.set_input_deltas(gate);
                     assert_eq!(cell.input_deltas(), gate, "{name}: the gate reads back");
 
-                    let input = seq(T, I, 0.4);
+                    let input = seq(T, width, 0.4);
                     let deltas = seq(T, O, -0.2);
                     let mut out = Array2::zeros((T, O));
                     let dpl = if reverse {
@@ -435,7 +472,7 @@ mod tests {
                 let label = format!("{name} (reverse={reverse})");
 
                 let (on, rows_on) = run(true, true);
-                assert_eq!(on.dim(), (T, I), "{label}: ungated deltas are T x I");
+                assert_eq!(on.dim(), (T, width), "{label}: ungated deltas are T x in");
                 assert!(on.iter().any(|v| *v != 0.0), "{label}: vacuous deltas");
 
                 let (off_last, rows_off_last) = run(false, true);

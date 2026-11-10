@@ -548,6 +548,12 @@ pub struct MambaLayer {
 
     derivatives: MambaWeights,
     nb_of_seq_fed_backward: i64,
+
+    /// The input-delta gate (issue #146, port-only): `true`, the default, computes the
+    /// deltas propagated to the previous layer. `false` skips them when this layer
+    /// runs as the container's LAST backward layer. See
+    /// [`super::CellLayer::set_input_deltas`].
+    input_deltas: bool,
 }
 
 impl MambaLayer {
@@ -599,7 +605,19 @@ impl MambaLayer {
             cache: MambaCache::default(),
             retain_cache: true,
             nb_of_seq_fed_backward: 0,
+            input_deltas: true,
         }
+    }
+
+    /// Switch the input-delta gate (see the field). Off, a `feed_backward` called
+    /// with `last_layer` returns a `0 x 0` array and every weight derivative it
+    /// accumulates is unchanged.
+    pub fn set_input_deltas(&mut self, on: bool) {
+        self.input_deltas = on;
+    }
+
+    pub fn input_deltas(&self) -> bool {
+        self.input_deltas
     }
 
     /// Phase 10 spec S7: turn the backward cache retention off (inference-only) or back on.
@@ -1041,6 +1059,10 @@ impl MambaLayer {
     /// out of the retained layer output), every state this backward needs is in the
     /// forward cache. The parameter stays for `Layer` signature parity.
     ///
+    /// `last_layer` is read for the input-delta gate alone (issue #146): with the gate
+    /// off, the last backward layer skips the adapter back-projection (or the copy,
+    /// when there is no adapter) and returns a `0 x 0` array.
+    ///
     /// `needless_range_loop` is allowed for the same reason as the forward: the
     /// ascending index order IS the contract.
     #[allow(clippy::needless_range_loop)]
@@ -1052,7 +1074,8 @@ impl MambaLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let _ = (output, last_layer);
+        let _ = output;
+        let skip_input_deltas = last_layer && !self.input_deltas;
         // Spec S7: an inference-only layer never filled the cache, so there is nothing to
         // fold. Bail LOUDLY rather than accumulate garbage -- a silently wrong gradient is
         // the one failure mode this whole class of change must never produce.
@@ -1217,7 +1240,11 @@ impl MambaLayer {
         // --- input projection, RMSNorm, adapter (forward time) ----------------
         let mut dw = vec![0.0f64; 2 * di];
         let mut dxn = vec![0.0f64; dm];
-        let mut dpl = Array2::<f64>::zeros((t_len, isz));
+        let mut dpl = if skip_input_deltas {
+            Array2::zeros((0, 0))
+        } else {
+            Array2::<f64>::zeros((t_len, isz))
+        };
         for t in 0..t_len {
             for c in 0..di {
                 dw[c] = du[[t, c]];
@@ -1244,22 +1271,32 @@ impl MambaLayer {
                 d_xa[[t, m]] += dxn[m] * w.norm_gain[[0, m]] * r - coef * ca.x_adapted[[t, m]];
             }
 
-            // Width adapter (or the identity when in == out).
+            // Width adapter (or the identity when in == out). The adapter's own
+            // derivatives and the deltas it propagates are separate accumulators, each
+            // ascending in `m`; the second is skipped under the input-delta gate.
             if self.has_adapter {
                 for m in 0..dm {
                     acc.adapter_b[[0, m]] += d_xa[[t, m]];
                 }
                 for k in 0..isz {
-                    let mut s = 0.0;
                     for m in 0..dm {
-                        s += w.adapter_w[[k, m]] * d_xa[[t, m]];
                         acc.adapter_w[[k, m]] += recon_input[[t, k]] * d_xa[[t, m]];
                     }
-                    dpl[[t, k]] = s;
                 }
-            } else {
-                for k in 0..isz {
-                    dpl[[t, k]] = d_xa[[t, k]];
+            }
+            if !skip_input_deltas {
+                if self.has_adapter {
+                    for k in 0..isz {
+                        let mut s = 0.0;
+                        for m in 0..dm {
+                            s += w.adapter_w[[k, m]] * d_xa[[t, m]];
+                        }
+                        dpl[[t, k]] = s;
+                    }
+                } else {
+                    for k in 0..isz {
+                        dpl[[t, k]] = d_xa[[t, k]];
+                    }
                 }
             }
         }
