@@ -100,12 +100,12 @@ def bench(args: argparse.Namespace) -> list[Path]:
     would make of every record (a dirty tree, a label naming another recipe) come first."""
     if not args.allow_dirty and git_state()[1]:
         raise SystemExit("the tree is dirty, so `add` would refuse every record; commit first or pass --allow-dirty")
+    # A leg is its staging, its paths and its environment; the label alone would pool a
+    # differently staged run into the leg's cell.
+    if args.leg is None and args.label in LEGS:
+        raise SystemExit(f"label {args.label!r} names a staged leg; run it with --leg {args.label}")
     # A leg names the paths it runs: a gradient-fold leg is exact-only (the fast tree refuses a
     # training-shaped config, issue #110), so `both` means the leg's own paths.
-    if args.leg is None and args.label in LEGS:
-        # A leg is its staging, its paths and its environment; the label alone would pool a
-        # differently staged run into the leg's cell.
-        raise SystemExit(f"label {args.label!r} names a staged leg; run it with --leg {args.label}")
     allowed = LEGS[args.leg].paths if args.leg is not None else BOTH_PATHS
     paths = allowed if args.path == "both" else (args.path,)
     if not set(paths) <= set(allowed):

@@ -549,8 +549,9 @@ latest records; earlier ones stay in the ledger.
 
 The first two legs run with `MallocLargeCache=0`. macOS libmalloc keeps freed large blocks
 resident, so over many files the default `maxrss_mib` reads the allocator's cache of per-file
-transients rather than live memory. The third leg is the one-lane fold with the cache left on:
-the gap between its row and the first is that cache, and its wall shows the switch costs none.
+transients rather than live memory. The third leg is the one-lane fold with the cache set on by
+name (`MallocLargeCache=1`, libmalloc's default, so an exported `0` cannot turn it off): the gap
+between its row and the first is that cache, and its wall shows the switch costs none.
 
 <!-- ledger:table fold_grad_bench -->
 | leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |
@@ -4304,6 +4305,10 @@ Deviations from the grilling outcome, all measured or found during the work:
   byte-identical.
 - From the review: a lane's panic is re-raised with its own payload (the scope's implicit join
   raised a generic one), and a staged leg's label is refused on `bench --config`.
+- From the second review: a failed fold resets the result matrix with the channel results (it
+  kept the fold before's rows), the cache-on leg sets the cache by name, the prose host is the
+  last to record a Phase 7 leg (a fold record from another machine emptied the check), and a
+  fold leg stages under a fresh `run-*` directory, so a reused `--stage-dir` no longer fails.
 
 ### The final tree, green
 

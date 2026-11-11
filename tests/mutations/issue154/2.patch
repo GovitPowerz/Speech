@@ -2,10 +2,10 @@ mutation: fold_file_derivs adds the first file's matrices to zeros instead of mo
 catcher: CAUGHT cargo --lib engine::corpus_processor::tests::fold_moves_the_first_file_in_and_adds_later_files_in_place
 
 diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
-index fd29815..1f01217 100644
+index aa3c8d3..abd4851 100644
 --- a/src/rust/src/engine/corpus_processor.rs
 +++ b/src/rust/src/engine/corpus_processor.rs
-@@ -1217,7 +1217,12 @@ fn fold_file_derivs(acc: &mut ConfDerivs, conf: usize, file: Vec<Array2<f64>>) {
+@@ -1224,7 +1224,12 @@ fn fold_file_derivs(acc: &mut ConfDerivs, conf: usize, file: Vec<Array2<f64>>) {
              }
          }
          _ => {

@@ -3,9 +3,10 @@
 A table marker cannot own a number inside a sentence, so the README and ARCHITECTURE sentences
 that quote the Phase 7 speedups and the SAD peak RSS are registered here: file, a regex with one
 capture group per quoted number, and the derived values they must equal. The values come from
-the latest bench pair per leg on the most recently recording host. A one-decimal claim ("SAD
-4.6x") is the lower of that task's two legs at one decimal (the conservative reading of "runs
-4.6x faster"); a range ("4.58-4.60x") is min-max over the legs at two decimals, collapsing to one
+the latest bench pair per leg on the host that last recorded a Phase 7 leg (a gradient-fold or
+`--config` record from another machine does not move it). A one-decimal claim ("SAD 4.6x") is
+the lower of that task's two legs at one decimal (the conservative reading of "runs 4.6x
+faster"); a range ("4.58-4.60x") is min-max over the legs at two decimals, collapsing to one
 value when both legs round the same. The SAD peak RSS (issue #41) is the `phase7_60s` cells'
 `maxrss_mean` on that host, fast and exact, at one decimal in the README and rounded to the whole
 MiB in ARCHITECTURE (Python's format rounding, half to even on the binary float); `maxrss_mb`
@@ -48,7 +49,9 @@ QUOTES: tuple[Quote, ...] = (
 def derived(records: list[Record]) -> dict[str, str]:
     """The quotable values, or an empty dict when a leg has no bench pair yet."""
     cells = bench_cells(records)
-    host = latest_host(cells)
+    # The host is the one that last recorded a Phase 7 leg: a gradient-fold or `--config` record
+    # from another machine says nothing about the quoted pair.
+    host = latest_host(c for c in cells if c.label in (*SAD_LEGS, *LID_LEGS))
     ratio = speedups(cells)
     out: dict[str, str] = {}
     for task, legs in (("sad", SAD_LEGS), ("lid", LID_LEGS)):

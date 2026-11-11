@@ -15,12 +15,13 @@ directory (the first `FOLD_FILES` rows of the seeded train split, the 120 s cap 
 protocol, the from-scratch seed pack) and `FoldRun` supplies the gradient overlay (backprop on,
 `Epochs 0`) with its path keys resolved, so the staged config is the map the seam gets. They run
 with `LIVE_PEAK_ENV`, so their `maxrss_mb` is the fold's live peak; a third leg is the one-lane
-fold with the allocator's cache left on, the record of what that switch removes.
+fold with the allocator's cache set on (`LARGE_CACHE_ENV`), the record of what that switch removes.
 """
 
 from __future__ import annotations
 
 import shutil
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -135,12 +136,15 @@ FOLD_AUDIO_CAP_S = 120.0
 #: against `fold_grad_sad_n1` is the measured gap). A multi-file leg switches the cache off. The
 #: variable is ignored off macOS.
 LIVE_PEAK_ENV = (("MallocLargeCache", "0"),)
+#: The cache on by name (`1` is libmalloc's default), so a caller's exported `0` cannot turn it off.
+LARGE_CACHE_ENV = (("MallocLargeCache", "1"),)
 
 
 def stage_grad_fold(stage_dir: Path, corpus_root: Path, *, lanes: int) -> Path:
     """One exact gradient fold of the SAD v1 arm over `FOLD_FILES` train files at `lanes` lanes
-    (issue #154): `prepare` under `stage_dir/run`, then the `FoldRun` gradient map, written as
-    the config the binary reads. The seed pack is the launcher's own from-scratch init (seed 0)."""
+    (issue #154): `prepare` under a fresh `stage_dir/run-*` (it refuses a directory holding a run,
+    so a reused stage directory gets a new one), then the `FoldRun` gradient map, written as the
+    config the binary reads. The seed pack is the launcher's own from-scratch init (seed 0)."""
     from rich.console import Console  # local: the launcher's imports stay off the ledger's import path
 
     from speech.drivers.baseline import prepare
@@ -150,7 +154,7 @@ def stage_grad_fold(stage_dir: Path, corpus_root: Path, *, lanes: int) -> Path:
     spec = BaselineSpec(
         arm="sad",
         corpus_root=corpus_root,
-        out_dir=stage_dir / "run",
+        out_dir=Path(tempfile.mkdtemp(prefix="run-", dir=stage_dir)),
         lanes=lanes,
         subset=FOLD_FILES,
         valid_size=0,
@@ -173,6 +177,7 @@ _FOLD = (
         "v1",
         partial(stage_grad_fold, lanes=1),
         ("exact",),
+        LARGE_CACHE_ENV,
     ),
 )
 FOLD_LEGS = tuple(leg.label for leg in _FOLD)

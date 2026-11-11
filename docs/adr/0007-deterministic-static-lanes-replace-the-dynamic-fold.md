@@ -49,7 +49,7 @@ once `N` reaches the pool size, and `rayon` left the workspace with its one use 
 
 One behaviour changed: a failed fold reports the first failing file in ascending order (it was
 the lowest failing lane's; the two agree at `N = 1`), the other lanes stop at their next send,
-and neither the results nor the seam stash is committed. A lane's panic is still re-raised
+and neither the results (the result matrix is reset with them) nor the seam stash is committed. A lane's panic is still re-raised
 with its own payload, the fold joining each lane itself. Nothing else did: the assignment of
 files to lanes, the per-lane bag clone and its state chain, the order of the sum and every
 summed value, pinned at two and three lanes on the commit before the change

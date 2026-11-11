@@ -520,8 +520,14 @@ impl CorpusProcessor {
             );
         }
         // Committed only on success: a failed fold leaves `results` empty (cleared
-        // above) and the stash as it was.
-        let (results, derivs) = folded?;
+        // above), the result matrix empty with it, and the stash as it was.
+        let (results, derivs) = match folded {
+            Ok(fold) => fold,
+            Err(e) => {
+                self.results_e = Array2::zeros((0, 0));
+                return Err(e);
+            }
+        };
         self.results = results;
 
         // Test-observation hook (Task 10): config-0's RAW folded derivative
@@ -892,7 +898,8 @@ impl CorpusProcessor {
     /// Contract: EMPTY (`0x0`) until the first completed `run()` -- populated
     /// only by [`Self::transform_results`], which fires at the end of
     /// `run_solo`/`train`/`grad_check_capped`'s internal epoch runs. Reading it
-    /// before any run observes the ctor's `Array2::zeros((0, 0))` seed.
+    /// before any run observes the ctor's `Array2::zeros((0, 0))` seed; a failed
+    /// fold resets it to that, as it leaves [`Self::channel_results`] empty.
     pub fn results_matrix(&self) -> &Array2<f64> {
         &self.results_e
     }

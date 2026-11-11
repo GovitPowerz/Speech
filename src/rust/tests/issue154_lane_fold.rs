@@ -222,8 +222,9 @@ fn a_failed_fold_names_the_first_failing_file_and_keeps_no_results() {
     );
 }
 
-/// A fold that fails after one that succeeded commits nothing: no result, and the seam
-/// still reads the gradient the successful fold stashed. The wavs are copies, so one can
+/// A fold that fails after one that succeeded commits nothing: no result (neither the
+/// channel results nor the result matrix), and the seam still reads the gradient the
+/// successful fold stashed. The wavs are copies, so one can
 /// go missing between the two runs.
 #[test]
 fn a_failed_fold_leaves_the_stash_of_the_fold_before_it() {
@@ -243,6 +244,11 @@ fn a_failed_fold_leaves_the_stash_of_the_fold_before_it() {
     std::fs::remove_file(wavs.join("f2.wav")).unwrap();
     assert!(cp.run().is_err());
     assert!(cp.channel_results().is_empty());
+    assert_eq!(
+        cp.results_matrix().dim(),
+        (0, 0),
+        "the result matrix goes with the results, not left at the fold before"
+    );
     let kept = cp.weights_derivatives(0);
     assert_eq!(kept.len(), stashed.len());
     common::assert_bits_eq(&kept[0], &stashed[0], "the stash after a failed fold");

@@ -692,7 +692,8 @@ def test_fold_legs_are_exact_only_and_render_in_their_own_table() -> None:
     assert FOLD_LEGS == ("fold_grad_sad_n1", "fold_grad_sad_n4", "fold_grad_sad_n1_cached")
     assert all(LEGS[label].paths == ("exact",) and LEGS[label].lineage == "v1" for label in FOLD_LEGS)
     # The first two read the live peak; the third is the same one-lane fold with the cache on.
-    assert [LEGS[label].env for label in FOLD_LEGS] == [(("MallocLargeCache", "0"),), (("MallocLargeCache", "0"),), ()]
+    # The third sets the cache on by name, so an exported `MallocLargeCache=0` cannot turn it off.
+    assert [LEGS[label].env for label in FOLD_LEGS] == [(("MallocLargeCache", "0"),), (("MallocLargeCache", "0"),), (("MallocLargeCache", "1"),)]
     assert LEGS["phase7_60s"].env == ()
     empty = TABLES["fold_grad_bench"]([])
     assert empty[0] == "| leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |"
@@ -748,6 +749,9 @@ def test_grad_fold_leg_stages_the_map_a_training_step_runs(tmp_path: Path) -> No
     for key in ("fileslisting", "language2classmapping", "BLSTM_weightsFile"):
         assert Path(conf[key]).is_absolute() and Path(conf[key]).is_file(), key
     assert len(Path(conf["fileslisting"]).read_text().splitlines()) == FOLD_FILES
+    # A reused stage directory stages again: `prepare` gets a fresh run directory each time.
+    again = LEGS["fold_grad_sad_n1"].stage(tmp_path, CORPUS_ROOT)
+    assert lanes_of(again) == 1 and Path(again.read_text().split("fileslisting ", 1)[1].splitlines()[0]).is_file()
 
 
 def test_bench_cells_pool_the_processes_of_the_latest_sha_only() -> None:
@@ -789,6 +793,13 @@ def test_prose_derived_values_follow_the_stated_rounding() -> None:
     )  # type: ignore[arg-type]
     assert same["sad_range"] == "3.00" and same["lid_range"] == "3.00"
     assert prose.derived([bench_record()]) == {}  # type: ignore[list-item]
+
+
+def test_prose_host_is_the_last_to_record_a_phase7_leg() -> None:
+    """A later gradient-fold record from another machine does not move the quoted pair's host."""
+    other = Host(chip="Apple M1", arch="arm64", cores=8, os="Darwin 24.0.0")
+    fold = bench_record("fold_grad_sad_n1", "exact", 80.0, at=T0.replace(day=28), host=other)
+    assert prose.derived([*_four_legs(), fold]) == prose.derived(_four_legs()) != {}  # type: ignore[list-item]
 
 
 def test_prose_derives_the_sad_60s_peak_rss_from_the_maxrss_means() -> None:
