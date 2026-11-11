@@ -2080,6 +2080,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   item 6 catcher, `phase4b_corpus_lid.rs::twin_train_ns_costlid_gate_live`: one site, one edit.
   Item 1's catch is about one ULP through `assert_oracle_eq`, so it holds only where the
   comparator runs strict (the Apple-libm oracle host; the patch declares `requires: oracle-libm`, #78).
+  Issue #154 removed the sort item 1 reversed (the fold takes each lane's files in as they
+  complete), so its patch now reverses the lane's walk instead (`corpus.item(j)` ->
+  `corpus.item(nb_files - 1 - j)`), same catchers; the lane order above one lane is `issue154/1`.
 
 - **[phase4a] Phase 4b test backlog (from the 4a final review) -- Task 10 CLOSED all three items.**
   (1) CLOSED: a crafted best-cost TIE golden (epoch B's cost BYTE-EQUAL to epoch A's, not merely

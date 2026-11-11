@@ -562,6 +562,10 @@ the gap between its row and the first is that cache, and its wall shows the swit
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->
 
+Before the fold change (2026-11-11, three processes per leg on `f477670`, whose fold is the
+buffered one; the records stay in the ledger): 80.37 s and 149.8 MiB at one lane, 21.61 s and
+354.5 MiB at four. The section "Issue #154" below reads the pair.
+
 ### Criterion micro-benches
 
 `cargo bench` (`src/rust/benches/kernels.rs`) times three exact kernels and, since Task 7, their
@@ -4217,3 +4221,96 @@ with the host awake, the seven pass in 18 to 72 s each. `run.py --check`: 198 mu
 problems. The close run `--changed-since origin/main`: 29 patches, 162 verdicts, 0 differ from
 expected (`issue146`'s 12 among them, and the re-targeted `phase10/cfc-backward-arm`). No ledger
 record: the criterion rows are prose, like the Phase 7 kernel table.
+
+## Issue #154 -- the corpus fold runs as files complete: the bench and the mutation battery
+
+**Live:** `tests/mutations/issue154/` (4 patches, 6 verdicts). Two older patches are re-targeted,
+same catchers, same verdicts: `phase4a/5` on moved context, and `phase4a/1`, which reversed the
+fold's sort (removed here) and now walks and folds the corpus from its last file.
+
+Branch `feature/issue-154-streaming-corpus-fold`, off `main@2b80e26`. A gradient fold kept every
+file's per-net `N x 2` derivative matrices until its last lane had finished, then sorted and
+summed them through a fresh array per file per net, and cloned the result into the seam stash.
+Each lane now sends its files down one bounded channel and the fold receives from lane `j mod N`
+for `j = 0, 1, 2, ...`, which is the ascending order with no buffer and no sort; the per-file
+step is one function, `fold_file_derivs` (the first file moved in, later files added in place),
+and the fold is moved into the stash. The lanes are scoped std threads and `rayon` is gone.
+ADR-0007's amendment is the decision; ADR-0002 records the fold function as the stepwise hoist.
+
+### The gradient-fold legs
+
+One exact gradient fold of the SAD v1 arm over 128 train files (13,920 s of audio), three fresh
+processes per leg, Apple M4 Pro, `MallocLargeCache=0`. Both columns are ledger records; the
+rendered table in "The exact gradient fold" above holds the after column.
+
+| leg | before (`f477670`): wall, peak RSS | after (`0526023`): wall, peak RSS | peak RSS change | wall change |
+|---|---|---|---|---|
+| one lane | 80.37 s, 149.8 MiB | 78.47 s, 78.7 MiB | -71.1 MiB (-47.5%) | -2.4% |
+| four lanes | 21.61 s, 354.5 MiB | 21.79 s, 287.8 MiB | -66.7 MiB (-18.8%) | +0.8% |
+
+The issue sized the buffered matrices at 0.51 MiB per file, 65.8 MiB over 128 files. The
+acceptance set at the grilling holds: the peak drops at both lane counts, and the four-lane wall
+is inside the 10% bar past which the channel capacity (1) was to be revisited.
+
+The third leg is the one-lane fold with the allocator cache left on: 77.69 s and 2274.9 MiB.
+macOS libmalloc keeps freed large blocks resident, so on a multi-file run the default
+`maxrss_mb` reads that cache and not live memory, which is why the two legs above switch it off
+(a deviation from the grilling outcome, which did not know it). The wall is the same either way.
+
+### The proof that no number moved
+
+- The committed goldens are byte-green. `lanes_n1_equals_sequential` and
+  `fold_order_ascending_golden` pass with their bodies unedited (the latter's doc comment now
+  names the successor of the sort it describes).
+- **Order pins.** No committed test ran the engine fold above one lane. Config 0's folded
+  `N x 2` and the results matrix of one gradient fold over a six-row listing (the three phase4a
+  files twice, six listing weights), at two and at three lanes, were written on `1e7ad3c`, whose
+  fold is `main`'s, and are green unmodified after the change
+  (`src/rust/tests/issue154_lane_fold.rs` against `tests/reference_data/issue154/`). Measured
+  when they were written: the two folds are bit-identical to each other on this one-rate corpus.
+  That is recorded in the test file and not asserted (ADR-0007 does not promise it).
+- **Seed test.** `fold_moves_the_first_file_in_and_adds_later_files_in_place`: a `-0.0` in the
+  first file keeps its sign bit.
+- **Bound pin.** `the_fold_keeps_a_bounded_number_of_files_alive`: three lanes over eighteen
+  files with each fold delayed 100 ms, the `test-support` high-water mark of entries produced and
+  not yet folded in stays at or under 7 (`2N + 1`).
+- **Failed fold.** `a_failed_fold_names_the_first_failing_file_and_keeps_no_results` was red on
+  the buffered fold, which named the lowest failing lane's file;
+  `a_failed_fold_leaves_the_stash_of_the_fold_before_it` pins the stash.
+
+### What the battery measured
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | the fold receives the lanes in descending order within a round | the two order pins (CAUGHT); `phase4b_backlog::fold_order_ascending_golden` (MISSED) | CAUGHT x2: `n = 2 folded derivatives: mismatch at (0, 0)` / `n = 3 folded derivatives: mismatch at (4, 0)`; MISSED as declared (a no-op at one lane) |
+| 2 | `fold_file_derivs` adds the first file to zeros | the seed test | CAUGHT: `the first file is moved in: a negative zero keeps its sign` |
+| 3 | the lane channels hold every file | the bound pin | CAUGHT: `18 entries alive at once, the bound is 7` |
+| 4 | `grad_check_capped` reads the stash after its sweep | `phase4a_gradcheck_golden::tier2_gradcheck_golden` | CAUGHT: `weight 0 backprop` |
+| `phase4a/1` | the corpus walked and folded from its last file | `phase4a_train_golden::tier2_train_epoch_weights_golden` (MISSED); `fold_order_ascending_golden` (CAUGHT) | as declared; CAUGHT at one ULP, `mismatch at (3, 0)` |
+
+Row 1 needs no `requires: oracle-libm`: its derivative catch is one ULP, but the mutation also
+keys each result to the wrong file, and under `SPEECH_ORACLE_LIBM=ulp` both pins fail on the
+results matrix (`results matrix[0,3]`).
+
+Deviations from the grilling outcome, all measured or found during the work:
+
+- `phase4a/1` is re-targeted, not retired. The outcome held that the order is structural at one
+  lane; the lane's own walk can still be reversed, so the one-lane golden keeps its catch and the
+  totals are 202 patches and 658 verdicts, not 201 and 656.
+- The bound pin runs eighteen files and a 100 ms delay, not the six-row listing and a few
+  milliseconds: at three lanes the bound is 7, which six files cannot exceed.
+- The fold legs run with `MallocLargeCache=0`, and a third leg records the cache.
+- No lockfile commit: `cargo update --aggressive` and the `ndarray` re-pin left `Cargo.lock`
+  byte-identical.
+- From the review: a lane's panic is re-raised with its own payload (the scope's implicit join
+  raised a generic one), and a staged leg's label is refused on `bench --config`.
+
+### The final tree, green
+
+`cargo test --release --no-fail-fast --features test-support` on the final code: 1415 passed, 4
+ignored, 0 failed (the #146 close's 1401 plus the fold's unit test and the new test binary's
+thirteen, five tests and the eight shared comparator tests; the fourth ignored test is the pin
+writer). `uv run pytest tests -q -m "not slow"`: 1210 passed, 1 skipped (six more, the ledger
+tests of the new legs and table). `uv run pytest tests/pyo3 -q`: 296. `run.py --check`:
+202 mutations, 0 problems. The close run `--changed-since origin/main`: 11 patches, 27 verdicts,
+0 differ from expected once `phase4a/1` was re-measured on its new mutation.

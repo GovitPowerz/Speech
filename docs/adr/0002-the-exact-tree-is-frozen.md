@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135), 2026-11-09 (issue #140), 2026-11-10 (issue #146)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135), 2026-11-09 (issue #140), 2026-11-10 (issue #146), 2026-11-11 (issue #154)
 
 ## Context
 
@@ -155,6 +155,20 @@ eight net-level weight-derivative pins measured on the pre-gate commit
 it, and by a permanent differential leg (the same net with the gate back on folds
 `to_bits`-identical weight derivatives, five cells x two directions x stack sub-sampling `1,1`,
 `4,1` and `1,4`, the last running the gated layer at an inverse sub-sampling ratio of 4); the gate's state is asserted, since no golden can see a lost skip, issue #146.
+The stepwise hoist a fourth time, 2026-11-11: the corpus fold's per-file step -- the first
+file's matrices moved in, every later file added -- written in `run_epoch` and again in the
+fold-order probe, is ONE function, `engine/corpus_processor.rs::fold_file_derivs`, with the add
+in place (`+=`, the same per-element f64 add as the `&a + &b` it replaces) and `run_epoch`'s
+`derivs` parameter gone: the fold ends in the seam stash by move, and the gradient check clones
+the stash once after its analytic run. The fold then runs as files complete, behind one bounded
+channel per lane, which is a scheduling change ADR-0007 owns (its #154 amendment), with one
+contract change on a failed fold: the error is the first failing file's in ascending order,
+where it was the lowest failing lane's. Proven by the goldens byte-green with
+`lanes_n1_equals_sequential` and `fold_order_ascending_golden` passing with their bodies
+unmodified, and by pins
+of the fold at two and three lanes measured on the pre-change commit
+(`issue154_lane_fold.rs` against `tests/reference_data/issue154/`) and green unchanged after
+it, issue #154.
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),
