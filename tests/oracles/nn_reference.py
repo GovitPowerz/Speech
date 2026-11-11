@@ -889,8 +889,9 @@ def _lstm_net_backward(
     (`last_layer=True` in the per-layer call, since it feeds the hcat/output net
     boundary -- wait: per NeuralNetwork.hpp the `lastLayer` flag passed to
     `LayerType::feedBackward` marks whether THIS layer is the FIRST one reached by the
-    reverse walk, i.e. the network's own last layer; LSTM's `feed_backward` ignores it
-    (signature parity only, layers.rs:394), so its value is immaterial here) then each
+    reverse walk, i.e. the network's own last layer; the legacy LSTM `feedBackward` ignores
+    it (signature parity only; the port reads it for the input-delta gate alone, issue #146,
+    which this oracle does not model), so its value is immaterial here) then each
     earlier layer reads the running `deltas_out`. Returns `(deltas_out, per_layer_derivs)`
     where `per_layer_derivs[jj]` is layer `jj`'s Nx2 harvest.
 

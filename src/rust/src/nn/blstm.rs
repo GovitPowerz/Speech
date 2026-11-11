@@ -799,6 +799,18 @@ impl BlstmNetwork {
         // `set_inference_only` for why `back_propagation_activated` alone is the proof,
         // and why `Epochs` must never appear here.
         net.set_inference_only(inference_only);
+        // Issue #146: nothing upstream of a stack trains, so the deltas a stack's
+        // backward would return have no reader (`feed_backward` drops them). The gate
+        // is off on every cell; each cell honours it only as the last backward layer
+        // (`CellLayer::set_input_deltas`).
+        for stack in [net.forward_network.as_mut(), net.backward_network.as_mut()]
+            .into_iter()
+            .flatten()
+        {
+            for cell in stack.layers_mut() {
+                cell.set_input_deltas(false);
+            }
+        }
         Ok(net)
     }
 
@@ -2840,6 +2852,128 @@ mod direction_tests {
         assert!(cfg.is_mlp);
         let net = BlstmNetwork::from_config(cfg).unwrap();
         assert!(net.forward_network.is_none() && net.backward_network.is_none());
+    }
+}
+
+/// Issue #146: the stacks' layer-0 input deltas are gated off, and no weight
+/// derivative moves for it.
+#[cfg(test)]
+mod input_delta_gate_tests {
+    use super::*;
+    use crate::nn::cells::CellLayer;
+
+    const IN: usize = 3;
+    const HIDDEN: usize = 2;
+    const CLASSES: usize = 2;
+    const T: usize = 12;
+    /// The cells the gate covers.
+    const CELLS: [&str; 5] = ["lstm", "slstm", "mamba", "cfc", "transformer"];
+
+    /// A two-layer stack (so one cell is the last backward layer and one is not) over
+    /// `cell`, backprop on, with per-layer sub-sampling `sub`. Sub-sampling on layer 1
+    /// runs the gated layer 0 at an inverse sub-sampling ratio above 1.
+    fn net_for(cell: &str, direction: &str, sub: (usize, usize)) -> BlstmNetwork {
+        let mut m: IndexMap<String, String> = IndexMap::new();
+        m.insert("X_LSTMNeuronNb".into(), format!("{IN},{HIDDEN},{HIDDEN}"));
+        m.insert("X_LSTMSubSampling".into(), format!("{},{}", sub.0, sub.1));
+        let width = if direction == "forward" {
+            HIDDEN
+        } else {
+            2 * HIDDEN
+        };
+        m.insert("X_OutputNeuronNb".into(), format!("{width},{CLASSES}"));
+        m.insert("X_OutputSubSampling".into(), "1".into());
+        m.insert("X_InputNormalizationType".into(), "0".into());
+        m.insert("X_TwoSweeps".into(), "false".into());
+        m.insert("X_BackPropagationActivated".into(), "true".into());
+        m.insert("X_Cell_Type".into(), cell.into());
+        m.insert("X_Direction".into(), direction.into());
+        // Unprefixed, and the sized default (4) does not divide `HIDDEN`.
+        m.insert("Transformer_Heads".into(), "1".into());
+        let cfg = BlstmConfig::from_legacy(&m, "X").unwrap();
+        let mut net = BlstmNetwork::from_config(cfg).unwrap();
+        let w: Vec<f64> = (0..net.nb_of_weights())
+            .map(|k| 0.19 - 0.0037 * ((k % 31) as f64) + 0.0021 * ((k % 5) as f64))
+            .collect();
+        net.set_weights(&w).unwrap();
+        net
+    }
+
+    fn stacks(net: &mut BlstmNetwork) -> impl Iterator<Item = &mut Network<CellLayer>> {
+        [net.forward_network.as_mut(), net.backward_network.as_mut()]
+            .into_iter()
+            .flatten()
+    }
+
+    /// One plain forward plus backward; the `N x 2` derivative matrix as bits.
+    fn derivative_bits(net: &mut BlstmNetwork, sub: (usize, usize)) -> Vec<u64> {
+        let mut input = Array2::from_shape_fn((T, IN), |(r, c)| {
+            0.27 + 0.13 * (r as f64) - 0.19 * (c as f64)
+        });
+        let rows = T / (sub.0 * sub.1);
+        let target =
+            Array2::from_shape_fn(
+                (rows, CLASSES),
+                |(r, c)| if r % CLASSES == c { 1.0 } else { 0.0 },
+            );
+        let mut output = Array2::<f64>::zeros((rows, CLASSES));
+        net.feed_forward_backward(&mut input, 0, 0, &mut output, &target);
+        let d = net.get_weights_derivatives();
+        // The pack opens with the forward stack's layer 0, the cell the gate acts on:
+        // a gradient there, not just in the output MLP, is what keeps the leg honest.
+        let layer0 = crate::nn::network::Layer::nb_of_weights(
+            &net.forward_network.as_ref().unwrap().layers()[0],
+        );
+        assert!(
+            d.column(0).iter().take(layer0).any(|v| *v != 0.0),
+            "no gradient on the gated cell: the leg is vacuous"
+        );
+        d.iter().map(|v| v.to_bits()).collect()
+    }
+
+    /// `from_config` switches the gate off on every cell of every stack: nothing reads
+    /// a stack's input deltas. No golden can see this (the derivatives are the same
+    /// bits either way, the leg below), so the state is asserted.
+    #[test]
+    fn a_built_net_gates_every_stack_cell_off() {
+        for cell in CELLS {
+            for direction in ["bidirectional", "forward"] {
+                let mut net = net_for(cell, direction, (1, 1));
+                let mut seen = 0;
+                for stack in stacks(&mut net) {
+                    for layer in stack.layers_mut() {
+                        assert!(!layer.computes_input_deltas(), "{cell} {direction}");
+                        seen += 1;
+                    }
+                }
+                let expected = if direction == "forward" { 2 } else { 4 };
+                assert_eq!(seen, expected, "{cell} {direction}: cells visited");
+            }
+        }
+    }
+
+    /// The differential leg: the same net with the gate switched back on (the path
+    /// every backward took before issue #146) folds bit-identical weight derivatives.
+    #[test]
+    fn weight_derivatives_are_bit_identical_with_the_gate_back_on() {
+        for cell in CELLS {
+            for direction in ["bidirectional", "forward"] {
+                for sub in [(1, 1), (4, 1), (1, 4)] {
+                    let mut gated = net_for(cell, direction, sub);
+                    let mut ungated = gated.clone();
+                    for stack in stacks(&mut ungated) {
+                        for layer in stack.layers_mut() {
+                            layer.set_input_deltas(true);
+                        }
+                    }
+                    assert_eq!(
+                        derivative_bits(&mut gated, sub),
+                        derivative_bits(&mut ungated, sub),
+                        "{cell} {direction} sub-sampling {sub:?}"
+                    );
+                }
+            }
+        }
     }
 }
 

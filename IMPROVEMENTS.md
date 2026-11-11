@@ -1308,7 +1308,9 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   dropped tail is GONE. For the real net (`1_worker_1.config`: `LSTMNeuronNb 23,24,24` / subsample
   `4,1`; T frames, layer-0 R=4) the layer-0 `deltas_out` returned to the BLSTM wrapper is
   `floor(T/4)*4` rows wide, up to 3 frames short of the original input; the wrapper never uses these
-  tail rows (it splits the output-net deltas, not the LSTM `deltas_out`), so the truncation is invisible
+  tail rows (it splits the output-net deltas, not the LSTM `deltas_out`; since issue #146 its stacks do not
+  compute them at all, the input-delta gate, and the row count is the container's own contract,
+  read by the container goldens), so the truncation is invisible
   downstream -- but a port that "helpfully" pads InvSubSample back to `T` rows, or that asserts
   `deltas_out.nrows() == input.nrows()`, diverges from the legacy. The Task 5 goldens are a T=11, R=2
   multi-layer net: `sub_sample` floors 11->5, `inv_sub_sample` restores 5->10 (NOT 11); fix-wave 1

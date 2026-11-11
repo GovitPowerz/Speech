@@ -538,6 +538,12 @@ pub struct TransformerLayer {
     /// Task 8 row for the full recipe.
     retain_cache: bool,
     nb_of_seq_fed_backward: i64,
+
+    /// The input-delta gate (issue #146, port-only): `true`, the default, computes the
+    /// deltas propagated to the previous layer. `false` skips them when this layer
+    /// runs as the container's LAST backward layer. See
+    /// [`super::CellLayer::set_input_deltas`].
+    input_deltas: bool,
 }
 
 impl TransformerLayer {
@@ -586,7 +592,19 @@ impl TransformerLayer {
             cache: TransformerCache::default(),
             retain_cache: true,
             nb_of_seq_fed_backward: 0,
+            input_deltas: true,
         }
+    }
+
+    /// Switch the input-delta gate (see the field). Off, a `feed_backward` called
+    /// with `last_layer` returns a `0 x 0` array and every weight derivative it
+    /// accumulates is unchanged.
+    pub fn set_input_deltas(&mut self, on: bool) {
+        self.input_deltas = on;
+    }
+
+    pub fn computes_input_deltas(&self) -> bool {
+        self.input_deltas
     }
 
     /// Phase 11 spec S7 (Task 8): turn the backward cache retention off (inference-only)
@@ -972,18 +990,24 @@ impl TransformerLayer {
     /// Accumulates the weight-deriv blocks + the frame count, and returns the deltas
     /// propagated to the previous layer (`T x in`).
     ///
-    /// `deltas` is `dL/dh`. The `Layer` trait's `input`, `output` and `last_layer`
+    /// `deltas` is `dL/dh`. The `Layer` trait's `input` and `output`
     /// arguments are ABSENT from this signature ON PURPOSE (the CfC contract): every
     /// quantity the adjoints need is in the forward cache, [`TransformerCache::x_in`]
     /// included, so it is impossible for the two passes to disagree about the layer's own
     /// view of its input. The trait impl below discards them at the boundary, so the
     /// COMPILER enforces that rather than a `let _ = (..)` and a comment.
+    ///
+    /// `last_layer` is here for the input-delta gate alone (issue #146): with the gate
+    /// off, the last backward layer skips the adapter back-projection and returns a
+    /// `0 x 0` array.
     #[allow(clippy::needless_range_loop)]
     pub fn feed_backward(
         &mut self,
         deltas: &Array2<f64>,
         inv_sub_sampling_ratio: usize,
+        last_layer: bool,
     ) -> Array2<f64> {
+        let skip_input_deltas = last_layer && !self.input_deltas;
         // Spec S7 (Task 8): an inference-only layer never filled the cache (or shrank
         // `attn_weights` to a single dead slot), so there is nothing correct to fold.
         // Bail LOUDLY rather than accumulate garbage -- a silently wrong gradient is the
@@ -1130,7 +1154,11 @@ impl TransformerLayer {
         // --- qkv projection, RMSNorm_1, adapter (forward time) --------------------
         let mut dqkv = vec![0.0f64; QKV_NB * h];
         let mut du = vec![0.0f64; h];
-        let mut dpl = Array2::<f64>::zeros((t_len, isz));
+        let mut dpl = if skip_input_deltas {
+            Array2::zeros((0, 0))
+        } else {
+            Array2::<f64>::zeros((t_len, isz))
+        };
         for t in 0..t_len {
             for e in 0..h {
                 dqkv[BLOCK_Q * h + e] = dq[[t, e]];
@@ -1162,16 +1190,25 @@ impl TransformerLayer {
             }
 
             // Width adapter (always present -- the residuals add the ADAPTED input).
+            // Its own derivatives and the deltas it propagates are separate
+            // accumulators, each ascending in `m`; the second is skipped under the
+            // input-delta gate.
             for m in 0..h {
                 acc.adapter_b[[0, m]] += d_xa[[t, m]];
             }
             for k in 0..isz {
-                let mut sacc = 0.0;
                 for m in 0..h {
-                    sacc += w.adapter_w[[k, m]] * d_xa[[t, m]];
                     acc.adapter_w[[k, m]] += ca.x_in[[t, k]] * d_xa[[t, m]];
                 }
-                dpl[[t, k]] = sacc;
+            }
+            if !skip_input_deltas {
+                for k in 0..isz {
+                    let mut sacc = 0.0;
+                    for m in 0..h {
+                        sacc += w.adapter_w[[k, m]] * d_xa[[t, m]];
+                    }
+                    dpl[[t, k]] = sacc;
+                }
             }
         }
 
@@ -1188,16 +1225,17 @@ impl TransformerLayer {
     /// returned deltas back. The caches are already time-reversed by
     /// [`Self::feed_forward_reverse`] and are consumed AS-IS (do NOT un-reverse).
     ///
-    /// `deltas` is the ONLY argument for the same reason it is the only one on
+    /// `deltas` is the only SEQUENCE argument for the same reason it is the only one on
     /// [`Self::feed_backward`]: it is the single quantity that body consumes from
     /// outside the cache, so it is the single one that needs flipping.
     pub fn feed_backward_reverse(
         &mut self,
         deltas: &Array2<f64>,
         inv_sub_sampling_ratio: usize,
+        last_layer: bool,
     ) -> Array2<f64> {
         let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
-        let dpl = self.feed_backward(&deltas_rev, inv_sub_sampling_ratio);
+        let dpl = self.feed_backward(&deltas_rev, inv_sub_sampling_ratio, last_layer);
         dpl.slice(ndarray::s![..;-1, ..]).to_owned()
     }
 }
@@ -1226,8 +1264,8 @@ impl Layer for TransformerLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let _ = (input, output, last_layer);
-        TransformerLayer::feed_backward(self, deltas, inv_sub_sampling_ratio)
+        let _ = (input, output);
+        TransformerLayer::feed_backward(self, deltas, inv_sub_sampling_ratio, last_layer)
     }
     fn feed_backward_reverse(
         &mut self,
@@ -1237,8 +1275,8 @@ impl Layer for TransformerLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let _ = (input, output, last_layer);
-        TransformerLayer::feed_backward_reverse(self, deltas, inv_sub_sampling_ratio)
+        let _ = (input, output);
+        TransformerLayer::feed_backward_reverse(self, deltas, inv_sub_sampling_ratio, last_layer)
     }
     fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>) {
         TransformerLayer::get_weights_derivatives(self, out);
@@ -1994,7 +2032,7 @@ mod tests {
         // backward reads (which is exactly why that signature takes no input/output).
         let _ = forward(&mut cell, &input);
         cell.reset_weights_derivatives();
-        let _ = cell.feed_backward(&deltas, 1);
+        let _ = cell.feed_backward(&deltas, 1, true);
         let mut once = Vec::new();
         cell.get_weights_derivatives(&mut once);
         assert!(
@@ -2003,7 +2041,7 @@ mod tests {
         );
         assert!(once.iter().all(|r| r[1] == T as f64));
 
-        let _ = cell.feed_backward(&deltas, 1);
+        let _ = cell.feed_backward(&deltas, 1, true);
         let mut twice = Vec::new();
         cell.get_weights_derivatives(&mut twice);
         for k in 0..once.len() {
@@ -2038,7 +2076,7 @@ mod tests {
             let input = seq(t, I, 0.4);
             let out = forward(&mut cell, &input);
             cell.reset_weights_derivatives();
-            let _ = cell.feed_backward(&seq(t, O, -0.2), 1);
+            let _ = cell.feed_backward(&seq(t, O, -0.2), 1, true);
             let d = derivs(&cell);
             let worst = b_k.iter().map(|&s| d[s].abs()).fold(0.0f64, f64::max);
             if t == 1 {
@@ -2100,7 +2138,7 @@ mod tests {
             cell.set_weights(&w);
             let _ = forward(&mut cell, &seq(t, I, 0.4));
             cell.reset_weights_derivatives();
-            let _ = cell.feed_backward(&seq(t, O, -0.2), 1);
+            let _ = cell.feed_backward(&seq(t, O, -0.2), 1, true);
             let d = derivs(&cell);
             let worst = slots.iter().map(|&s| d[s].abs()).fold(0.0f64, f64::max);
             if want_zero {
@@ -2134,7 +2172,7 @@ mod tests {
         let _ = forward(&mut cell, &input);
 
         cell.reset_weights_derivatives();
-        let _ = cell.feed_backward(&deltas, 1);
+        let _ = cell.feed_backward(&deltas, 1, true);
         let mut base = Vec::new();
         cell.get_weights_derivatives(&mut base);
         cell.ponderate_weights_derivatives(0.25);
@@ -2148,7 +2186,7 @@ mod tests {
         let mut scaled = loaded(I, O, &base_params());
         let _ = forward(&mut scaled, &input);
         scaled.reset_weights_derivatives();
-        let _ = scaled.feed_backward(&deltas, 3);
+        let _ = scaled.feed_backward(&deltas, 3, true);
         let mut rows = Vec::new();
         scaled.get_weights_derivatives(&mut rows);
         for k in 0..base.len() {
@@ -2166,14 +2204,14 @@ mod tests {
         let mut a = loaded(I, O, &base_params());
         let mut out_rev = Array2::<f64>::zeros((T, O));
         a.feed_forward_reverse(&input, &mut out_rev, false);
-        let dpl_rev = a.feed_backward_reverse(&deltas, 1);
+        let dpl_rev = a.feed_backward_reverse(&deltas, 1, true);
         let mut da = Vec::new();
         a.get_weights_derivatives(&mut da);
 
         let mut b = loaded(I, O, &base_params());
         let input_f = input.slice(ndarray::s![..;-1, ..]).to_owned();
         let _ = forward(&mut b, &input_f);
-        let dpl_f = b.feed_backward(&deltas.slice(ndarray::s![..;-1, ..]).to_owned(), 1);
+        let dpl_f = b.feed_backward(&deltas.slice(ndarray::s![..;-1, ..]).to_owned(), 1, true);
         let mut db = Vec::new();
         b.get_weights_derivatives(&mut db);
 
@@ -2193,7 +2231,7 @@ mod tests {
             let mut cell = loaded(I, O, &base_params());
             let out = forward(&mut cell, input);
             assert_eq!(out.dim(), (T, O));
-            let dpl = cell.feed_backward(&seq(T, O, -0.2), 1);
+            let dpl = cell.feed_backward(&seq(T, O, -0.2), 1, true);
             assert_eq!(dpl.dim(), (T, I));
         }
 
@@ -2294,7 +2332,7 @@ mod tests {
         let mut cell = loaded(I, O, &base_params());
         cell.set_retain_cache(false);
         let _ = forward(&mut cell, &input);
-        let _ = cell.feed_backward(&seq(T, O, -0.21), 1);
+        let _ = cell.feed_backward(&seq(T, O, -0.21), 1, true);
     }
 
     /// The retaining path still folds a real gradient -- the contrast that makes the
@@ -2304,7 +2342,7 @@ mod tests {
         let input = seq(T, I, 0.37);
         let mut cell = loaded(I, O, &base_params());
         let _ = forward(&mut cell, &input);
-        let _ = cell.feed_backward(&seq(T, O, -0.21), 1);
+        let _ = cell.feed_backward(&seq(T, O, -0.21), 1, true);
         let g = derivs(&cell);
         assert!(g.iter().any(|v| *v != 0.0) && g.iter().all(|v| v.is_finite()));
     }
@@ -2321,14 +2359,14 @@ mod tests {
 
         let mut never_gated = loaded(I, O, &base_params());
         let out_a = forward(&mut never_gated, &input);
-        let _ = never_gated.feed_backward(&deltas, 1);
+        let _ = never_gated.feed_backward(&deltas, 1, true);
         let mut da = Vec::new();
         never_gated.get_weights_derivatives(&mut da);
 
         let mut explicitly_retained = loaded(I, O, &base_params());
         explicitly_retained.set_retain_cache(true);
         let out_b = forward(&mut explicitly_retained, &input);
-        let _ = explicitly_retained.feed_backward(&deltas, 1);
+        let _ = explicitly_retained.feed_backward(&deltas, 1, true);
         let mut db = Vec::new();
         explicitly_retained.get_weights_derivatives(&mut db);
 

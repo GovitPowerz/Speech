@@ -254,6 +254,12 @@ pub struct CfcLayer {
     head_weights_derivatives: Array2<f64>,
     head_biases_derivatives: Array2<f64>,
     nb_of_seq_fed_backward: i64,
+
+    /// The input-delta gate (issue #146, port-only): `true`, the default, computes the
+    /// deltas propagated to the previous layer. `false` skips them when this layer
+    /// runs as the container's LAST backward layer. See
+    /// [`super::CellLayer::set_input_deltas`].
+    input_deltas: bool,
 }
 
 impl CfcLayer {
@@ -299,7 +305,19 @@ impl CfcLayer {
             head_weights_derivatives: Array2::zeros((b, HEAD_NB * output_size)),
             head_biases_derivatives: Array2::zeros((1, HEAD_NB * output_size)),
             nb_of_seq_fed_backward: 0,
+            input_deltas: true,
         }
+    }
+
+    /// Switch the input-delta gate (see the field). Off, a `feed_backward` called
+    /// with `last_layer` returns a `0 x 0` array and every weight derivative it
+    /// accumulates is unchanged.
+    pub fn set_input_deltas(&mut self, on: bool) {
+        self.input_deltas = on;
+    }
+
+    pub fn computes_input_deltas(&self) -> bool {
+        self.input_deltas
     }
 
     pub fn input_size(&self) -> usize {
@@ -612,18 +630,25 @@ impl CfcLayer {
     /// Accumulates the weight-deriv blocks + the frame count, and returns the deltas
     /// propagated to the previous layer (`T x in`).
     ///
-    /// `deltas` is `dL/dh`. The `Layer` trait's `input`, `output` and `last_layer`
+    /// `deltas` is `dL/dh`. The `Layer` trait's `input` and `output`
     /// arguments are ABSENT from this signature ON PURPOSE: every quantity the
     /// adjoints need is in the forward caches ([`Self::z_cache`] already carries both
     /// the reconciled input and `h_{t-1}`), which is what makes it impossible for the
     /// two passes to disagree about the layer's own view of its input. The trait impl
     /// below discards them at the boundary, so the COMPILER enforces that contract
     /// rather than a `let _ = (..)` and a comment.
+    ///
+    /// `last_layer` is here for the input-delta gate alone (issue #146): with the gate
+    /// off, the last backward layer returns a `0 x 0` array. The backbone product that
+    /// yields `dx_t` also yields the carry to `t-1`, so it still runs; only the copy
+    /// into the returned matrix is skipped.
     pub fn feed_backward(
         &mut self,
         deltas: &Array2<f64>,
         inv_sub_sampling_ratio: usize,
+        last_layer: bool,
     ) -> Array2<f64> {
+        let skip_input_deltas = last_layer && !self.input_deltas;
         let (i, h, b, l) = (
             self.input_size,
             self.output_size,
@@ -644,7 +669,11 @@ impl CfcLayer {
 
         // `dz_{t+1}[in..]`, the ONLY quantity carried backwards across timesteps.
         let mut carry = vec![0.0f64; h];
-        let mut deltas_previous_layer = Array2::<f64>::zeros((lines_nb, i));
+        let mut deltas_previous_layer = if skip_input_deltas {
+            Array2::zeros((0, 0))
+        } else {
+            Array2::<f64>::zeros((lines_nb, i))
+        };
 
         // Head pre-activation deltas as a 3H x 1 column, so the `dbb_L` propagation is
         // one `matmul_seq` over the combined head matrix.
@@ -711,8 +740,10 @@ impl CfcLayer {
             }
 
             // d_cur is now dz_t: the head is dx_t, the tail is the carry to t-1.
-            for k in 0..i {
-                deltas_previous_layer[[row, k]] = d_cur[[k, 0]];
+            if !skip_input_deltas {
+                for k in 0..i {
+                    deltas_previous_layer[[row, k]] = d_cur[[k, 0]];
+                }
             }
             for k in 0..h {
                 carry[k] = d_cur[[i + k, 0]];
@@ -746,7 +777,7 @@ impl CfcLayer {
     /// deltas back. The caches are already time-reversed by
     /// [`Self::feed_forward_reverse`] and are consumed AS-IS (do NOT un-reverse).
     ///
-    /// `deltas` is the ONLY argument here for the same reason it is the only one on
+    /// `deltas` is the only SEQUENCE argument here for the same reason it is the only one on
     /// [`Self::feed_backward`]: it is the single quantity that body consumes, so it is
     /// the single one that needs flipping. There is no `input`/`output` pair to flip
     /// (and therefore no pair of `T x width` copies to allocate for a body that would
@@ -755,9 +786,10 @@ impl CfcLayer {
         &mut self,
         deltas: &Array2<f64>,
         inv_sub_sampling_ratio: usize,
+        last_layer: bool,
     ) -> Array2<f64> {
         let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
-        let dpl = self.feed_backward(&deltas_rev, inv_sub_sampling_ratio);
+        let dpl = self.feed_backward(&deltas_rev, inv_sub_sampling_ratio, last_layer);
         dpl.slice(ndarray::s![..;-1, ..]).to_owned()
     }
 }
@@ -787,8 +819,8 @@ impl Layer for CfcLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let _ = (input, output, last_layer);
-        CfcLayer::feed_backward(self, deltas, inv_sub_sampling_ratio)
+        let _ = (input, output);
+        CfcLayer::feed_backward(self, deltas, inv_sub_sampling_ratio, last_layer)
     }
     fn feed_backward_reverse(
         &mut self,
@@ -798,8 +830,8 @@ impl Layer for CfcLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let _ = (input, output, last_layer);
-        CfcLayer::feed_backward_reverse(self, deltas, inv_sub_sampling_ratio)
+        let _ = (input, output);
+        CfcLayer::feed_backward_reverse(self, deltas, inv_sub_sampling_ratio, last_layer)
     }
     fn get_weights_derivatives(&self, out: &mut Vec<[f64; 2]>) {
         CfcLayer::get_weights_derivatives(self, out);
@@ -1184,7 +1216,7 @@ mod tests {
         // signature takes no `input`/`output`), it just no longer feeds them by argument.
         let _ = forward(&mut cell, &input);
         cell.reset_weights_derivatives();
-        let _ = cell.feed_backward(&deltas, 1);
+        let _ = cell.feed_backward(&deltas, 1, true);
         let mut once = Vec::new();
         cell.get_weights_derivatives(&mut once);
         assert!(
@@ -1193,7 +1225,7 @@ mod tests {
         );
         assert!(once.iter().all(|r| r[1] == T as f64));
 
-        let _ = cell.feed_backward(&deltas, 1);
+        let _ = cell.feed_backward(&deltas, 1, true);
         let mut twice = Vec::new();
         cell.get_weights_derivatives(&mut twice);
         for k in 0..once.len() {
@@ -1230,7 +1262,7 @@ mod tests {
             let input = seq(t, i, 0.4);
             let _ = forward(&mut cell, &input);
             cell.reset_weights_derivatives();
-            let _ = cell.feed_backward(&seq(t, o, -0.2), 1);
+            let _ = cell.feed_backward(&seq(t, o, -0.2), 1, true);
             let d = derivs(&cell);
             let worst = state_slots
                 .iter()
@@ -1269,7 +1301,7 @@ mod tests {
         let _ = forward(&mut cell, &input);
 
         cell.reset_weights_derivatives();
-        let _ = cell.feed_backward(&deltas, 1);
+        let _ = cell.feed_backward(&deltas, 1, true);
         let mut base = Vec::new();
         cell.get_weights_derivatives(&mut base);
         cell.ponderate_weights_derivatives(0.25);
@@ -1283,7 +1315,7 @@ mod tests {
         let mut scaled = loaded(I, O, B, L);
         let _ = forward(&mut scaled, &input);
         scaled.reset_weights_derivatives();
-        let _ = scaled.feed_backward(&deltas, 3);
+        let _ = scaled.feed_backward(&deltas, 3, true);
         let mut rows = Vec::new();
         scaled.get_weights_derivatives(&mut rows);
         for k in 0..base.len() {
@@ -1301,14 +1333,14 @@ mod tests {
         let mut a = loaded(I, O, B, L);
         let mut out_rev = Array2::<f64>::zeros((T, O));
         a.feed_forward_reverse(&input, &mut out_rev, false);
-        let dpl_rev = a.feed_backward_reverse(&deltas, 1);
+        let dpl_rev = a.feed_backward_reverse(&deltas, 1, true);
         let mut da = Vec::new();
         a.get_weights_derivatives(&mut da);
 
         let mut b = loaded(I, O, B, L);
         let input_f = input.slice(ndarray::s![..;-1, ..]).to_owned();
         let _ = forward(&mut b, &input_f);
-        let dpl_f = b.feed_backward(&deltas.slice(ndarray::s![..;-1, ..]).to_owned(), 1);
+        let dpl_f = b.feed_backward(&deltas.slice(ndarray::s![..;-1, ..]).to_owned(), 1, true);
         let mut db = Vec::new();
         b.get_weights_derivatives(&mut db);
 
@@ -1328,7 +1360,7 @@ mod tests {
             let mut cell = loaded(I, O, B, L);
             let out = forward(&mut cell, input);
             assert_eq!(out.dim(), (T, O));
-            let dpl = cell.feed_backward(&seq(T, O, -0.2), 1);
+            let dpl = cell.feed_backward(&seq(T, O, -0.2), 1, true);
             assert_eq!(dpl.dim(), (T, I));
         }
 

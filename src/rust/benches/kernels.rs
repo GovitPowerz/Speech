@@ -29,6 +29,10 @@
 //! GFFT/mel twins construct the same `realfft`/`MelFilterBank` types the real
 //! `fast::pipeline` module uses), never a bench-local reimplementation -- so
 //! these numbers measure the actual dispatch path, not a lookalike.
+//!
+//! Issue #146 adds the first target above a kernel: `blstm_fwd_bwd_v1` /
+//! `blstm_fwd_bwd_v2`, one `BlstmNetwork` forward plus backward over one window at
+//! the two SAD lineages' geometry (see `bench_blstm_fwd_bwd`).
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ndarray::Array2;
@@ -37,7 +41,9 @@ use speech::fast::mel32::FastMelBank;
 use speech::fast::nn::faer_project;
 use speech::features::fft::Gfft;
 use speech::features::mel::MelFilterBank;
+use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
 use speech::nn::layers::matmul_seq;
+use speech::nn::layout::Stack;
 
 // ---------------------------------------------------------------------------
 // Exact kernels (Task 1).
@@ -238,6 +244,93 @@ fn bench_mel_apply_f32(c: &mut Criterion) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// Net level (issue #146).
+// ---------------------------------------------------------------------------
+
+/// Frames in one overlap window of the SAD training configs at 8 kHz:
+/// `frame_window 3.25`, `spectrum_shift 0.01` -> `2 * round(3.25 * 8000 / 2 / 80) + 1`
+/// (`tasks/sad.rs::get_blstm_param`).
+const SAD_WINDOW_FRAMES: usize = 327;
+
+/// One `BlstmNetwork` forward plus backward over one window, the unit of work a
+/// gradient fold repeats per window per file. The net is built from the committed
+/// training config as written (geometry, cost law, normalization type), with two
+/// overrides: backprop on (the Launcher sets it per fold) and a deterministic
+/// synthetic pack. The plain path is driven directly, so the windowing drivers
+/// around it are not in the number.
+fn blstm_fwd_bwd(c: &mut Criterion, name: &str, config: &str) {
+    let path = format!(
+        "{}/../../configs/training/{config}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let mut map = speech::toml_config::load_config(&path).expect("committed training config");
+    map.insert("BLSTM_BackPropagationActivated".into(), "true".into());
+    let cfg = BlstmConfig::from_legacy(&map, "BLSTM").expect("the config's BLSTM net");
+    let in_cols = cfg.lstm_neuron_nb[0];
+    let out_rows = SAD_WINDOW_FRAMES / cfg.lstm_sub_sampling.iter().product::<usize>();
+    let out_cols = *cfg.output_neuron_nb.last().unwrap();
+
+    let mut net = BlstmNetwork::from_config(cfg).expect("net");
+    let flat: Vec<f64> = (0..net.nb_of_weights())
+        .map(|k| (((k * 11 + 3) % 97) as f64 / 97.0 - 0.5) * 0.2)
+        .collect();
+    net.set_weights(&flat).expect("pack length");
+    net.set_processing_type(false, false);
+
+    let input = Array2::from_shape_fn((SAD_WINDOW_FRAMES, in_cols), |(t, j)| {
+        ((t * 37 + j * 53 + 7) % 101) as f64 / 101.0 - 0.5
+    });
+    let target = Array2::from_shape_fn((out_rows, out_cols), |(r, _)| (r % 2) as f64);
+
+    // The backward must really run down to the gated cell (the forward stack's layer
+    // 0), or the number is a forward plus an output-MLP backward.
+    {
+        let mut x = input.clone();
+        let mut out = Array2::<f64>::zeros((out_rows, out_cols));
+        net.feed_forward_backward(&mut x, 0, 0, &mut out, &target);
+        let d = net.get_weights_derivatives();
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "{name}: non-finite output"
+        );
+        let layer0_end = net
+            .weight_layout()
+            .iter()
+            .filter(|b| b.stack == Stack::Forward && b.layer == 0)
+            .map(|b| b.offset + b.len())
+            .max()
+            .expect("a forward stack");
+        assert!(
+            d.column(0).iter().take(layer0_end).any(|v| *v != 0.0),
+            "{name}: no gradient on the forward stack's layer 0"
+        );
+    }
+
+    c.bench_function(name, |bch| {
+        bch.iter_batched(
+            || (input.clone(), Array2::<f64>::zeros((out_rows, out_cols))),
+            |(mut x, mut out)| {
+                net.reset_weights_derivatives();
+                net.feed_forward_backward(
+                    std::hint::black_box(&mut x),
+                    0,
+                    0,
+                    &mut out,
+                    std::hint::black_box(&target),
+                );
+                std::hint::black_box(out)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+fn bench_blstm_fwd_bwd(c: &mut Criterion) {
+    blstm_fwd_bwd(c, "blstm_fwd_bwd_v1", "lre_sad.toml");
+    blstm_fwd_bwd(c, "blstm_fwd_bwd_v2", "lre_sad_v2.toml");
+}
+
 criterion_group!(
     kernels,
     bench_matmul_seq,
@@ -245,6 +338,7 @@ criterion_group!(
     bench_mel_apply,
     bench_faer_project,
     bench_realfft,
-    bench_mel_apply_f32
+    bench_mel_apply_f32,
+    bench_blstm_fwd_bwd
 );
 criterion_main!(kernels);

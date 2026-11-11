@@ -1,0 +1,18 @@
+mutation: LstmLayer::feed_backward skips its input deltas whenever the gate is off, ignoring last_layer (an upper layer hands empty deltas to the layer below)
+catcher: CAUGHT cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: CAUGHT cargo --lib nn::blstm::input_delta_gate_tests::weight_derivatives_are_bit_identical_with_the_gate_back_on
+catcher: CAUGHT cargo --lib nn::cells::tests::a_gated_cell_skips_its_input_deltas_only_as_the_last_backward_layer
+
+diff --git a/src/rust/src/nn/layers.rs b/src/rust/src/nn/layers.rs
+index 192dd0c..ce02506 100644
+--- a/src/rust/src/nn/layers.rs
++++ b/src/rust/src/nn/layers.rs
+@@ -813,7 +813,7 @@ impl LstmLayer {
+ 
+         // :707 deltasPreviousLayer = (_InputWeights * testM)^T -> T x I. Skipped when
+         // the gate is off at the last backward layer: its one reader discards it.
+-        let deltas_previous_layer = if last_layer && !self.input_deltas {
++        let deltas_previous_layer = if !self.input_deltas {
+             Array2::zeros((0, 0))
+         } else {
+             let dpl = matmul_seq(&self.input_weights, &test_m); // I x T

@@ -220,6 +220,12 @@ pub struct SlstmLayer {
     feedback_weights_derivatives: Array2<f64>,
     biases_derivatives: Array2<f64>,
     nb_of_seq_fed_backward: i64,
+
+    /// The input-delta gate (issue #146, port-only): `true`, the default, computes the
+    /// deltas propagated to the previous layer. `false` skips them when this layer
+    /// runs as the container's LAST backward layer. See
+    /// [`super::CellLayer::set_input_deltas`].
+    input_deltas: bool,
 }
 
 impl SlstmLayer {
@@ -242,7 +248,19 @@ impl SlstmLayer {
             feedback_weights_derivatives: Array2::zeros((output_size, four)),
             biases_derivatives: Array2::zeros((1, four)),
             nb_of_seq_fed_backward: 0,
+            input_deltas: true,
         }
+    }
+
+    /// Switch the input-delta gate (see the field). Off, a `feed_backward` called
+    /// with `last_layer` returns a `0 x 0` array and every weight derivative it
+    /// accumulates is unchanged.
+    pub fn set_input_deltas(&mut self, on: bool) {
+        self.input_deltas = on;
+    }
+
+    pub fn computes_input_deltas(&self) -> bool {
+        self.input_deltas
     }
 
     pub fn input_size(&self) -> usize {
@@ -505,7 +523,9 @@ impl SlstmLayer {
     ///
     /// `output` supplies `h_{t-1}` for the recurrent accumulation (the caller passes
     /// the retained layer output, exactly as `LstmLayer::feed_backward` reads it);
-    /// `deltas` is `dL/dh`. `last_layer` is unused.
+    /// `deltas` is `dL/dh`. `last_layer` is read for one thing: with the input-delta
+    /// gate off (issue #146), the last backward layer skips the `dx` product and
+    /// returns a `0 x 0` array.
     pub fn feed_backward(
         &mut self,
         input: &Array2<f64>,
@@ -514,7 +534,6 @@ impl SlstmLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let _ = last_layer;
         let o = self.output_size;
         let i = self.input_size;
         let lines_nb = deltas.dim().0;
@@ -603,9 +622,14 @@ impl SlstmLayer {
             }
         }
 
-        // dx = (W * testM)^T -> T x in.
-        let dpl = matmul_seq(&self.input_weights, &test_m); // in x T
-        let deltas_previous_layer = dpl.t().to_owned();
+        // dx = (W * testM)^T -> T x in. Skipped when the gate is off at the last
+        // backward layer: its one reader discards it.
+        let deltas_previous_layer = if last_layer && !self.input_deltas {
+            Array2::zeros((0, 0))
+        } else {
+            let dpl = matmul_seq(&self.input_weights, &test_m); // in x T
+            dpl.t().to_owned()
+        };
 
         if inv_sub_sampling_ratio > 1 {
             let r = inv_sub_sampling_ratio as f64;
