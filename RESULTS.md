@@ -555,9 +555,9 @@ the gap between its row and the first is that cache, and its wall shows the swit
 <!-- ledger:table fold_grad_bench -->
 | leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |
 |---|---|---|---|---|---|
-| SAD v1 gradient fold (128 files, 1 lane) | 128 | 13920.01 | 80.37 [79.66-81.66] (n=3) | 0.005773 | 149.823 |
-| SAD v1 gradient fold (128 files, 4 lanes) | 128 | 13920.01 | 21.61 [21.45-21.74] (n=3) | 0.001553 | 354.516 |
-| SAD v1 gradient fold (128 files, 1 lane, allocator cache on) | TBD | TBD | TBD | TBD | TBD |
+| SAD v1 gradient fold (128 files, 1 lane) | 128 | 13920.01 | 78.47 [78.27-78.57] (n=3) | 0.005637 | 78.708 |
+| SAD v1 gradient fold (128 files, 4 lanes) | 128 | 13920.01 | 21.79 [21.65-21.89] (n=3) | 0.001565 | 287.812 |
+| SAD v1 gradient fold (128 files, 1 lane, allocator cache on) | 128 | 13920.01 | 77.69 [77.41-78.18] (n=3) | 0.005581 | 2274.938 |
 
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->
