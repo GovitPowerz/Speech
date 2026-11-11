@@ -31,7 +31,7 @@ from pathlib import Path
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file
 from speech.ledger.schema import LEDGER_DIR, BaselineRecord, BenchRecord, Lineage, RecordBase, git_state, load, read_record, write_record
-from speech.ledger.stage import CORPUS_ROOT, LEGS
+from speech.ledger.stage import BOTH_PATHS, CORPUS_ROOT, LEGS
 from speech.ledger.tables import bench_labels, current_baselines
 
 
@@ -100,23 +100,32 @@ def bench(args: argparse.Namespace) -> list[Path]:
     would make of every record (a dirty tree, a label naming another recipe) come first."""
     if not args.allow_dirty and git_state()[1]:
         raise SystemExit("the tree is dirty, so `add` would refuse every record; commit first or pass --allow-dirty")
+    # A leg is its staging, its paths and its environment; the label alone would pool a
+    # differently staged run into the leg's cell.
+    if args.leg is None and args.label in LEGS:
+        raise SystemExit(f"label {args.label!r} names a staged leg; run it with --leg {args.label}")
+    # A leg names the paths it runs: a gradient-fold leg is exact-only (the fast tree refuses a
+    # training-shaped config, issue #110), so `both` means the leg's own paths.
+    allowed = LEGS[args.leg].paths if args.leg is not None else BOTH_PATHS
+    paths = allowed if args.path == "both" else (args.path,)
+    if not set(paths) <= set(allowed):
+        raise SystemExit(f"leg {args.leg} runs {', '.join(allowed)} only, not {args.path}")
     stage_dir = Path(tempfile.mkdtemp(prefix="speech-bench-")) if args.stage_dir is None else args.stage_dir
     stage_dir.mkdir(parents=True, exist_ok=True)
     if args.leg is not None:
         leg = LEGS[args.leg]
-        config, label, lineage = leg.stage(stage_dir, args.corpus_root), leg.label, leg.lineage
+        config, label, lineage, env = leg.stage(stage_dir, args.corpus_root), leg.label, leg.lineage, dict(leg.env)
     else:
-        config, label, lineage = args.config, args.label, args.lineage
+        config, label, lineage, env = args.config, args.label, args.lineage, {}
     if not args.binary.is_file():
         raise SystemExit(f"{args.binary} is not built (cargo build --release)")
     lanes = lanes_of(config)
     # The label rule, before the first process rather than at `add` after the last.
     _check_label(bench_labels(load(args.root) if args.root.is_dir() else []), label, (lanes, lineage), str(config))
-    paths = ("exact", "fast") if args.path == "both" else (args.path,)
     written: list[Path] = []
     for path in paths:
         for _ in range(args.processes):
-            rec = wrap(bench_json(args.binary, config, path, label), lineage=lineage, lanes=lanes)
+            rec = wrap(bench_json(args.binary, config, path, label, env=env), lineage=lineage, lanes=lanes)
             written.append(write_record(rec, stage_dir / f"{rec.id}.json"))
             run = rec.payload.runs[0]
             print(f"{label} {path}: wall_s={run.wall_s:.4f} audio_s={run.audio_s:.2f} rtf={run.rtf:.6f} maxrss_mb={run.maxrss_mb:.3f}")
@@ -135,9 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     p_add.add_argument("--no-render", action="store_true")
     p_render = sub.add_parser("render", help="rewrite the ledger tables (or --check that they are current)")
     p_render.add_argument("--check", action="store_true")
-    p_bench = sub.add_parser("bench", help="run the Phase 7 bench protocol (N fresh processes per path) and promote the records")
+    p_bench = sub.add_parser("bench", help="run the bench protocol (N fresh processes per path) and promote the records")
     which = p_bench.add_mutually_exclusive_group(required=True)
-    which.add_argument("--leg", choices=sorted(LEGS), help="a staged leg (the Phase 7 recipes, written down once)")
+    which.add_argument("--leg", choices=sorted(LEGS), help="a staged leg (a recipe written down once)")
     which.add_argument("--config", type=Path, help="an arbitrary config (then --label is required)")
     p_bench.add_argument("--label", help="the recipe's name in the ledger (never a config path)")
     p_bench.add_argument("--lineage", choices=("v1", "v2"), default=None, help="the SAD lineage of an arbitrary config (ADR-0008)")

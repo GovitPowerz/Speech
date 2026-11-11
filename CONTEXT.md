@@ -86,7 +86,7 @@ The `fileslisting` plus `language2classmapping` pair a run reads; a Corpus item 
 One of N static parallel folds (file `j` goes to lane `j mod N`). N=1 is the deterministic parity mode; N>1 is deterministic but N-dependent.
 
 **Fold**:
-The ascending-file-index reduction of per-file results and gradients at the end of an epoch.
+The ascending-file-index reduction of per-file results and gradients, run as files complete: each lane hands its files to the fold in order and blocks when it gets ahead of it (issue #154).
 
 **Fold run**:
 One engine construction over a listing and the single fold it runs at the given weights, either forward-only or a gradient fold (backprop on). The orchestrator's unit of engine work; never an engine-internal epoch loop.

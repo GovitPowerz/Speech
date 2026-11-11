@@ -4,10 +4,10 @@ catcher: CAUGHT pytest tests/pyo3/test_fold_run.py::test_fold_run_needs_no_proce
 catcher: MISSED pytest tests/pyo3/test_fast_refusal.py::test_fast_refuses_gradient_check_epsilon_in_unit_test_mode
 
 diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
-index f3fad6c..14339c7 100644
+index aa3c8d3..b23c6d5 100644
 --- a/src/rust/src/engine/corpus_processor.rs
 +++ b/src/rust/src/engine/corpus_processor.rs
-@@ -172,6 +172,9 @@ impl CorpusProcessor {
+@@ -199,6 +199,9 @@ impl CorpusProcessor {
          // legacy: :51 _Processors = BagOfProcessors(configs, _Mode). The bag ctor
          // mutates each config map (key clears :21-23).
          let processors = BagOfProcessors::from_configs(&mut configs)?;

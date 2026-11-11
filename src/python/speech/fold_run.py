@@ -114,7 +114,7 @@ class FoldRun:
     def config_text(self) -> str:
         return _config_text(self.config)
 
-    def _engine_map(self) -> dict[str, str]:
+    def engine_map(self) -> dict[str, str]:
         """`config` with the path keys resolved against the workdir: the map the seam gets."""
         out = dict(self.config)
         for key in _PATH_KEYS:
@@ -132,7 +132,7 @@ class FoldRun:
     def _shared_engine(self) -> speech_rs.Engine:
         """The engine on the config's own packs, built once."""
         if self._engine is None:
-            self._engine = self._build(self._engine_map())
+            self._engine = self._build(self.engine_map())
         return self._engine
 
     def weights(self) -> list[NDArray[np.float64]]:
