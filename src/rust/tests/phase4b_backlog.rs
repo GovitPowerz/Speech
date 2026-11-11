@@ -365,6 +365,10 @@ fn fold_order_measured_divergence_seed0() {
 /// `SPEECH_ORACLE_LIBM=ulp` or on a glibc host. Off-oracle this test still
 /// pins shape + hybrid-bound agreement against the fixture, just not the
 /// ULP-scale mutation sensitivity the manual apply/run/revert established.
+///
+/// Issue #154 removed that sort: the fold takes each lane's files in as they complete.
+/// The live one-lane mutation is the lane's own walk (`tests/mutations/phase4a/1`); the
+/// lane order above one lane is `tests/mutations/issue154/1`.
 #[test]
 fn fold_order_ascending_golden() {
     let _lock = CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner());

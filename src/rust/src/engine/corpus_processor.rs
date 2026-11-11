@@ -50,6 +50,11 @@ use crate::engine::channel_result::ChannelResult;
 use crate::engine::corpus::Corpus;
 use crate::legacy_config::{get_default, get_f64_default};
 
+/// Per-config lists of per-net `N x 2` `[derivative | count]` matrices (`[sad]`, or
+/// `[sad, lid]` on the Twin; empty for a config with no net): one file's harvest, or the
+/// fold of several.
+type ConfDerivs = BTreeMap<usize, Vec<Array2<f64>>>;
+
 /// How many finished files a lane may queue ahead of the fold (issue #154). With the
 /// one its send is blocked on and the one being folded, at most `n * (capacity + 1) +
 /// 1` per-file entries are alive at `n` lanes. A performance knob only: the fold order,
@@ -141,7 +146,7 @@ pub struct CorpusProcessor {
     /// CLEARED by [`Self::set_weights`] (a weights change invalidates the cached
     /// gradient, so a set-without-run correctly falls back to the bag's reset
     /// state). Empty until the first fold. See IMPROVEMENTS.md `[phase5] F10`.
-    seam_derivs: BTreeMap<usize, Vec<Array2<f64>>>,
+    seam_derivs: ConfDerivs,
     /// Test-observation hook (Task 9): after each `save_and_update_epoch` in a
     /// training run, snapshot config-0's flat weight vector AND whether the
     /// best-cost gate fired that epoch. No legacy counterpart; the tier-2 train
@@ -168,10 +173,12 @@ pub struct CorpusProcessor {
     /// config 0 or an epoch that produced no results.
     #[cfg(feature = "test-support")]
     epoch_raw_derivs_trace: Vec<Array2<f64>>,
-    /// Test-observation hook (issue #154): the high-water mark, over the last fold, of
-    /// per-file entries a lane had produced and the fold had not yet taken in.
+    /// Test-observation hook (issue #154): over the last fold, the high-water mark of
+    /// per-file entries the lanes had produced and the fold had not yet folded in, and
+    /// the bound that fold ran under (`n * (LANE_CHANNEL_CAPACITY + 1) + 1` at its
+    /// clamped lane count).
     #[cfg(feature = "test-support")]
-    lane_entries_peak: usize,
+    lane_entries: (usize, usize),
     /// Test hook (issue #154): a pause before the fold takes each entry in, so the lanes
     /// run ahead of it and an unbounded lane channel shows in `lane_entries_peak`.
     #[cfg(feature = "test-support")]
@@ -237,7 +244,7 @@ impl CorpusProcessor {
             #[cfg(feature = "test-support")]
             epoch_raw_derivs_trace: Vec::new(),
             #[cfg(feature = "test-support")]
-            lane_entries_peak: 0,
+            lane_entries: (0, 0),
             #[cfg(feature = "test-support")]
             fold_delay: None,
         })
@@ -378,9 +385,10 @@ impl CorpusProcessor {
         // so the cyclic receive IS the ascending fold -- no reorder buffer, no sort
         // (issue #154; until then every file's matrices were held until the last
         // lane finished). A lane that gets ahead of the fold blocks on its send,
-        // which bounds the per-file entries alive at `n * (LANE_CHANNEL_CAPACITY
-        // + 1) + 1`: per lane the queued ones and the one its send is blocked on,
-        // plus the one being folded. It cannot deadlock: when the fold waits on
+        // which bounds the per-file entries alive (produced by a lane and not yet
+        // folded in) at `n * (LANE_CHANNEL_CAPACITY + 1) + 1`: per lane the queued
+        // ones and the one its send is blocked on, plus the one being folded. It
+        // cannot deadlock: when the fold waits on
         // lane `j % n`, every earlier file of that lane is already received, so
         // the lane's channel is empty and its send of file `j` never blocks.
         //
@@ -396,8 +404,8 @@ impl CorpusProcessor {
         let nb_of_conf = self.processors.nb_of_conf();
 
         type FileResults = BTreeMap<usize, BTreeMap<usize, ChannelResult>>; // conf -> chan -> result
-        type FileDerivs = BTreeMap<usize, Vec<Array2<f64>>>; // all confs
-        type LaneEntry = Result<(FileResults, FileDerivs)>;
+        // One file: its results and its harvest (all confs).
+        type LaneEntry = Result<(FileResults, ConfDerivs)>;
 
         // The immutable inputs each lane needs (the corpus items, the bag to clone,
         // the mode). The bag clone is per lane.
@@ -412,10 +420,11 @@ impl CorpusProcessor {
 
         let folded = std::thread::scope(|scope| -> Result<_> {
             let mut lanes = Vec::with_capacity(n);
+            let mut handles = Vec::with_capacity(n);
             for lane in 0..n {
                 let (tx, rx) = sync_channel::<LaneEntry>(LANE_CHANNEL_CAPACITY);
                 lanes.push(rx);
-                scope.spawn(move || {
+                handles.push(scope.spawn(move || {
                     // Clone the epoch-start bag ONCE for this lane (:172
                     // firstprivate); walk this lane's files in ascending j.
                     let mut bag = base_bag.clone();
@@ -429,7 +438,7 @@ impl CorpusProcessor {
                                     // LANE bag's post-file derivs (drivers reset per file
                                     // inside get_segmentation, so this is file j's own
                                     // contribution).
-                                    let mut derivs_j = FileDerivs::new();
+                                    let mut derivs_j = ConfDerivs::new();
                                     if !tmp.is_empty() {
                                         for ii in 0..nb_of_conf {
                                             derivs_j.insert(ii, bag.get_weights_derivatives(ii));
@@ -440,54 +449,75 @@ impl CorpusProcessor {
                         #[cfg(feature = "test-support")]
                         peak.fetch_max(alive.fetch_add(1, Ordering::SeqCst) + 1, Ordering::SeqCst);
                         // A failed file ends its lane. So does a closed channel: the
-                        // fold stopped on an earlier file's error and dropped the
-                        // receivers.
+                        // fold stopped (an earlier file failed, or a lane panicked)
+                        // and dropped the receivers.
                         let failed = entry.is_err();
                         if tx.send(entry).is_err() || failed {
                             return;
                         }
                         j += n;
                     }
-                });
+                }));
             }
 
             // === Deterministic fold in ASCENDING FILE INDEX =================
             let mut results = BTreeMap::new();
-            let mut derivs = FileDerivs::new();
+            let mut derivs = ConfDerivs::new();
+            let mut failure = None;
             for j in 0..nb_files {
-                // A lane that panicked closed its channel: stop here, the scope
-                // re-raises the panic once the other lanes are joined.
+                // A lane that panicked closed its channel: stop here, the join below
+                // re-raises its panic.
                 let Ok(entry) = lanes[j % n].recv() else {
                     break;
                 };
                 #[cfg(feature = "test-support")]
-                {
-                    if let Some(delay) = fold_delay {
-                        std::thread::sleep(delay);
+                if let Some(delay) = fold_delay {
+                    std::thread::sleep(delay);
+                }
+                match entry {
+                    Ok((tmp, derivs_j)) => {
+                        // legacy: :181 if (tmp.size() > 0).
+                        if !tmp.is_empty() {
+                            // legacy: :182 _Results[jj] = tmp.
+                            results.insert(j, tmp);
+                            // legacy: :183-191 per-conf derivative accumulation.
+                            // `derivs_j` carries ALL confs for this file, in ascending
+                            // conf order (the lane harvest above is unconditional per
+                            // :183-191).
+                            for (ii, file_derivs) in derivs_j {
+                                fold_file_derivs(&mut derivs, ii, file_derivs);
+                            }
+                        }
                     }
-                    alive.fetch_sub(1, Ordering::SeqCst);
+                    // The first failing file in ascending order is the error.
+                    Err(e) => failure = Some(e),
                 }
-                // The first failing file in ascending order is the error; returning
-                // drops the receivers, so every other lane stops at its next send.
-                let (tmp, derivs_j) = entry?;
-                // legacy: :181 if (tmp.size() > 0).
-                if tmp.is_empty() {
-                    continue;
-                }
-                // legacy: :182 _Results[jj] = tmp.
-                results.insert(j, tmp);
-                // legacy: :183-191 per-conf derivative accumulation. `derivs_j`
-                // carries ALL confs for this file, in ascending conf order (the
-                // lane harvest above is unconditional per :183-191).
-                for (ii, file_derivs) in derivs_j {
-                    fold_file_derivs(&mut derivs, ii, file_derivs);
+                #[cfg(feature = "test-support")]
+                alive.fetch_sub(1, Ordering::SeqCst);
+                if failure.is_some() {
+                    break;
                 }
             }
-            Ok((results, derivs))
+            // Dropping the receivers stops every lane at its next send. Each lane is
+            // then joined here, so a lane's panic is re-raised with its own payload
+            // (the scope's implicit join would raise a generic one in its place).
+            drop(lanes);
+            for handle in handles {
+                if let Err(payload) = handle.join() {
+                    std::panic::resume_unwind(payload);
+                }
+            }
+            match failure {
+                Some(e) => Err(e),
+                None => Ok((results, derivs)),
+            }
         });
         #[cfg(feature = "test-support")]
         {
-            self.lane_entries_peak = peak.load(Ordering::SeqCst);
+            self.lane_entries = (
+                peak.load(Ordering::SeqCst),
+                n * (LANE_CHANNEL_CAPACITY + 1) + 1,
+            );
         }
         // Committed only on success: a failed fold leaves `results` empty (cleared
         // above) and the stash as it was.
@@ -554,7 +584,7 @@ impl CorpusProcessor {
 
     /// Extract the epoch's mem rows as mutable slices and hand them to the bag's
     /// `save_and_update` (the legacy `_CostMem.block(epoch,0,1,cols)` row views).
-    fn save_and_update_epoch(&mut self, epoch: usize, derivs: &BTreeMap<usize, Vec<Array2<f64>>>) {
+    fn save_and_update_epoch(&mut self, epoch: usize, derivs: &ConfDerivs) {
         // The mem matrices are row-major Array2; a single row is a contiguous slice.
         let nb = self.processors.nb_of_conf();
         let mut cost_row = vec![0.0; nb];
@@ -738,7 +768,7 @@ impl CorpusProcessor {
             // (empty) derivs map -- the harvest populates all confs via the create
             // branch. The fold lands in the stash; the copy is taken HERE, before the
             // sweep below overwrites the stash with the folds at the perturbed
-            // weights (issue #154: one clone per check, the fold itself clones
+            // weights (issue #154: the check's one copy of a fold, the fold itself clones
             // nothing). `analytic_derivs[0][ii]` then carries the analytic Nx2.
             self.run_epoch(1, self.mode, true)?;
             let analytic_derivs = self.seam_derivs.clone();
@@ -1037,14 +1067,13 @@ impl CorpusProcessor {
         &self.epoch_raw_derivs_trace
     }
 
-    /// The last fold's high-water mark of per-file entries produced by the lanes and
-    /// not yet folded (issue #154), with the bound it must stay under at the clamped
-    /// lane count `n`: `n * (LANE_CHANNEL_CAPACITY + 1) + 1`.
+    /// The last fold's `(peak, bound)` (issue #154): the high-water mark of per-file
+    /// entries produced by the lanes and not yet folded in, and the bound that fold ran
+    /// under at its clamped lane count `n`, `n * (LANE_CHANNEL_CAPACITY + 1) + 1`.
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn lane_entries_peak_for_test(&self) -> (usize, usize) {
-        let n = (self.processors.nb_of_threads().max(1) as usize).min(self.corpus.nb_of_files());
-        (self.lane_entries_peak, n * (LANE_CHANNEL_CAPACITY + 1) + 1)
+        self.lane_entries
     }
 
     /// Pause before the fold takes each entry in (issue #154), so the lanes run ahead.
@@ -1150,7 +1179,7 @@ impl CorpusProcessor {
         mut configs: Vec<IndexMap<String, String>>,
         mode: Mode,
         reverse: bool,
-    ) -> Result<BTreeMap<usize, Vec<Array2<f64>>>> {
+    ) -> Result<ConfDerivs> {
         let corpus = Corpus::from_config(&configs[0])?;
         let mut bag = BagOfProcessors::from_configs(&mut configs)?;
         let nb_of_conf = bag.nb_of_conf();
@@ -1158,7 +1187,7 @@ impl CorpusProcessor {
         if reverse {
             order.reverse();
         }
-        let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
+        let mut derivs: ConfDerivs = BTreeMap::new();
         for j in order {
             let item = corpus.item(j);
             let tmp = bag.segmentation_function(item, mode)?;
@@ -1180,11 +1209,7 @@ impl CorpusProcessor {
 /// same per-element f64 add as the legacy `+=`. A config with no net (algo 0/1/2
 /// harvest an empty list) stays an empty list. One body for `run_epoch` and the
 /// fold-order probe (issue #154).
-fn fold_file_derivs(
-    acc: &mut BTreeMap<usize, Vec<Array2<f64>>>,
-    conf: usize,
-    file: Vec<Array2<f64>>,
-) {
+fn fold_file_derivs(acc: &mut ConfDerivs, conf: usize, file: Vec<Array2<f64>>) {
     match acc.get_mut(&conf) {
         Some(existing) if !existing.is_empty() => {
             for (kk, mat) in file.iter().enumerate() {
@@ -1239,7 +1264,7 @@ mod tests {
     fn fold_moves_the_first_file_in_and_adds_later_files_in_place() {
         use ndarray::arr2;
 
-        let mut acc: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
+        let mut acc: ConfDerivs = BTreeMap::new();
         let first = vec![arr2(&[[-0.0, 1.0], [0.25, 1.0]]), arr2(&[[2.0, 1.0]])];
         fold_file_derivs(&mut acc, 0, first);
         assert_eq!(

@@ -45,14 +45,14 @@ fn multi_mode() -> Mode {
     }
 }
 
-/// The six-row listing and its mapping under `dir`; the rows name the committed phase4a
-/// corpus by absolute path.
-fn six_row_listing(dir: &Path) -> (PathBuf, PathBuf) {
+/// The six-row listing and its mapping under `dir`; the rows name the wavs under `wavs`
+/// and the committed phase4a references, by absolute path.
+fn six_row_listing(dir: &Path, wavs: &Path) -> (PathBuf, PathBuf) {
     let corpus = reference("phase4a/corpus");
     let row = |f: &str, tail: &str| {
         format!(
             "{};{};{tail}\n",
-            corpus.join(format!("{f}.wav")).display(),
+            wavs.join(format!("{f}.wav")).display(),
             corpus.join(format!("{f}.stm")).display()
         )
     };
@@ -76,9 +76,10 @@ fn six_row_listing(dir: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// The real `1_worker_1.config` (algo 3) with backprop on and `Epochs 0`: one gradient
-/// fold at theta (the shape `FoldRun` gives a training step), at `lanes` lanes.
-fn lane_fold_config(dir: &Path, lanes: usize) -> IndexMap<String, String> {
-    let (listing, mapping) = six_row_listing(dir);
+/// fold at theta (the shape `FoldRun` gives a training step), at `lanes` lanes, over the
+/// wavs under `wavs`.
+fn lane_fold_config(dir: &Path, lanes: usize, wavs: &Path) -> IndexMap<String, String> {
+    let (listing, mapping) = six_row_listing(dir, wavs);
     let text = std::fs::read_to_string(reference("phase0/1_worker_1.config")).unwrap();
     let mut m = speech::legacy_config::parse_legacy_config(&text);
     for (key, value) in [
@@ -109,8 +110,8 @@ fn lane_fold_config(dir: &Path, lanes: usize) -> IndexMap<String, String> {
 /// with its timing column zeroed.
 fn fold(lanes: usize) -> (Array2<f64>, Array2<f64>) {
     let dir = tempfile::tempdir().unwrap();
-    let mut cp =
-        CorpusProcessor::new(vec![lane_fold_config(dir.path(), lanes)], multi_mode()).unwrap();
+    let config = lane_fold_config(dir.path(), lanes, &reference("phase4a/corpus"));
+    let mut cp = CorpusProcessor::new(vec![config], multi_mode()).unwrap();
     cp.run().unwrap();
     let trace = cp.epoch_raw_derivs_trace_for_test();
     assert_eq!(trace.len(), 1, "one fold");
@@ -197,8 +198,8 @@ fn tdc_config(dir: &Path, lanes: usize, rows: &[(&str, bool)]) -> IndexMap<Strin
     m
 }
 
-/// A failed fold surfaces the FIRST failing file in ascending order and leaves the
-/// processor without results. Two lanes, two missing files: `missing_a` is file 1, on
+/// A failed fold surfaces the FIRST failing file in ascending order and commits no
+/// result. Two lanes, two missing files: `missing_a` is file 1, on
 /// the second lane, and `missing_b` is file 2, on the first. "The lowest failing lane",
 /// the rule before issue #154, would name `missing_b`.
 #[test]
@@ -215,11 +216,36 @@ fn a_failed_fold_names_the_first_failing_file_and_keeps_no_results() {
     let err = format!("{:#}", cp.run().unwrap_err());
     assert!(err.contains("missing_a"), "the error names file 1: {err}");
     assert!(!err.contains("missing_b"), "and not file 2: {err}");
-    assert_eq!(
-        cp.results_matrix().nrows(),
-        0,
-        "a failed fold commits no result"
+    assert!(
+        cp.channel_results().is_empty(),
+        "file 0 folded before the failure, and a failed fold commits no result"
     );
+}
+
+/// A fold that fails after one that succeeded commits nothing: no result, and the seam
+/// still reads the gradient the successful fold stashed. The wavs are copies, so one can
+/// go missing between the two runs.
+#[test]
+fn a_failed_fold_leaves_the_stash_of_the_fold_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let wavs = dir.path().join("wavs");
+    std::fs::create_dir(&wavs).unwrap();
+    for f in ["f1.wav", "f2.wav", "f3.wav"] {
+        std::fs::copy(reference("phase4a/corpus").join(f), wavs.join(f)).unwrap();
+    }
+    let config = lane_fold_config(dir.path(), 2, &wavs);
+    let mut cp = CorpusProcessor::new(vec![config], multi_mode()).unwrap();
+    cp.run().unwrap();
+    let stashed = cp.weights_derivatives(0);
+    assert!(!cp.channel_results().is_empty());
+    assert!(stashed[0].column(0).iter().any(|v| *v != 0.0));
+
+    std::fs::remove_file(wavs.join("f2.wav")).unwrap();
+    assert!(cp.run().is_err());
+    assert!(cp.channel_results().is_empty());
+    let kept = cp.weights_derivatives(0);
+    assert_eq!(kept.len(), stashed.len());
+    common::assert_bits_eq(&kept[0], &stashed[0], "the stash after a failed fold");
 }
 
 /// The fold takes files in as the lanes finish them, and a lane that gets ahead blocks:

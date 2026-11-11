@@ -31,7 +31,7 @@ from pathlib import Path
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file
 from speech.ledger.schema import LEDGER_DIR, BaselineRecord, BenchRecord, Lineage, RecordBase, git_state, load, read_record, write_record
-from speech.ledger.stage import CORPUS_ROOT, LEGS
+from speech.ledger.stage import BOTH_PATHS, CORPUS_ROOT, LEGS
 from speech.ledger.tables import bench_labels, current_baselines
 
 
@@ -102,7 +102,11 @@ def bench(args: argparse.Namespace) -> list[Path]:
         raise SystemExit("the tree is dirty, so `add` would refuse every record; commit first or pass --allow-dirty")
     # A leg names the paths it runs: a gradient-fold leg is exact-only (the fast tree refuses a
     # training-shaped config, issue #110), so `both` means the leg's own paths.
-    allowed = LEGS[args.leg].paths if args.leg is not None else ("exact", "fast")
+    if args.leg is None and args.label in LEGS:
+        # A leg is its staging, its paths and its environment; the label alone would pool a
+        # differently staged run into the leg's cell.
+        raise SystemExit(f"label {args.label!r} names a staged leg; run it with --leg {args.label}")
+    allowed = LEGS[args.leg].paths if args.leg is not None else BOTH_PATHS
     paths = allowed if args.path == "both" else (args.path,)
     if not set(paths) <= set(allowed):
         raise SystemExit(f"leg {args.leg} runs {', '.join(allowed)} only, not {args.path}")

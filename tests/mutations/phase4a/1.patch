@@ -1,0 +1,27 @@
+mutation: run_epoch walks and folds the corpus from its last file (corpus.item(j) -> corpus.item(nb_files - 1 - j), each result keyed to the file it came from), so at one lane the fold runs in descending file order. Until issue #154 the patch reversed the fold's sort, which that issue removed
+catcher: MISSED cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: CAUGHT cargo --test phase4b_backlog fold_order_ascending_golden
+requires: oracle-libm
+
+diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
+index fd29815..8e777fa 100644
+--- a/src/rust/src/engine/corpus_processor.rs
++++ b/src/rust/src/engine/corpus_processor.rs
+@@ -432,7 +432,7 @@ impl CorpusProcessor {
+                     while j < nb_files {
+                         // The legacy passes _Mode to SegmentationFunction (:177).
+                         let entry =
+-                            bag.segmentation_function(corpus.item(j), self_mode)
++                            bag.segmentation_function(corpus.item(nb_files - 1 - j), self_mode)
+                                 .map(|tmp| {
+                                     // Per-file harvest for EVERY conf (:183-191): read the
+                                     // LANE bag's post-file derivs (drivers reset per file
+@@ -479,7 +479,7 @@ impl CorpusProcessor {
+                         // legacy: :181 if (tmp.size() > 0).
+                         if !tmp.is_empty() {
+                             // legacy: :182 _Results[jj] = tmp.
+-                            results.insert(j, tmp);
++                            results.insert(nb_files - 1 - j, tmp);
+                             // legacy: :183-191 per-conf derivative accumulation.
+                             // `derivs_j` carries ALL confs for this file, in ascending
+                             // conf order (the lane harvest above is unconditional per

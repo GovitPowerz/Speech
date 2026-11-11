@@ -689,25 +689,42 @@ def test_fold_legs_are_exact_only_and_render_in_their_own_table() -> None:
     """Issue #154: a gradient-fold leg has no fast twin (the fast tree refuses a training-shaped
     config), so it names its one path, stays out of the Phase 7 matrix and its speedup column,
     and renders one row per label from the latest records."""
-    assert [LEGS[label].paths for label in FOLD_LEGS] == [("exact",), ("exact",)] and all(LEGS[label].lineage == "v1" for label in FOLD_LEGS)
-    assert all(LEGS[label].env == (("MallocLargeCache", "0"),) for label in FOLD_LEGS) and LEGS["phase7_60s"].env == ()
+    assert FOLD_LEGS == ("fold_grad_sad_n1", "fold_grad_sad_n4", "fold_grad_sad_n1_cached")
+    assert all(LEGS[label].paths == ("exact",) and LEGS[label].lineage == "v1" for label in FOLD_LEGS)
+    # The first two read the live peak; the third is the same one-lane fold with the cache on.
+    assert [LEGS[label].env for label in FOLD_LEGS] == [(("MallocLargeCache", "0"),), (("MallocLargeCache", "0"),), ()]
+    assert LEGS["phase7_60s"].env == ()
     empty = TABLES["fold_grad_bench"]([])
     assert empty[0] == "| leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |"
     assert empty[2:] == [
         f"| SAD v1 gradient fold ({FOLD_FILES} files, 1 lane) | TBD | TBD | TBD | TBD | TBD |",
         f"| SAD v1 gradient fold ({FOLD_FILES} files, 4 lanes) | TBD | TBD | TBD | TBD | TBD |",
+        f"| SAD v1 gradient fold ({FOLD_FILES} files, 1 lane, allocator cache on) | TBD | TBD | TBD | TBD | TBD |",
     ]
     old = bench_record("fold_grad_sad_n4", "exact", 90.0, lanes=4, sha="c" * 40, at=T0.replace(day=1), maxrss=160.0)
     new = [bench_record("fold_grad_sad_n4", "exact", w, lanes=4, at=T0.replace(minute=i), maxrss=60.0) for i, w in enumerate((40.0, 42.0))]
     lines = TABLES["fold_grad_bench"]([old, *new])  # type: ignore[list-item]
     assert lines[2].endswith("| TBD | TBD | TBD | TBD | TBD |")
     assert lines[3] == f"| SAD v1 gradient fold ({FOLD_FILES} files, 4 lanes) | 1 | 10.00 | 41.00 [40.00-42.00] (n=2) | 4.100000 | 60.000 |"
+    assert lines[4].endswith("allocator cache on) | TBD | TBD | TBD | TBD | TBD |")
     assert not any("gradient fold" in line for line in TABLES["phase7_bench_matrix"]([old, *new]))  # type: ignore[list-item]
 
 
 def test_bench_refuses_a_path_the_leg_does_not_run(tmp_path: Path) -> None:
     argv = ["--root", str(tmp_path / "ledger"), "bench", "--leg", "fold_grad_sad_n1", "--path", "fast", "--allow-dirty", "--stage-dir", str(tmp_path / "stage")]
     with pytest.raises(SystemExit, match="runs exact only, not fast"):
+        cli.main(argv)
+    assert not (tmp_path / "stage").exists()
+
+
+def test_bench_refuses_a_staged_legs_label_on_an_arbitrary_config(tmp_path: Path) -> None:
+    """A leg's label names its staging and its environment too (issue #154): `--config` with that
+    label would pool another run into the leg's cell."""
+    cfg = tmp_path / "x.config"
+    cfg.write_text("numOuterThreads 1\n")
+    where = ["--root", str(tmp_path / "ledger"), "bench", "--allow-dirty", "--stage-dir", str(tmp_path / "stage")]
+    argv = [*where, "--config", str(cfg), "--label", "fold_grad_sad_n1"]
+    with pytest.raises(SystemExit, match="names a staged leg; run it with --leg fold_grad_sad_n1"):
         cli.main(argv)
     assert not (tmp_path / "stage").exists()
 

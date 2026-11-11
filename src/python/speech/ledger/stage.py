@@ -14,7 +14,8 @@ as a training step runs it, at one lane and at four. The launcher's own `prepare
 directory (the first `FOLD_FILES` rows of the seeded train split, the 120 s cap of the full-run
 protocol, the from-scratch seed pack) and `FoldRun` supplies the gradient overlay (backprop on,
 `Epochs 0`) with its path keys resolved, so the staged config is the map the seam gets. They run
-with `LIVE_PEAK_ENV`, so their `maxrss_mb` is the fold's live peak.
+with `LIVE_PEAK_ENV`, so their `maxrss_mb` is the fold's live peak; a third leg is the one-lane
+fold with the allocator's cache left on, the record of what that switch removes.
 """
 
 from __future__ import annotations
@@ -24,11 +25,16 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
+from typing import Literal
 
 from speech.ledger.schema import CORPUS_ROOT_NAME, REPO, Lineage
 
 FIXTURES = REPO / "tests" / "reference_data"
 CORPUS_ROOT = REPO / "data" / CORPUS_ROOT_NAME
+
+
+BenchPath = Literal["exact", "fast"]
+BOTH_PATHS: tuple[BenchPath, ...] = ("exact", "fast")
 
 
 @dataclass(frozen=True)
@@ -37,7 +43,7 @@ class Leg:
     display: str
     lineage: Lineage | None
     stage: Callable[[Path, Path], Path]
-    paths: tuple[str, ...] = ("exact", "fast")
+    paths: tuple[BenchPath, ...] = BOTH_PATHS
     env: tuple[tuple[str, str], ...] = ()
 
 
@@ -125,9 +131,9 @@ def stage_corpus_cep(stage_dir: Path, corpus_root: Path) -> Path:
 FOLD_FILES = 128
 FOLD_AUDIO_CAP_S = 120.0
 #: macOS libmalloc keeps freed large blocks resident, so over many files `maxrss_mb` reads the
-#: allocator's cache of per-file transients, not live memory (measured 2026-11-11 on this leg's
-#: config: 8 files peak at 787 MiB with the cache and 81 without; 128 files at 2744 and 150).
-#: A multi-file leg switches the cache off. The variable is ignored off macOS.
+#: allocator's cache of per-file transients, not live memory (the `fold_grad_sad_n1_cached` leg
+#: against `fold_grad_sad_n1` is the measured gap). A multi-file leg switches the cache off. The
+#: variable is ignored off macOS.
 LIVE_PEAK_ENV = (("MallocLargeCache", "0"),)
 
 
@@ -158,7 +164,18 @@ def stage_grad_fold(stage_dir: Path, corpus_root: Path, *, lanes: int) -> Path:
 
 
 #: The gradient-fold legs (issue #154), rendered by their own table, never the Phase 7 matrix.
-FOLD_LEGS = ("fold_grad_sad_n1", "fold_grad_sad_n4")
+_FOLD = (
+    Leg("fold_grad_sad_n1", f"SAD v1 gradient fold ({FOLD_FILES} files, 1 lane)", "v1", partial(stage_grad_fold, lanes=1), ("exact",), LIVE_PEAK_ENV),
+    Leg("fold_grad_sad_n4", f"SAD v1 gradient fold ({FOLD_FILES} files, 4 lanes)", "v1", partial(stage_grad_fold, lanes=4), ("exact",), LIVE_PEAK_ENV),
+    Leg(
+        "fold_grad_sad_n1_cached",
+        f"SAD v1 gradient fold ({FOLD_FILES} files, 1 lane, allocator cache on)",
+        "v1",
+        partial(stage_grad_fold, lanes=1),
+        ("exact",),
+    ),
+)
+FOLD_LEGS = tuple(leg.label for leg in _FOLD)
 
 LEGS: dict[str, Leg] = {
     leg.label: leg
@@ -167,7 +184,6 @@ LEGS: dict[str, Leg] = {
         Leg("phase7_sad_corpus", "SAD corpus-gated (mono)", "v1", stage_corpus_sad),
         Leg("phase7_lid_phseq", "LID phSeq corpus-gated (Twin M7)", None, stage_corpus_phseq),
         Leg("phase7_lid_cep", "LID cep corpus-gated (Twin M7)", None, stage_corpus_cep),
-        Leg("fold_grad_sad_n1", f"SAD v1 gradient fold ({FOLD_FILES} files, 1 lane)", "v1", partial(stage_grad_fold, lanes=1), ("exact",), LIVE_PEAK_ENV),
-        Leg("fold_grad_sad_n4", f"SAD v1 gradient fold ({FOLD_FILES} files, 4 lanes)", "v1", partial(stage_grad_fold, lanes=4), ("exact",), LIVE_PEAK_ENV),
+        *_FOLD,
     )
 }

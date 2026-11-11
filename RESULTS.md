@@ -547,16 +547,17 @@ fast tree refuses a training-shaped config) and staged by `speech.ledger.stage`;
 `uv run python -m speech.ledger bench --leg fold_grad_sad_n1`. The table shows each leg's
 latest records; earlier ones stay in the ledger.
 
-The legs run with `MallocLargeCache=0`. macOS libmalloc keeps freed large blocks resident, so
-over many files the default `maxrss_mib` reads the allocator's cache of per-file transients
-rather than live memory: measured on this config (2026-11-11, one lane), 8 files peak at 787 MiB
-with the cache and 81 without, 128 files at 2744 and 150. The wall is unchanged by the switch.
+The first two legs run with `MallocLargeCache=0`. macOS libmalloc keeps freed large blocks
+resident, so over many files the default `maxrss_mib` reads the allocator's cache of per-file
+transients rather than live memory. The third leg is the one-lane fold with the cache left on:
+the gap between its row and the first is that cache, and its wall shows the switch costs none.
 
 <!-- ledger:table fold_grad_bench -->
 | leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |
 |---|---|---|---|---|---|
 | SAD v1 gradient fold (128 files, 1 lane) | 128 | 13920.01 | 80.37 [79.66-81.66] (n=3) | 0.005773 | 149.823 |
 | SAD v1 gradient fold (128 files, 4 lanes) | 128 | 13920.01 | 21.61 [21.45-21.74] (n=3) | 0.001553 | 354.516 |
+| SAD v1 gradient fold (128 files, 1 lane, allocator cache on) | TBD | TBD | TBD | TBD | TBD |
 
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->

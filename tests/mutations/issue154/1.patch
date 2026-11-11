@@ -4,13 +4,13 @@ catcher: CAUGHT cargo --test issue154_lane_fold three_lane_fold_is_port_truth_pi
 catcher: MISSED cargo --test phase4b_backlog fold_order_ascending_golden
 
 diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
-index 65faee3..97b1dc8 100644
+index fd29815..1ccaaa6 100644
 --- a/src/rust/src/engine/corpus_processor.rs
 +++ b/src/rust/src/engine/corpus_processor.rs
-@@ -457,7 +457,7 @@ impl CorpusProcessor {
+@@ -467,7 +467,7 @@ impl CorpusProcessor {
              for j in 0..nb_files {
-                 // A lane that panicked closed its channel: stop here, the scope
-                 // re-raises the panic once the other lanes are joined.
+                 // A lane that panicked closed its channel: stop here, the join below
+                 // re-raises its panic.
 -                let Ok(entry) = lanes[j % n].recv() else {
 +                let Ok(entry) = lanes[n - 1 - j % n].recv() else {
                      break;
