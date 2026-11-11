@@ -157,6 +157,104 @@ fn three_lane_fold_is_port_truth_pinned() {
     assert_pinned(3);
 }
 
+/// A TDC (algo 1, no net) config over `rows` listing rows, each `(wav stem, exists)`: a
+/// present row names a committed phase4a file, an absent one a wav that is not there.
+fn tdc_config(dir: &Path, lanes: usize, rows: &[(&str, bool)]) -> IndexMap<String, String> {
+    let corpus = reference("phase4a/corpus");
+    let listing = dir.join("tdc_fileslisting.csv");
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|(stem, exists)| {
+            let wav = if *exists {
+                corpus.join(format!("{stem}.wav"))
+            } else {
+                dir.join(format!("{stem}.wav"))
+            };
+            format!(
+                "{};{};unk;unk;1.0;1\n",
+                wav.display(),
+                corpus.join("f1.stm").display()
+            )
+        })
+        .collect();
+    std::fs::write(&listing, lines.concat()).unwrap();
+    let mapping = dir.join("tdc_language2classmapping.csv");
+    std::fs::write(&mapping, "unk;unk;0\n").unwrap();
+    let text = std::fs::read_to_string(reference("phase2b/tdc.config")).unwrap();
+    let mut m = speech::legacy_config::parse_legacy_config(&text);
+    for (key, value) in [
+        ("numOuterThreads", lanes.to_string()),
+        ("Algo_choice", "1".to_string()),
+        ("TDC_lags", "-0.002,0.016".to_string()),
+        ("Audio_offset", "0.0".to_string()),
+        ("Audio_max_duration", "2.0".to_string()),
+        ("Neural_Networks_BackPropagation_Epochs", "0".to_string()),
+        ("language2classmapping", mapping.display().to_string()),
+        ("fileslisting", listing.display().to_string()),
+    ] {
+        m.insert(key.to_string(), value);
+    }
+    m
+}
+
+/// A failed fold surfaces the FIRST failing file in ascending order and leaves the
+/// processor without results. Two lanes, two missing files: `missing_a` is file 1, on
+/// the second lane, and `missing_b` is file 2, on the first. "The lowest failing lane",
+/// the rule before issue #154, would name `missing_b`.
+#[test]
+fn a_failed_fold_names_the_first_failing_file_and_keeps_no_results() {
+    let dir = tempfile::tempdir().unwrap();
+    let rows = [
+        ("f1", true),
+        ("missing_a", false),
+        ("missing_b", false),
+        ("f2", true),
+    ];
+    let mut cp =
+        CorpusProcessor::new(vec![tdc_config(dir.path(), 2, &rows)], multi_mode()).unwrap();
+    let err = format!("{:#}", cp.run().unwrap_err());
+    assert!(err.contains("missing_a"), "the error names file 1: {err}");
+    assert!(!err.contains("missing_b"), "and not file 2: {err}");
+    assert_eq!(
+        cp.results_matrix().nrows(),
+        0,
+        "a failed fold commits no result"
+    );
+}
+
+/// The fold takes files in as the lanes finish them, and a lane that gets ahead blocks:
+/// at three lanes over eighteen files, with the fold slowed so the lanes outrun it, no
+/// more entries are ever alive than the bound (two per lane and the one being folded).
+/// A fold that buffered every file, or an unbounded lane channel, would reach eighteen.
+#[test]
+fn the_fold_keeps_a_bounded_number_of_files_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    let rows: Vec<(&str, bool)> = ["f1", "f2", "f3"]
+        .iter()
+        .cycle()
+        .take(18)
+        .map(|f| (*f, true))
+        .collect();
+    let mut cp =
+        CorpusProcessor::new(vec![tdc_config(dir.path(), 3, &rows)], multi_mode()).unwrap();
+    cp.set_fold_delay_for_test(std::time::Duration::from_millis(100));
+    cp.run().unwrap();
+    assert_eq!(
+        cp.results_matrix().nrows(),
+        36,
+        "eighteen files x two channels"
+    );
+    let (peak, bound) = cp.lane_entries_peak_for_test();
+    assert_eq!(
+        bound, 7,
+        "three lanes: two entries each and the one being folded"
+    );
+    assert!(
+        (2..=bound).contains(&peak),
+        "{peak} entries alive at once, the bound is {bound}"
+    );
+}
+
 /// The fixture writer for the pins above. Run ONCE, on the commit the fixtures describe,
 /// with `cargo test --features test-support --test issue154_lane_fold write_lane_fold_pins
 /// -- --ignored` from `src/rust/`; never as part of a suite run. It refuses to overwrite:

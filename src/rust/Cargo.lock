@@ -1517,7 +1517,6 @@ dependencies = [
  "ndarray",
  "proptest",
  "quick-xml",
- "rayon",
  "realfft",
  "rstest",
  "serde",

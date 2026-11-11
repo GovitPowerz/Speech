@@ -21,7 +21,6 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.9"
 indexmap = { version = "2", features = ["serde"] }
 ndarray = "0.16"
-rayon = "1.10"
 byteorder = "1.5"
 bytemuck = "1"
 realfft = "3"
