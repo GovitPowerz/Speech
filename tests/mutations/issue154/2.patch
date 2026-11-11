@@ -1,0 +1,21 @@
+mutation: fold_file_derivs adds the first file's matrices to zeros instead of moving them in (a negative zero becomes a positive one)
+catcher: CAUGHT cargo --lib engine::corpus_processor::tests::fold_moves_the_first_file_in_and_adds_later_files_in_place
+
+diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
+index 65faee3..772d79a 100644
+--- a/src/rust/src/engine/corpus_processor.rs
++++ b/src/rust/src/engine/corpus_processor.rs
+@@ -1192,7 +1192,12 @@ fn fold_file_derivs(
+             }
+         }
+         _ => {
+-            acc.insert(conf, file);
++            acc.insert(
++                conf,
++                file.iter()
++                    .map(|m| Array2::<f64>::zeros(m.raw_dim()) + m)
++                    .collect(),
++            );
+         }
+     }
+ }

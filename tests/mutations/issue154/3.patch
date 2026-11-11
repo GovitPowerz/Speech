@@ -1,0 +1,16 @@
+mutation: run_epoch's lane channels hold every file (sync_channel capacity LANE_CHANNEL_CAPACITY -> nb_files), so a lane never blocks and the fold buffers as it did before issue #154
+catcher: CAUGHT cargo --test issue154_lane_fold the_fold_keeps_a_bounded_number_of_files_alive
+
+diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
+index 65faee3..076eab9 100644
+--- a/src/rust/src/engine/corpus_processor.rs
++++ b/src/rust/src/engine/corpus_processor.rs
+@@ -413,7 +413,7 @@ impl CorpusProcessor {
+         let folded = std::thread::scope(|scope| -> Result<_> {
+             let mut lanes = Vec::with_capacity(n);
+             for lane in 0..n {
+-                let (tx, rx) = sync_channel::<LaneEntry>(LANE_CHANNEL_CAPACITY);
++                let (tx, rx) = sync_channel::<LaneEntry>(nb_files);
+                 lanes.push(rx);
+                 scope.spawn(move || {
+                     // Clone the epoch-start bag ONCE for this lane (:172

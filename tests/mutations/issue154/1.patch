@@ -1,0 +1,18 @@
+mutation: run_epoch's fold receives the lanes in descending order within a round (lanes[j % n] -> lanes[n - 1 - j % n]); a no-op at one lane. Successor of phase4a/1, whose sort this issue removed
+catcher: CAUGHT cargo --test issue154_lane_fold two_lane_fold_is_port_truth_pinned
+catcher: CAUGHT cargo --test issue154_lane_fold three_lane_fold_is_port_truth_pinned
+catcher: MISSED cargo --test phase4b_backlog fold_order_ascending_golden
+
+diff --git a/src/rust/src/engine/corpus_processor.rs b/src/rust/src/engine/corpus_processor.rs
+index 65faee3..97b1dc8 100644
+--- a/src/rust/src/engine/corpus_processor.rs
++++ b/src/rust/src/engine/corpus_processor.rs
+@@ -457,7 +457,7 @@ impl CorpusProcessor {
+             for j in 0..nb_files {
+                 // A lane that panicked closed its channel: stop here, the scope
+                 // re-raises the panic once the other lanes are joined.
+-                let Ok(entry) = lanes[j % n].recv() else {
++                let Ok(entry) = lanes[n - 1 - j % n].recv() else {
+                     break;
+                 };
+                 #[cfg(feature = "test-support")]
