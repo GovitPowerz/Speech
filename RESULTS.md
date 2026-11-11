@@ -4108,6 +4108,25 @@ moves.
 
 ## Issue #146 -- the stacks' layer-0 input deltas gated off: the bench and the mutation battery
 
+**Live:** `tests/mutations/issue146/` (4 patches, 12 verdicts). One older patch is re-targeted,
+same catchers, same verdicts: `phase10/cfc-backward-arm`, whose mutated line is the
+`CellLayer::Cfc` arm that now passes `last_layer`.
+
+Branch `feature/issue-146-gate-stack-input-deltas`, off `main@7aad1d0`. Every exact gradient fold
+ran each recurrent stack's backward down to layer 0's input deltas (on the LSTM one whole-sequence
+`(_InputWeights * testM)^T` product, its transpose, a time flip on the reverse stack and the
+sub-sampling inversion), and `BlstmNetwork::feed_backward` dropped the result: nothing upstream of
+a stack trains. A port-only gate on the cell (`CellLayer::set_input_deltas`, inherent like
+`set_retain_cache`, default on) is switched off by `BlstmNetwork::from_config` on every cell of
+its stacks. A gated cell skips only when it runs as the container's last backward layer
+(`last_layer`, `true` at layer 0 only) and returns a `0 x 0` array, so a gate on an upper layer is
+inert and can never hand empty deltas to the layer below. The LSTM and the sLSTM skip the product,
+Mamba and the transformer the adapter back-projection, the CfC only a copy (its input deltas come
+out of the same backbone product as its recurrent carry). `nn/network.rs` and the ten-method
+`Layer` trait are untouched, so the container and layer goldens keep reading the full contract.
+MLP mode (`lstm_neuron_nb[0] == 0`, no committed config) is out of scope. ADR-0002 records it as
+the retention gating class extended.
+
 ### The net-level criterion target
 
 `cargo bench --bench kernels -- blstm_fwd_bwd` (`src/rust/benches/kernels.rs::bench_blstm_fwd_bwd`):
@@ -4115,9 +4134,61 @@ one `BlstmNetwork` forward plus backward over one 327-frame window (the overlap 
 training configs at 8 kHz), the net built from the committed training config as written with
 backprop on and a deterministic synthetic pack, the plain path driven directly. It is the first
 criterion target above a kernel; the windowing drivers, the front end and the fold around the net
-are not in it. Measured (100 samples per target, Apple M4 Pro, `bench` profile, rustc 1.99.1):
+are not in it, so the share of a whole gradient fold is smaller and unmeasured (the fold-level
+ledger leg is issue #154's). Measured (100 samples per target, Apple M4 Pro, `bench` profile,
+rustc 1.99.1):
 
-| target | config | scope | before (`bcd2518`) |
+| target | config | scope | before (`dda34cc`) | after (`217cc3e`) | change |
+|---|---|---|---|---|---|
+| `blstm_fwd_bwd_v1` | `configs/training/lre_sad.toml` | LSTM `23,24,24`, sub-sampling `4,1`, output `48,12,1`, 327 frames | 4.467 ms | 3.801 ms | -14.9% |
+| `blstm_fwd_bwd_v2` | `configs/training/lre_sad_v2.toml` | LSTM `11,24,24`, sub-sampling `4,1`, output `48,12,1`, 327 frames | 3.262 ms | 2.891 ms | -11.4% |
+
+The issue's op-count estimate was 18% (v1) and 12% (v2) of the forward plus backward
+multiply-adds. The go or no-go bar set at the grilling was 5% on v1. A first reading taken on the
+LSTM-only commit (`e760e61`) gave 3.758 ms and 2.835 ms; the table holds the run on the final code.
+
+### The proof that no number moved
+
+- The committed goldens are byte-green, the training goldens included, and the container and
+  layer goldens (`phase3_network_backward_golden`, `phase3_lstm_backward_golden`,
+  `phase3_neuron_backward_golden`, `phase3_blstm_backward_golden`) pass with no edit.
+- **Pins.** The four new cells' backward had central-difference checks only. Eight net-level pins
+  (`src/rust/tests/stack_derivative_pins.rs` against `tests/reference_data/issue146/`: the `N x 2`
+  weight-derivative matrix after one forward plus backward on the phase9 seam configs, sLSTM,
+  Mamba, CfC and transformer, each bidirectional and forward) were written on the pre-gate commit
+  (`64bdb46`) and are green unmodified after it.
+- **Differential leg.** `nn::blstm::input_delta_gate_tests::weight_derivatives_are_bit_identical_with_the_gate_back_on`:
+  the same net with the gate switched back on folds `to_bits`-identical derivatives, five cells x
+  two directions x layer-0 sub-sampling 1 and 4, on a two-layer stack.
+- **Gate state.** `a_built_net_gates_every_stack_cell_off`: no value can detect a lost skip, so the
+  state is asserted.
+
+### What the battery measured
+
+| # | mutation | named catchers | verdict (first failure line) |
 |---|---|---|---|
-| `blstm_fwd_bwd_v1` | `configs/training/lre_sad.toml` | LSTM `23,24,24`, sub-sampling `4,1`, output `48,12,1`, 327 frames | 4.467 ms |
-| `blstm_fwd_bwd_v2` | `configs/training/lre_sad_v2.toml` | LSTM `11,24,24`, sub-sampling `4,1`, output `48,12,1`, 327 frames | 3.262 ms |
+| 1 | `LstmLayer::feed_backward` skips whenever the gate is off, ignoring `last_layer` | `phase4a_train_golden::tier2_train_epoch_weights_golden`, the differential leg, `nn::cells::tests::a_gated_cell_skips_its_input_deltas_only_as_the_last_backward_layer` | CAUGHT x3: `epoch 0 weight 0` / `lstm bidirectional sub-sampling 1` / `lstm (reverse=false): gated, inner layer` |
+| 2 | `LstmLayer::new` builds the gate off | `phase3_network_backward_golden::lstm_net_subsample_inversion_fwd`, the cell contract test (CAUGHT); `phase3_lstm_backward_golden::backward_peep_all` (MISSED) | CAUGHT: `deltas_out InvSubSampled to floor(11/2)*2=10 rows x 3 cols` / `lstm: the gate defaults on`; MISSED as declared |
+| 3 | Mamba's gate also wraps the `adapter_w` accumulation | the differential leg, `stack_derivative_pins::mamba_stack_derivatives_are_port_truth_pinned`, the cell contract test | CAUGHT x3: `mamba bidirectional sub-sampling 1` / `mismatch at (0, 0)` / `mamba (reverse=false): derivatives, last layer` |
+| 4 | `BlstmNetwork::from_config` leaves the gate on | `a_built_net_gates_every_stack_cell_off` (CAUGHT); `tier2_train_epoch_weights_golden` and the differential leg (MISSED) | CAUGHT: `lstm bidirectional`; MISSED x2 as declared |
+
+Two `MISSED` are the design read back. Row 2: the layer golden calls the LSTM with `last_layer`
+false, where the gate is inert, so the default is owned by the container golden and the contract
+test. Row 4: with the skip removed the training golden and the differential leg stay green, which
+is the bit-identity claim as a live verdict, and the reason the gate's state has its own test.
+The grilling outcome expected eight verdicts and `phase3_lstm_backward_golden` to catch row 2; the
+battery holds twelve, the cell contract test added to rows 1 to 3.
+
+### The final tree, green
+
+`cargo test --release --no-fail-fast --features test-support` on the final code: 1401 passed, 3
+ignored, 0 failed (the #155 close's 1386 plus three unit tests and the new pin binary's twelve,
+four pins and the eight shared comparator tests; the third ignored test is the pin writer).
+`uv run pytest tests -q -m "not slow"`: 1204 passed, 1 skipped, unchanged. `uv run pytest
+tests/pyo3 -q`: 296. The suite run read 289 passed and 7 failed, all seven on the `wall < 600`
+budget that closes `test_subset_gate_beats_own_init` and on nothing else: the host slept during
+the run (pytest's monotonic total was 2188 s while those seven walls summed past 10,000 s). Re-run
+with the host awake, the seven pass in 18 to 72 s each. `run.py --check`: 198 mutations, 0
+problems. The close run `--changed-since origin/main`: 29 patches, 162 verdicts, 0 differ from
+expected (`issue146`'s 12 among them, and the re-targeted `phase10/cfc-backward-arm`). No ledger
+record: the criterion rows are prose, like the Phase 7 kernel table.

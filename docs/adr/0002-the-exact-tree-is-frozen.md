@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135), 2026-11-09 (issue #140)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135), 2026-11-09 (issue #140), 2026-11-10 (issue #146)
 
 ## Context
 
@@ -139,6 +139,22 @@ the edited branch; the proof is a bit-exact pin of the exact type-1 forward meas
 pre-cut commit and green unchanged on the post-cut one
 (`phase8_frozen_norm.rs::exact_type1_posteriors_are_port_truth_pinned` against
 `tests/reference_data/phase8/`), issue #140.
+The inference-only retention gating class once more, 2026-11-10, extended to a value the one
+production caller discards: the stacks' layer-0 input deltas. A port-only gate,
+`CellLayer::set_input_deltas` (inherent, like `set_retain_cache`; default on, which is the legacy
+behaviour and the contract the container and layer goldens read), is switched off by
+`BlstmNetwork::from_config` on every cell of its stacks. A gated cell skips the deltas it would
+propagate only when it runs as the container's last backward layer (`last_layer`, which
+`nn/network.rs` passes `true` at layer 0 only) and returns a `0 x 0` array: the whole-sequence
+`(_InputWeights * testM)^T` product on the LSTM (`nn/layers.rs`) and the sLSTM, the adapter
+back-projection on Mamba and the transformer, a copy on the CfC. `nn/network.rs` and the `Layer`
+trait are untouched, and MLP mode is out of scope. This is not the caller-less class: nothing is
+deleted. Proven by the goldens byte-green with the container and layer goldens unmodified, by
+eight net-level weight-derivative pins measured on the pre-gate commit
+(`stack_derivative_pins.rs` against `tests/reference_data/issue146/`) and green unchanged after
+it, and by a permanent differential leg (the same net with the gate back on folds
+`to_bits`-identical weight derivatives, five cells x two directions x layer-0 sub-sampling 1 and
+4); the gate's state is asserted, since no golden can see a lost skip, issue #146.
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),
