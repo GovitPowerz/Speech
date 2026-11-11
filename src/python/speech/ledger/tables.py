@@ -19,7 +19,7 @@ from dataclasses import dataclass
 
 from speech.config_bridge import CELL_TYPES, DIRECTIONS
 from speech.ledger.schema import BaselineRecord, BenchRecord, Lineage, superseded_ids
-from speech.ledger.stage import LEGS
+from speech.ledger.stage import FOLD_LEGS, LEGS
 
 Record = BaselineRecord | BenchRecord
 Renderer = Callable[[list[Record]], list[str]]
@@ -359,7 +359,7 @@ def lid_phseq_cells(records: list[Record]) -> list[str]:
 # Phase 7: the exact-vs-fast bench matrix
 # --------------------------------------------------------------------------------------- #
 
-LEG_ORDER = tuple(LEGS)
+LEG_ORDER = tuple(label for label in LEGS if label not in FOLD_LEGS)
 
 
 def current_benches(records: Iterable[Record]) -> list[BenchRecord]:
@@ -461,7 +461,7 @@ def _leg_name(label: str) -> str:
 def phase7_bench_matrix(records: list[Record]) -> list[str]:
     cells = bench_cells(records)
     ratio = speedups(cells)
-    labels = [*LEG_ORDER, *sorted({c.label for c in cells} - set(LEG_ORDER))]
+    labels = [*LEG_ORDER, *sorted({c.label for c in cells} - set(LEGS))]
     hosts = sorted({c.host for c in cells})
     header = _head(_BENCH_COLUMNS)
     lines: list[str] = []
@@ -483,6 +483,39 @@ def phase7_bench_matrix(records: list[Record]) -> list[str]:
                     f"| {_leg_name(label)} | {cell.audio_s:.2f} | {path} | {wall} | {cell.wall_mean / cell.audio_s:.6f} "
                     f"| {cell.maxrss_mean:.3f} | {cell.maxrss_mean / cell.audio_s:.4f} | {speed} |"
                 )
+        lines.append("")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines + _footer(rows, records)
+
+
+# --------------------------------------------------------------------------------------- #
+# Issue #154: the exact gradient fold
+# --------------------------------------------------------------------------------------- #
+
+_FOLD_COLUMNS = ["leg", "files", "audio_s", "wall_s (mean [range], n)", "rtf", "maxrss_mib"]
+
+
+@table("fold_grad_bench")
+def fold_grad_bench(records: list[Record]) -> list[str]:
+    """One row per gradient-fold leg (exact only): the latest (SHA, build) group of each, as
+    `bench_cells` pools it. An earlier group stays in the ledger and is not rendered."""
+    cells = [c for c in bench_cells(records) if c.label in FOLD_LEGS and c.path == "exact"]
+    hosts = sorted({c.host for c in cells})
+    lines: list[str] = []
+    rows: list[BenchRecord] = []
+    for host in hosts or [None]:  # type: ignore[list-item]
+        if host is not None and len(hosts) > 1:
+            lines += [f"Host: {host}.", ""]
+        lines += _head(_FOLD_COLUMNS)
+        for label in FOLD_LEGS:
+            cell = next((c for c in cells if c.label == label and c.host == host), None)
+            if cell is None:
+                lines.append(_tbd(_leg_name(label), len(_FOLD_COLUMNS)))
+                continue
+            rows.extend(cell.records)
+            wall = f"{cell.wall_mean:.2f} [{min(cell.walls):.2f}-{max(cell.walls):.2f}] (n={len(cell.walls)})"
+            lines.append(f"| {_leg_name(label)} | {cell.files} | {cell.audio_s:.2f} | {wall} | {cell.wall_mean / cell.audio_s:.6f} | {cell.maxrss_mean:.3f} |")
         lines.append("")
     if lines and lines[-1] == "":
         lines.pop()

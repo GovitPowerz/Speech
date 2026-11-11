@@ -7,6 +7,7 @@ a release build, and RESULTS.md holds exactly what the ledger renders.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -19,7 +20,7 @@ from speech.ledger import cli, prose, schema
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
 from speech.ledger.render import RESULTS, render_file, render_text, table_names
 from speech.ledger.schema import LEDGER_DIR, BaselinePayload, BaselineRecipe, BaselineRecord, BenchPayload, BenchRecipe, BenchRecord, Build, CollarScore, Host
-from speech.ledger.stage import LEGS, sorted_first, stage_fixture_60s
+from speech.ledger.stage import FOLD_FILES, FOLD_LEGS, LEGS, sorted_first, stage_fixture_60s
 from speech.ledger.tables import TABLES, _matrix, bench_cells, current_baselines, speedups
 
 from tests.conftest import CORPUS_ROOT, requires_corpus
@@ -682,6 +683,54 @@ def test_bench_matrix_pairs_speedup_and_renders_tbd_for_missing_cells() -> None:
     assert lines[8].startswith("| LID cep corpus-gated (Twin M7) | 32.65 | exact |")
     assert lines[9] == "| LID cep corpus-gated (Twin M7) | TBD | fast | TBD | TBD | TBD | TBD | TBD |"
     assert lines[-1] == "Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0)."
+
+
+def test_fold_legs_are_exact_only_and_render_in_their_own_table() -> None:
+    """Issue #154: a gradient-fold leg has no fast twin (the fast tree refuses a training-shaped
+    config), so it names its one path, stays out of the Phase 7 matrix and its speedup column,
+    and renders one row per label from the latest records."""
+    assert [LEGS[label].paths for label in FOLD_LEGS] == [("exact",), ("exact",)] and all(LEGS[label].lineage == "v1" for label in FOLD_LEGS)
+    assert all(LEGS[label].env == (("MallocLargeCache", "0"),) for label in FOLD_LEGS) and LEGS["phase7_60s"].env == ()
+    empty = TABLES["fold_grad_bench"]([])
+    assert empty[0] == "| leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |"
+    assert empty[2:] == [
+        f"| SAD v1 gradient fold ({FOLD_FILES} files, 1 lane) | TBD | TBD | TBD | TBD | TBD |",
+        f"| SAD v1 gradient fold ({FOLD_FILES} files, 4 lanes) | TBD | TBD | TBD | TBD | TBD |",
+    ]
+    old = bench_record("fold_grad_sad_n4", "exact", 90.0, lanes=4, sha="c" * 40, at=T0.replace(day=1), maxrss=160.0)
+    new = [bench_record("fold_grad_sad_n4", "exact", w, lanes=4, at=T0.replace(minute=i), maxrss=60.0) for i, w in enumerate((40.0, 42.0))]
+    lines = TABLES["fold_grad_bench"]([old, *new])  # type: ignore[list-item]
+    assert lines[2].endswith("| TBD | TBD | TBD | TBD | TBD |")
+    assert lines[3] == f"| SAD v1 gradient fold ({FOLD_FILES} files, 4 lanes) | 1 | 10.00 | 41.00 [40.00-42.00] (n=2) | 4.100000 | 60.000 |"
+    assert not any("gradient fold" in line for line in TABLES["phase7_bench_matrix"]([old, *new]))  # type: ignore[list-item]
+
+
+def test_bench_refuses_a_path_the_leg_does_not_run(tmp_path: Path) -> None:
+    argv = ["--root", str(tmp_path / "ledger"), "bench", "--leg", "fold_grad_sad_n1", "--path", "fast", "--allow-dirty", "--stage-dir", str(tmp_path / "stage")]
+    with pytest.raises(SystemExit, match="runs exact only, not fast"):
+        cli.main(argv)
+    assert not (tmp_path / "stage").exists()
+
+
+def test_bench_json_overlays_the_leg_environment(tmp_path: Path) -> None:
+    """A multi-file leg's peak RSS is read with the allocator's large cache off (issue #154)."""
+    fake = tmp_path / "speech"
+    fake.write_text('#!/bin/sh\necho "{\\"cache\\": \\"${MallocLargeCache:-unset}\\", \\"home\\": \\"${HOME:+set}\\"}"\n')
+    fake.chmod(0o755)
+    assert bench_json(fake, tmp_path / "x.config", "exact", "l", env=dict(LEGS["fold_grad_sad_n1"].env)) == {"cache": "0", "home": "set"}
+    [(name, _)] = LEGS["fold_grad_sad_n1"].env
+    assert bench_json(fake, tmp_path / "x.config", "exact", "l")["cache"] == os.environ.get(name, "unset")
+
+
+@requires_corpus
+def test_grad_fold_leg_stages_the_map_a_training_step_runs(tmp_path: Path) -> None:
+    cfg = LEGS["fold_grad_sad_n4"].stage(tmp_path, CORPUS_ROOT)
+    conf = dict(line.split(" ", 1) for line in cfg.read_text().splitlines())
+    assert lanes_of(cfg) == 4 and conf["BLSTM_BackPropagationActivated"] == "true" and conf["Neural_Networks_BackPropagation_Epochs"] == "0"
+    assert conf["Audio_max_duration"] == "120.0" and conf["Algo_choice"] == "3"
+    for key in ("fileslisting", "language2classmapping", "BLSTM_weightsFile"):
+        assert Path(conf[key]).is_absolute() and Path(conf[key]).is_file(), key
+    assert len(Path(conf["fileslisting"]).read_text().splitlines()) == FOLD_FILES
 
 
 def test_bench_cells_pool_the_processes_of_the_latest_sha_only() -> None:

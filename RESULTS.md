@@ -538,6 +538,27 @@ FINDING to investigate, the same "measure, don't silently widen" discipline the 
 (Tasks 4-6) already established for correctness; there is no automated enforcement of these bounds
 (spec R5: "the real numbers are local... no CI assertion on them").
 
+### The exact gradient fold (issue #154)
+
+One exact gradient fold of the SAD v1 arm as a training step runs it: the launcher's `prepare`
+over the first 128 rows of the seeded train split, the 120 s cap, the from-scratch seed pack
+(seed 0), backprop on and `Epochs 0`, at one lane and at four. The legs are exact-only (the
+fast tree refuses a training-shaped config) and staged by `speech.ledger.stage`; run one with
+`uv run python -m speech.ledger bench --leg fold_grad_sad_n1`. The table shows each leg's
+latest records; earlier ones stay in the ledger.
+
+The legs run with `MallocLargeCache=0`. macOS libmalloc keeps freed large blocks resident, so
+over many files the default `maxrss_mib` reads the allocator's cache of per-file transients
+rather than live memory: measured on this config (2026-11-11, one lane), 8 files peak at 787 MiB
+with the cache and 81 without, 128 files at 2744 and 150. The wall is unchanged by the switch.
+
+<!-- ledger:table fold_grad_bench -->
+| leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |
+|---|---|---|---|---|---|
+| SAD v1 gradient fold (128 files, 1 lane) | TBD | TBD | TBD | TBD | TBD |
+| SAD v1 gradient fold (128 files, 4 lanes) | TBD | TBD | TBD | TBD | TBD |
+<!-- ledger:end -->
+
 ### Criterion micro-benches
 
 `cargo bench` (`src/rust/benches/kernels.rs`) times three exact kernels and, since Task 7, their

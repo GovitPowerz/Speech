@@ -10,7 +10,9 @@ records that share (label, path, host, SHA, build).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 from speech.ledger.schema import REPO, BenchPayload, BenchRecipe, BenchRecord, BenchRun, Build, Lineage, git_state, host_info, now_utc
@@ -26,10 +28,11 @@ def lanes_of(config: Path) -> int:
     return int(speech_rs.load_config(str(config)).get("numOuterThreads", "1"))
 
 
-def bench_json(binary: Path, config: Path, path: str, label: str, *, repeat: int = 1) -> dict[str, object]:
-    """One `speech bench --json` process; the parsed document."""
+def bench_json(binary: Path, config: Path, path: str, label: str, *, repeat: int = 1, env: Mapping[str, str] | None = None) -> dict[str, object]:
+    """One `speech bench --json` process; the parsed document. `env` overlays the leg's
+    variables (`stage.Leg.env`) on this process's environment."""
     cmd = [str(binary), "bench", f"--repeat={repeat}", f"--path={path}", "--json", f"--label={label}", str(config)]
-    out = subprocess.run(cmd, capture_output=True, text=True)
+    out = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, **env} if env else None)
     if out.returncode != 0:
         raise RuntimeError(f"speech bench failed ({out.returncode}): {out.stderr.strip()}")
     doc: dict[str, object] = json.loads(out.stdout)
