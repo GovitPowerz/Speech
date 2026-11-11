@@ -271,13 +271,12 @@ impl CorpusProcessor {
     }
 
     /// Port of `CorpusProcessor::runSolo()` (`:74-81`): the four mem matrices sized
-    /// `1 x nb_of_conf`, then one `run(0, _Mode, {}, true)` with an EMPTY derivs map
-    /// (no config is asked for its derivatives, so the harvest never fires).
+    /// `1 x nb_of_conf`, then one `run(0, _Mode, {}, true)`. The legacy passes an EMPTY
+    /// derivs map; [`Self::run_epoch`] starts every fold from one (issue #154).
     fn run_solo(&mut self) -> Result<()> {
         let nb = self.processors.nb_of_conf();
         self.mems = EpochMems::zeros(1, nb);
-        let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
-        self.run_epoch(0, self.mode, &mut derivs, true)
+        self.run_epoch(0, self.mode, true)
     }
 
     /// Port of `CorpusProcessor::train()` (`:83-111`): the four mem matrices sized
@@ -294,8 +293,7 @@ impl CorpusProcessor {
         self.mems = EpochMems::zeros(rows, nb);
 
         // legacy: :92 epoch-0 solo with _Mode, isLog true, fresh derivs.
-        let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
-        self.run_epoch(0, self.mode, &mut derivs, true)?;
+        self.run_epoch(0, self.mode, true)?;
 
         // legacy: :96-104 inner epochs -- LOCAL mode = lowercase non-verbose 'm'
         // (Multi, verbose false), isLog false, derivs cleared each epoch.
@@ -304,13 +302,11 @@ impl CorpusProcessor {
             verbose: false,
         };
         for mm in 0..self.training_epochs {
-            let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
-            self.run_epoch(mm + 1, inner_mode, &mut derivs, false)?;
+            self.run_epoch(mm + 1, inner_mode, false)?;
         }
 
         // legacy: :106-110 final eval at epoch _TrainingEpochs+1 with _Mode, isLog true.
-        let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
-        self.run_epoch(self.training_epochs + 1, self.mode, &mut derivs, true)
+        self.run_epoch(self.training_epochs + 1, self.mode, true)
     }
 
     /// Port of `CorpusProcessor::run(epoch, mode, backPropWeightsDerivatives,
@@ -321,20 +317,15 @@ impl CorpusProcessor {
     /// `mode` is the epoch-local mode (the legacy passes `_Mode` here despite the
     /// `mode` param -- `:177` reads `_Mode`, NOT the passed `mode`; reproduced: the
     /// per-file `segmentation_function` sees `self.mode`, and the passed `mode` only
-    /// distinguishes the isLog/save-gating epoch role). The `backPropWeightsDerivatives`
-    /// map: legacy `:183-199` harvests EVERY conf on EVERY processed file
-    /// unconditionally (`ii < getNbOfConf()`, no gate on the map's initial
-    /// contents) -- a conf absent from the caller's map is CREATED by the harvest,
-    /// not skipped. `run_solo`/`train`'s epoch-0 fresh empty map still ends up
-    /// populated for all confs; see the static-lane section below for the full
-    /// create-vs-`+=` fold detail.
-    fn run_epoch(
-        &mut self,
-        epoch: usize,
-        _mode: Mode,
-        derivs: &mut BTreeMap<usize, Vec<Array2<f64>>>,
-        is_log: bool,
-    ) -> Result<()> {
+    /// distinguishes the isLog/save-gating epoch role). The legacy
+    /// `backPropWeightsDerivatives` map is not a parameter (issue #154): every legacy
+    /// caller passes a fresh empty one, so the fold starts from an empty map here and
+    /// ends in [`Self::seam_derivs`], where the one caller that reads it afterwards
+    /// (the gradient check's analytic run) takes its copy. Legacy `:183-199` harvests
+    /// EVERY conf on EVERY processed file unconditionally (`ii < getNbOfConf()`), so
+    /// the fold is populated for all confs; see the static-lane section below and
+    /// [`fold_file_derivs`] for the create-vs-`+=` detail.
+    fn run_epoch(&mut self, epoch: usize, _mode: Mode, is_log: bool) -> Result<()> {
         let _ = is_log; // the per-file cout is display-only (dropped).
         let nb_files = self.corpus.nb_of_files();
 
@@ -431,6 +422,7 @@ impl CorpusProcessor {
         }
         per_file.sort_by_key(|(j, _, _)| *j);
 
+        let mut derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
         for (j, tmp, derivs_j) in per_file {
             // legacy: :181 if (tmp.size() > 0).
             if tmp.is_empty() {
@@ -438,25 +430,11 @@ impl CorpusProcessor {
             }
             // legacy: :182 _Results[jj] = tmp.
             self.results.insert(j, tmp);
-            // legacy: :183-191 per-conf derivative accumulation.
-            for ii in 0..nb_of_conf {
-                // `derivs_j` carries ALL confs for this file (the lane harvest
-                // above is unconditional per :183-191), so this `if let`
-                // matches every `ii` when the file produced results -- it is not
-                // gating on caller-requested confs.
-                if let Some(tmp_derivs) = derivs_j.get(&ii) {
-                    // legacy: :184-191 first file CREATES by move, later files += .
-                    match derivs.get_mut(&ii) {
-                        Some(existing) if !existing.is_empty() => {
-                            for (kk, mat) in tmp_derivs.iter().enumerate() {
-                                existing[kk] = &existing[kk] + mat;
-                            }
-                        }
-                        _ => {
-                            derivs.insert(ii, tmp_derivs.clone());
-                        }
-                    }
-                }
+            // legacy: :183-191 per-conf derivative accumulation. `derivs_j` carries
+            // ALL confs for this file, in ascending conf order (the lane harvest
+            // above is unconditional per :183-191).
+            for (ii, file_derivs) in derivs_j {
+                fold_file_derivs(&mut derivs, ii, file_derivs);
             }
         }
 
@@ -472,17 +450,6 @@ impl CorpusProcessor {
                 .unwrap_or_else(|| Array2::zeros((0, 0))),
         );
 
-        // F10 (phase 5): stash the folded gradient so the release seam
-        // (`weights_derivatives`) returns the SAME values `run_epoch` folded on
-        // the per-lane clones, before `save_and_update_epoch`'s Rprop consumes
-        // `derivs`. This is what `grad_check`'s own local map (`analytic_derivs`,
-        // filled by the identical fold) already sees; the main bag never runs
-        // backprop, so without this the seam read the reset-state accumulator
-        // (col0 = 0) and the whole modern loop trained on a zero gradient. An
-        // empty `derivs` (no results this epoch) stashes empty -> the read falls
-        // back to the bag. See IMPROVEMENTS.md `[phase5] F10`.
-        self.seam_derivs = derivs.clone();
-
         // legacy: :215-234 transform + saveAndUpdate gating; an empty epoch
         // (:232-234) only wrote the `.mat`, so it does nothing here.
         if !self.results.is_empty() {
@@ -490,7 +457,7 @@ impl CorpusProcessor {
             if self.training_epochs > 0 {
                 // legacy: :217-224 training branch -- saveAndUpdate ALWAYS (every
                 // epoch, including the final epoch > _TrainingEpochs).
-                self.save_and_update_epoch(epoch, derivs);
+                self.save_and_update_epoch(epoch, &derivs);
                 #[cfg(feature = "test-support")]
                 {
                     // Post-update snapshot: config-0's flat weights + the best-cost
@@ -512,9 +479,20 @@ impl CorpusProcessor {
             } else if epoch <= self.training_epochs {
                 // legacy: :226-230 non-training branch -- only when epoch <=
                 // _TrainingEpochs (i.e. epoch == 0, since _TrainingEpochs == 0).
-                self.save_and_update_epoch(epoch, derivs);
+                self.save_and_update_epoch(epoch, &derivs);
             }
         }
+
+        // F10 (phase 5): stash the folded gradient so the release seam
+        // (`weights_derivatives`) returns the SAME values `run_epoch` folded on
+        // the per-lane clones. The main bag never runs backprop, so without this
+        // the seam read the reset-state accumulator (col0 = 0) and the whole
+        // modern loop trained on a zero gradient. `save_and_update_epoch` above
+        // only borrows the fold (the Rprop update reads it, the bag keeps
+        // nothing), so it is MOVED in here, not cloned (issue #154). An empty
+        // `derivs` (no results this epoch) stashes empty -> the read falls back
+        // to the bag. See IMPROVEMENTS.md `[phase5] F10`.
+        self.seam_derivs = derivs;
         Ok(())
     }
 
@@ -702,9 +680,12 @@ impl CorpusProcessor {
 
             // legacy: :251-252 one analytic run(1, _Mode, derivs, true) with a FRESH
             // (empty) derivs map -- the harvest populates all confs via the create
-            // branch. `analytic_derivs[0][ii]` then carries the analytic Nx2.
-            let mut analytic_derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
-            self.run_epoch(1, self.mode, &mut analytic_derivs, true)?;
+            // branch. The fold lands in the stash; the copy is taken HERE, before the
+            // sweep below overwrites the stash with the folds at the perturbed
+            // weights (issue #154: one clone per check, the fold itself clones
+            // nothing). `analytic_derivs[0][ii]` then carries the analytic Nx2.
+            self.run_epoch(1, self.mode, true)?;
+            let analytic_derivs = self.seam_derivs.clone();
 
             let weights_nb = nn_weight[ii].len();
             let sweep_len = weights_nb.min(max_weights);
@@ -724,16 +705,14 @@ impl CorpusProcessor {
                 new_nn_weights[ii][kk] += epsilon;
                 self.processors = proc_mem.clone();
                 self.processors.set_weights(0, &new_nn_weights)?;
-                let mut tmp_derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
-                self.run_epoch(1, inner_mode, &mut tmp_derivs, false)?;
+                self.run_epoch(1, inner_mode, false)?;
                 let cost_plus = self.grad_check_cost(algo0, ii);
 
                 // legacy: :295-297 -eps: perturb -2*eps from the +eps point, restore.
                 new_nn_weights[ii][kk] -= 2.0 * epsilon;
                 self.processors = proc_mem.clone();
                 self.processors.set_weights(0, &new_nn_weights)?;
-                let mut tmp_derivs: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
-                self.run_epoch(1, inner_mode, &mut tmp_derivs, false)?;
+                self.run_epoch(1, inner_mode, false)?;
                 let cost_minus = self.grad_check_cost(algo0, ii);
 
                 // legacy: :326 numerical = (c+ - c-)/(2 eps).
@@ -1087,8 +1066,8 @@ impl CorpusProcessor {
     /// parity target). Sibling of [`Self::run_epoch_sequential_oracle`]: same
     /// fresh-bag sequential walk, but (a) parameterized by file order
     /// (`reverse`) and (b) returns the FOLDED per-conf derivatives instead of
-    /// the transformed results matrix, using the IDENTICAL create-vs-`+=`
-    /// accumulation `run_epoch` performs (`:184-191`) -- so a measured
+    /// the transformed results matrix, through the SAME per-file step
+    /// `run_epoch` folds with ([`fold_file_derivs`], `:184-191`) -- so a measured
     /// ascending-vs-descending divergence here is evidence about the SAME
     /// arithmetic `run_epoch`'s static-lane fold performs at `n == 1`
     /// (`lanes_n1_equals_sequential`), not a separate reimplementation.
@@ -1114,20 +1093,34 @@ impl CorpusProcessor {
                 continue;
             }
             for ii in 0..nb_of_conf {
-                let tmp_derivs = bag.get_weights_derivatives(ii);
-                match derivs.get_mut(&ii) {
-                    Some(existing) if !existing.is_empty() => {
-                        for (kk, mat) in tmp_derivs.iter().enumerate() {
-                            existing[kk] = &existing[kk] + mat;
-                        }
-                    }
-                    _ => {
-                        derivs.insert(ii, tmp_derivs);
-                    }
-                }
+                fold_file_derivs(&mut derivs, ii, bag.get_weights_derivatives(ii));
             }
         }
         Ok(derivs)
+    }
+}
+
+/// The per-file step of the fold (legacy `:184-191`, the critical-section body): fold
+/// one file's per-net `N x 2` matrices for config `conf` into `acc`. The first file to
+/// bring matrices is MOVED in, never added to zeros, so a `-0.0` it carries keeps its
+/// sign (a sum seeded at `+0.0` would lose it); every later file adds in place, the
+/// same per-element f64 add as the legacy `+=`. A config with no net (algo 0/1/2
+/// harvest an empty list) stays an empty list. One body for `run_epoch` and the
+/// fold-order probe (issue #154).
+fn fold_file_derivs(
+    acc: &mut BTreeMap<usize, Vec<Array2<f64>>>,
+    conf: usize,
+    file: Vec<Array2<f64>>,
+) {
+    match acc.get_mut(&conf) {
+        Some(existing) if !existing.is_empty() => {
+            for (kk, mat) in file.iter().enumerate() {
+                existing[kk] += mat;
+            }
+        }
+        _ => {
+            acc.insert(conf, file);
+        }
     }
 }
 
@@ -1164,6 +1157,37 @@ mod tests {
             listing.to_str().unwrap().to_string(),
         );
         m
+    }
+
+    /// Issue #154: the fold's per-file step. The first file to bring matrices is moved
+    /// in, so a `-0.0` it carries keeps its sign (a sum seeded at `+0.0` would lose it);
+    /// later files add in place, net by net; an empty harvest (algo 0/1/2) stays empty.
+    #[test]
+    fn fold_moves_the_first_file_in_and_adds_later_files_in_place() {
+        use ndarray::arr2;
+
+        let mut acc: BTreeMap<usize, Vec<Array2<f64>>> = BTreeMap::new();
+        let first = vec![arr2(&[[-0.0, 1.0], [0.25, 1.0]]), arr2(&[[2.0, 1.0]])];
+        fold_file_derivs(&mut acc, 0, first);
+        assert_eq!(
+            acc[&0][0][[0, 0]].to_bits(),
+            (-0.0_f64).to_bits(),
+            "the first file is moved in: a negative zero keeps its sign"
+        );
+
+        let second = vec![arr2(&[[-0.0, 1.0], [0.5, 1.0]]), arr2(&[[-3.0, 1.0]])];
+        fold_file_derivs(&mut acc, 0, second);
+        assert_eq!(acc[&0][0][[0, 0]].to_bits(), (-0.0_f64).to_bits());
+        assert_eq!(acc[&0][0].row(1).to_vec(), vec![0.75, 2.0]);
+        assert_eq!(acc[&0][1], arr2(&[[-1.0, 2.0]]));
+
+        fold_file_derivs(&mut acc, 1, Vec::new());
+        fold_file_derivs(&mut acc, 1, Vec::new());
+        assert!(
+            acc[&1].is_empty(),
+            "a config with no net folds to an empty list"
+        );
+        assert_eq!(acc.len(), 2);
     }
 
     /// legacy `get<T>(name, default)` exits(1) on a PRESENT but unparseable value
