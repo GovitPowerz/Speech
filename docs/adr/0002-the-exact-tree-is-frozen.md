@@ -153,8 +153,8 @@ deleted. Proven by the goldens byte-green with the container and layer goldens u
 eight net-level weight-derivative pins measured on the pre-gate commit
 (`stack_derivative_pins.rs` against `tests/reference_data/issue146/`) and green unchanged after
 it, and by a permanent differential leg (the same net with the gate back on folds
-`to_bits`-identical weight derivatives, five cells x two directions x layer-0 sub-sampling 1 and
-4); the gate's state is asserted, since no golden can see a lost skip, issue #146.
+`to_bits`-identical weight derivatives, five cells x two directions x stack sub-sampling `1,1`,
+`4,1` and `1,4`, the last running the gated layer at an inverse sub-sampling ratio of 4); the gate's state is asserted, since no golden can see a lost skip, issue #146.
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),

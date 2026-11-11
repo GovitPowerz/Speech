@@ -4159,7 +4159,8 @@ LSTM-only commit (`e760e61`) gave 3.758 ms and 2.835 ms; the table holds the run
   (`64bdb46`) and are green unmodified after it.
 - **Differential leg.** `nn::blstm::input_delta_gate_tests::weight_derivatives_are_bit_identical_with_the_gate_back_on`:
   the same net with the gate switched back on folds `to_bits`-identical derivatives, five cells x
-  two directions x layer-0 sub-sampling 1 and 4, on a two-layer stack.
+  two directions x stack sub-sampling `1,1`, `4,1` and `1,4` on a two-layer stack (the last runs
+  the gated layer at an inverse sub-sampling ratio of 4).
 - **Gate state.** `a_built_net_gates_every_stack_cell_off`: no value can detect a lost skip, so the
   state is asserted.
 

@@ -47,4 +47,6 @@ identity, a streaming row at bit-equality, and a from-scratch subset gate.
 - The input-delta gate (issue #146) is an inherent method on the enum for the same reason. Every
   cell carries it: switched off, a cell running as its container's last backward layer returns a
   `0 x 0` array instead of the deltas it would propagate, and no weight derivative moves for it.
-  A new cell is added to the differential leg in `nn/blstm.rs` that pins that.
+  A new cell is added to the differential leg in `nn/blstm.rs`, which pins that no derivative
+  moves, and to `gated_cells()` in `nn/cells/mod.rs`, whose contract test pins the `0 x 0` return:
+  the leg alone passes for a cell that ignores its gate.

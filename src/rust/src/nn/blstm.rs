@@ -2870,11 +2870,12 @@ mod input_delta_gate_tests {
     const CELLS: [&str; 5] = ["lstm", "slstm", "mamba", "cfc", "transformer"];
 
     /// A two-layer stack (so one cell is the last backward layer and one is not) over
-    /// `cell`, backprop on, with layer-0 sub-sampling `sub`.
-    fn net_for(cell: &str, direction: &str, sub: usize) -> BlstmNetwork {
+    /// `cell`, backprop on, with per-layer sub-sampling `sub`. Sub-sampling on layer 1
+    /// runs the gated layer 0 at an inverse sub-sampling ratio above 1.
+    fn net_for(cell: &str, direction: &str, sub: (usize, usize)) -> BlstmNetwork {
         let mut m: IndexMap<String, String> = IndexMap::new();
         m.insert("X_LSTMNeuronNb".into(), format!("{IN},{HIDDEN},{HIDDEN}"));
-        m.insert("X_LSTMSubSampling".into(), format!("{sub},1"));
+        m.insert("X_LSTMSubSampling".into(), format!("{},{}", sub.0, sub.1));
         let width = if direction == "forward" {
             HIDDEN
         } else {
@@ -2905,11 +2906,11 @@ mod input_delta_gate_tests {
     }
 
     /// One plain forward plus backward; the `N x 2` derivative matrix as bits.
-    fn derivative_bits(net: &mut BlstmNetwork, sub: usize) -> Vec<u64> {
+    fn derivative_bits(net: &mut BlstmNetwork, sub: (usize, usize)) -> Vec<u64> {
         let mut input = Array2::from_shape_fn((T, IN), |(r, c)| {
             0.27 + 0.13 * (r as f64) - 0.19 * (c as f64)
         });
-        let rows = T / sub;
+        let rows = T / (sub.0 * sub.1);
         let target =
             Array2::from_shape_fn(
                 (rows, CLASSES),
@@ -2937,7 +2938,7 @@ mod input_delta_gate_tests {
     fn a_built_net_gates_every_stack_cell_off() {
         for cell in CELLS {
             for direction in ["bidirectional", "forward"] {
-                let mut net = net_for(cell, direction, 1);
+                let mut net = net_for(cell, direction, (1, 1));
                 let mut seen = 0;
                 for stack in stacks(&mut net) {
                     for layer in stack.layers_mut() {
@@ -2957,7 +2958,7 @@ mod input_delta_gate_tests {
     fn weight_derivatives_are_bit_identical_with_the_gate_back_on() {
         for cell in CELLS {
             for direction in ["bidirectional", "forward"] {
-                for sub in [1, 4] {
+                for sub in [(1, 1), (4, 1), (1, 4)] {
                     let mut gated = net_for(cell, direction, sub);
                     let mut ungated = gated.clone();
                     for stack in stacks(&mut ungated) {
@@ -2968,7 +2969,7 @@ mod input_delta_gate_tests {
                     assert_eq!(
                         derivative_bits(&mut gated, sub),
                         derivative_bits(&mut ungated, sub),
-                        "{cell} {direction} sub-sampling {sub}"
+                        "{cell} {direction} sub-sampling {sub:?}"
                     );
                 }
             }

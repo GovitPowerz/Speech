@@ -43,6 +43,7 @@ use speech::features::fft::Gfft;
 use speech::features::mel::MelFilterBank;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
 use speech::nn::layers::matmul_seq;
+use speech::nn::layout::Stack;
 
 // ---------------------------------------------------------------------------
 // Exact kernels (Task 1).
@@ -282,7 +283,8 @@ fn blstm_fwd_bwd(c: &mut Criterion, name: &str, config: &str) {
     });
     let target = Array2::from_shape_fn((out_rows, out_cols), |(r, _)| (r % 2) as f64);
 
-    // The backward must really run, or the number is a forward.
+    // The backward must really run down to the gated cell (the forward stack's layer
+    // 0), or the number is a forward plus an output-MLP backward.
     {
         let mut x = input.clone();
         let mut out = Array2::<f64>::zeros((out_rows, out_cols));
@@ -292,7 +294,17 @@ fn blstm_fwd_bwd(c: &mut Criterion, name: &str, config: &str) {
             out.iter().all(|v| v.is_finite()),
             "{name}: non-finite output"
         );
-        assert!(d.column(0).iter().any(|v| *v != 0.0), "{name}: no gradient");
+        let layer0_end = net
+            .weight_layout()
+            .iter()
+            .filter(|b| b.stack == Stack::Forward && b.layer == 0)
+            .map(|b| b.offset + b.len())
+            .max()
+            .expect("a forward stack");
+        assert!(
+            d.column(0).iter().take(layer0_end).any(|v| *v != 0.0),
+            "{name}: no gradient on the forward stack's layer 0"
+        );
     }
 
     c.bench_function(name, |bch| {

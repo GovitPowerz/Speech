@@ -163,7 +163,9 @@ impl CellLayer {
         }
     }
 
-    /// The gate's state.
+    /// The gate's state: whether this cell computes its input deltas when it runs as
+    /// its container's last backward layer. Called with `last_layer` false, a cell
+    /// computes them whatever this returns.
     pub fn computes_input_deltas(&self) -> bool {
         match self {
             CellLayer::Lstm(l) => l.computes_input_deltas(),
