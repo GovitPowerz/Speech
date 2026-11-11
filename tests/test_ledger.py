@@ -799,7 +799,8 @@ def test_prose_host_is_the_last_to_record_a_phase7_leg() -> None:
     """A later gradient-fold record from another machine does not move the quoted pair's host."""
     other = Host(chip="Apple M1", arch="arm64", cores=8, os="Darwin 24.0.0")
     fold = bench_record("fold_grad_sad_n1", "exact", 80.0, at=T0.replace(day=28), host=other)
-    assert prose.derived([*_four_legs(), fold]) == prose.derived(_four_legs()) != {}  # type: ignore[list-item]
+    alone = prose.derived(_four_legs())  # type: ignore[arg-type]
+    assert prose.derived([*_four_legs(), fold]) == alone != {}  # type: ignore[list-item]
 
 
 def test_prose_derives_the_sad_60s_peak_rss_from_the_maxrss_means() -> None:
