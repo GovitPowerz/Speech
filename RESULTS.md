@@ -555,8 +555,10 @@ with the cache and 81 without, 128 files at 2744 and 150. The wall is unchanged 
 <!-- ledger:table fold_grad_bench -->
 | leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |
 |---|---|---|---|---|---|
-| SAD v1 gradient fold (128 files, 1 lane) | TBD | TBD | TBD | TBD | TBD |
-| SAD v1 gradient fold (128 files, 4 lanes) | TBD | TBD | TBD | TBD | TBD |
+| SAD v1 gradient fold (128 files, 1 lane) | 128 | 13920.01 | 80.37 [79.66-81.66] (n=3) | 0.005773 | 149.823 |
+| SAD v1 gradient fold (128 files, 4 lanes) | 128 | 13920.01 | 21.61 [21.45-21.74] (n=3) | 0.001553 | 354.516 |
+
+Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->
 
 ### Criterion micro-benches
