@@ -204,3 +204,110 @@ fn danielson_lanczos(data: &mut [f64], n: usize) {
         i += 2;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `DanielsonLanczos<N>::apply` as the port carried it up to issue #145: the two
+    /// twiddle seeds computed by `sin_series` at every node of the recursion. Private
+    /// to this module, the reference `Gfft::fft` is compared against.
+    fn per_node_danielson_lanczos(data: &mut [f64], n: usize) {
+        if n == 4 {
+            let mut tr = data[2];
+            let mut ti = data[3];
+            data[2] = data[0] - tr;
+            data[3] = data[1] - ti;
+            data[0] += tr;
+            data[1] += ti;
+            tr = data[6];
+            ti = data[7];
+            data[6] = data[5] - ti;
+            data[7] = tr - data[4];
+            data[4] += tr;
+            data[5] += ti;
+
+            tr = data[4];
+            ti = data[5];
+            data[4] = data[0] - tr;
+            data[5] = data[1] - ti;
+            data[0] += tr;
+            data[1] += ti;
+            tr = data[6];
+            ti = data[7];
+            data[6] = data[2] - tr;
+            data[7] = data[3] - ti;
+            data[2] += tr;
+            data[3] += ti;
+            return;
+        }
+        if n == 2 {
+            let tr = data[2];
+            let ti = data[3];
+            data[2] = data[0] - tr;
+            data[3] = data[1] - ti;
+            data[0] += tr;
+            data[1] += ti;
+            return;
+        }
+
+        per_node_danielson_lanczos(&mut data[..n], n / 2);
+        per_node_danielson_lanczos(&mut data[n..], n / 2);
+
+        let mut wtemp = -sin_series(n as u64, 1);
+        let wpr = -2.0 * wtemp * wtemp;
+        let wpi = -sin_series(n as u64, 2);
+        let mut wr = 1.0_f64;
+        let mut wi = 0.0_f64;
+
+        let mut i = 0usize;
+        while i < n {
+            let tempr = data[i + n] * wr - data[i + n + 1] * wi;
+            let tempi = data[i + n] * wi + data[i + n + 1] * wr;
+            data[i + n] = data[i] - tempr;
+            data[i + n + 1] = data[i + 1] - tempi;
+            data[i] += tempr;
+            data[i + 1] += tempi;
+
+            wtemp = wr;
+            wr += wr * wpr - wi * wpi;
+            wi += wi * wpr + wtemp * wpi;
+            i += 2;
+        }
+    }
+
+    /// Every transform size the factory registers, by `to_bits`: the FFT goldens stop
+    /// at `N = 256`, so this leg owns the seed of every level above it.
+    #[test]
+    fn fft_matches_the_per_node_seed_recursion() {
+        let mut state = 0x1234_5678_9abc_def0_u64;
+        for p in 1u32..=19 {
+            let n = 1usize << p;
+            let src: Vec<f64> = (0..2 * n)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((state >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect();
+
+            let mut want = src.clone();
+            scramble(&mut want, n);
+            per_node_danielson_lanczos(&mut want, n);
+
+            let mut got = src;
+            Gfft::new(p).fft(&mut got);
+
+            for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(
+                    g.to_bits(),
+                    w.to_bits(),
+                    "p={p} idx={i}: got 0x{:016x} want 0x{:016x}",
+                    g.to_bits(),
+                    w.to_bits()
+                );
+            }
+        }
+    }
+}
