@@ -898,7 +898,7 @@ pub(crate) fn copy_view_into(
 /// EXACT function (not a bench-local reimplementation) at the `matmul_seq_92x96`
 /// shape, so the criterion twin measures the real kernel every LSTM gate/dense
 /// projection in this module actually dispatches through, mirroring how
-/// `nn::layers::matmul_seq` was widened `pub` in Task 1 for the same reason.
+/// `nn::kernels::matmul_seq` was widened `pub` in Task 1 for the same reason.
 #[allow(clippy::too_many_arguments)]
 pub fn faer_project(
     in_data: &[f32],

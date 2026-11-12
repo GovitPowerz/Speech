@@ -1,0 +1,29 @@
+mutation: chain_block seeds each element from its first term instead of +0.0
+catcher: CAUGHT cargo --lib nn::kernels::tests::every_product_is_seeded_positive_zero
+catcher: CAUGHT cargo --lib nn::kernels::tests::matmul_seq_matches_the_scalar_reference
+catcher: CAUGHT cargo --lib nn::kernels::tests::matvec_transposed_matches_the_scalar_reference
+catcher: MISSED cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: MISSED cargo --test stack_derivative_pins mamba_stack_derivatives_are_port_truth_pinned
+
+diff --git a/src/rust/src/nn/kernels.rs b/src/rust/src/nn/kernels.rs
+index 72cb868..402133e 100644
+--- a/src/rust/src/nn/kernels.rs
++++ b/src/rust/src/nn/kernels.rs
+@@ -141,10 +141,15 @@ fn chain_block<const W: usize, const SCALAR_FIRST: bool>(
+ ) {
+     let stride = out.len();
+     let mut acc = [0.0f64; W];
+-    for (&s_k, row) in s.iter().zip(rows.chunks_exact(stride)) {
++    for (kk, (&s_k, row)) in s.iter().zip(rows.chunks_exact(stride)).enumerate() {
+         let block: &[f64; W] = row[j0..j0 + W].try_into().expect("block width");
+         for (a, &v) in acc.iter_mut().zip(block) {
+-            *a += if SCALAR_FIRST { s_k * v } else { v * s_k };
++            let term = if SCALAR_FIRST { s_k * v } else { v * s_k };
++            if kk == 0 {
++                *a = term;
++            } else {
++                *a += term;
++            }
+         }
+     }
+     out[j0..j0 + W].copy_from_slice(&acc);

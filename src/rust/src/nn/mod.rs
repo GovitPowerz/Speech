@@ -9,6 +9,7 @@
 pub mod activations;
 pub mod blstm;
 pub mod cells;
+pub mod kernels;
 pub mod layers;
 pub mod layout;
 pub mod network;

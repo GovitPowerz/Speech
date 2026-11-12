@@ -211,7 +211,7 @@
 
 use ndarray::Array2;
 
-use super::super::layers::matmul_seq;
+use super::super::kernels::matmul_seq;
 use super::super::layout::{BlockKind, LayerBlock};
 use super::super::network::Layer;
 use super::mamba::{RMS_EPS, silu, silu_deriv};

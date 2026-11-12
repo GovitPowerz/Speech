@@ -3,11 +3,12 @@
 //! Ported from legacy C++: LSTMLayer.*, SRNLayer.*, CWRNNLayer.*, NeuronLayer.*,
 //! Convolutional*.*. Phase 2.
 
-use ndarray::Array2;
+use ndarray::{Array2, CowArray, Ix2};
 
 use super::activations::{
     gates_deriv, gates_fn, identity_fn, logistic_fn, maxmin2_deriv, maxmin2_fn,
 };
+use super::kernels::{matmul_seq, matmul_seq_into, matvec_transposed_into, rank1_add, transposed};
 use super::layout::{BlockKind, LayerBlock};
 
 /// The legacy gate order inside every combined `4O` block (`[i|f|o|g]`, the cell input
@@ -35,36 +36,6 @@ pub const PEEPHOLE_COLUMNS: [&str; 12] = [
     "o.f",
     "o.o_prev",
 ];
-
-/// Ascending-loop matrix product `a (m x k) * b (k x n)`, accumulating the `k`
-/// index in strictly ascending order (`i`/`j` outer, `k` inner). This is the
-/// measured product-order contract for every NN product site (Task 1 probes: Eigen
-/// DIVERGES from ascending loops on the LSTM input-projection shape, and is bit-
-/// exact on the recurrence row-product; the harness reimpl uses `matSeq` for both,
-/// so the Rust port mirrors it uniformly). Matches `main.cpp`'s `matSeq`.
-///
-/// `pub` (Phase 7 Task 1, "bench plumbing outside the compute path" -- the
-/// plan's one allowed exact-tree edit for this task): widened from
-/// `pub(crate)` so `benches/kernels.rs` (a separate compilation unit outside
-/// the crate) can call it directly for the `matmul_seq_92x96` criterion
-/// target. Visibility only -- behavior is byte-for-byte unchanged, verified by
-/// the full existing golden suite (`cargo test`) staying green.
-pub fn matmul_seq(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
-    let (m, k) = a.dim();
-    let (kb, n) = b.dim();
-    debug_assert_eq!(k, kb, "matmul_seq inner dim mismatch");
-    let mut out = Array2::zeros((m, n));
-    for i in 0..m {
-        for j in 0..n {
-            let mut acc = 0.0;
-            for kk in 0..k {
-                acc += a[[i, kk]] * b[[kk, j]];
-            }
-            out[[i, j]] = acc;
-        }
-    }
-    out
-}
 
 /// Peephole LSTM layer (legacy `LSTMLayer`): the weight layout, the flat
 /// (de)serialization and the forward (all Phase 2) plus the analytic BPTT
@@ -348,12 +319,18 @@ impl LstmLayer {
         }
 
         // --- t >= 1 (:350-412) -----------------------------------------------
+        // The recurrence product's operands and its 1 x 4O output, reused per step.
+        let feedback = self.feedback_weights.as_slice().expect("standard layout");
+        let mut prev_out = vec![0.0f64; o];
+        let mut rec = vec![0.0f64; 4 * o];
         for t in 1..t_len {
             // :351 gates.row(t) += y_{t-1} * FeedbackWeights (all four blocks).
-            let prev_out = output.slice(ndarray::s![t - 1..t, ..]).to_owned();
-            let rec = matmul_seq(&prev_out, &self.feedback_weights); // 1 x 4O
+            for j in 0..o {
+                prev_out[j] = output[[t - 1, j]];
+            }
+            matmul_seq_into(&mut rec, &prev_out, feedback, (1, o, 4 * o));
             for j in 0..4 * o {
-                gates[[t, j]] += rec[[0, j]];
+                gates[[t, j]] += rec[j];
             }
             // :353-356 cells peep into i,f: i += c_{t-1}.*P[0]; f += c_{t-1}.*P[1].
             if self.cells_peep {
@@ -462,7 +439,10 @@ impl LstmLayer {
         output: &mut Array2<f64>,
         last_layer: bool,
     ) {
-        let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
+        let input_rev = input
+            .slice(ndarray::s![..;-1, ..])
+            .as_standard_layout()
+            .into_owned();
         let mut output_rev = Array2::<f64>::zeros(output.dim());
         self.feed_forward(&input_rev, &mut output_rev, last_layer);
         output.assign(&output_rev.slice(ndarray::s![..;-1, ..]));
@@ -483,11 +463,13 @@ impl LstmLayer {
     /// captures the prior forget-gate delta BEFORE the forget block overwrites it, for
     /// the input-gate block to read at `:660`.
     ///
-    /// Products: the two NN-wide-k GEMMs (`(_FeedbackWeights*test)^T` `:703`,
-    /// `(_InputWeights*testM)^T` `:707`) go through `matmul_seq` (the measured
-    /// ascending-loop contract); the rank-1 outer-product deriv accumulations
-    /// (`input.col(row)*deltasX`, `output.col(row-1)*deltasX`) are k=1, done as
-    /// explicit scalar loops (bit-identical to the legacy Eigen product at k=1).
+    /// Products, all through `nn/kernels.rs` (the measured ascending-loop contract,
+    /// issue #144): the per-row `(_FeedbackWeights*test)^T` `:703` is the transposed
+    /// matvec over a scratch built once per call, `(_InputWeights*testM)^T` `:707`
+    /// is `matmul_seq`, and the rank-1 outer-product deriv accumulations
+    /// (`input.col(row)*deltasX`, `output.col(row-1)*deltasX`, k=1, bit-identical to
+    /// the legacy Eigen product) are `rank1_add`, each called where its scalar loop
+    /// stood, so every element keeps its reverse-time summation order.
     ///
     /// `last_layer` is unused by the legacy body. The port reads it for one thing: with
     /// the input-delta gate off (issue #146), the last backward layer skips the `:707`
@@ -511,15 +493,29 @@ impl LstmLayer {
         // to I (the input matrix itself is padded, NOT truncated -- differs from the
         // dense width-recon only in that both there and here the accumulation half
         // reads the reconstructed tensor); else as-is.
-        let recon_input: Array2<f64> = if cols > i {
-            input.slice(ndarray::s![.., ..i]).to_owned()
+        // Held row-major for the slice kernels: a time-reversed owned array keeps its
+        // negative stride through `to_owned`, and a standard one is borrowed as is.
+        let recon_input: CowArray<'_, f64, Ix2> = if cols > i {
+            input
+                .slice(ndarray::s![.., ..i])
+                .as_standard_layout()
+                .into_owned()
+                .into()
         } else if cols < i {
             let mut padded = Array2::<f64>::zeros((lines_nb, i));
             padded.slice_mut(ndarray::s![.., ..cols]).assign(input);
-            padded
+            padded.into()
         } else {
-            input.to_owned()
+            input.as_standard_layout()
         };
+        let recon_rows = recon_input.as_slice().expect("standard layout");
+        let output = output.as_standard_layout();
+        let output_rows = output.as_slice().expect("standard layout");
+        let output_cols = output.dim().1;
+        assert!(output_cols >= o, "LSTM backward: output width");
+        // The gate off at the last backward layer: the deltas' one reader discards
+        // them, so neither `testM` nor the :707 product is built.
+        let skip_input_deltas = last_layer && !self.input_deltas;
 
         let p = &self.peep_weight;
         let g = &self.gates;
@@ -531,6 +527,8 @@ impl LstmLayer {
         let mut fw_d = Array2::<f64>::zeros((o, 4 * o));
         let mut pp_d = Array2::<f64>::zeros((12, o));
         let mut bs_d = Array2::<f64>::zeros((1, 4 * o));
+        let iw_acc = iw_d.as_slice_mut().expect("standard layout");
+        let fw_acc = fw_d.as_slice_mut().expect("standard layout");
 
         // 1xO state vectors persisting across the reverse-time loop (`:547-557`).
         let mut deltas_feedback = vec![0.0f64; o];
@@ -542,10 +540,25 @@ impl LstmLayer {
         let mut epsilon_state = vec![0.0f64; o];
 
         // testM (4O x T) stacks per-row [i|f|o|c] gate deltas for the :707 GEMM.
-        let mut test_m = Array2::<f64>::zeros((4 * o, lines_nb));
+        let mut test_m = if skip_input_deltas {
+            Array2::zeros((0, 0))
+        } else {
+            Array2::<f64>::zeros((4 * o, lines_nb))
+        };
+        // The :703 matvec's operands: `_FeedbackWeights^T` (4O x O, built once per
+        // call) and the row's `test` column (4O).
+        let feedback_t = transposed(self.feedback_weights.view());
+        let mut test_col = vec![0.0f64; 4 * o];
 
         for row in (0..lines_nb).rev() {
             let last_row = row == lines_nb - 1;
+            let x_row = &recon_rows[row * i..(row + 1) * i];
+            // y_{t-1}: empty at row 0, where no block reads it (the `row > 0` guards).
+            let y_prev = if row > 0 {
+                &output_rows[(row - 1) * output_cols..][..o]
+            } else {
+                &[][..]
+            };
 
             // :580 epsilonCells = deltas.row(row) + deltasFeedback.
             let mut epsilon_cells = vec![0.0f64; o];
@@ -575,17 +588,9 @@ impl LstmLayer {
             }
 
             // :595-605 output-gate deriv accumulation.
-            for ii in 0..i {
-                for j in 0..o {
-                    iw_d[[ii, 2 * o + j]] += recon_input[[row, ii]] * deltas_output_gate[j];
-                }
-            }
+            rank1_add(iw_acc, 4 * o, 2 * o, x_row, &deltas_output_gate);
             if row > 0 {
-                for ii in 0..o {
-                    for j in 0..o {
-                        fw_d[[ii, 2 * o + j]] += output[[row - 1, ii]] * deltas_output_gate[j];
-                    }
-                }
+                rank1_add(fw_acc, 4 * o, 2 * o, y_prev, &deltas_output_gate);
                 if self.gates_rec_peep {
                     for j in 0..o {
                         pp_d[[11, j]] += deltas_output_gate[j] * g[[row - 1, 2 * o + j]];
@@ -639,17 +644,9 @@ impl LstmLayer {
                 deltas_cells[j] =
                     g[[row, j]] * maxmin2_deriv(g[[row, 3 * o + j]]) * epsilon_state[j];
             }
-            for ii in 0..i {
-                for j in 0..o {
-                    iw_d[[ii, 3 * o + j]] += recon_input[[row, ii]] * deltas_cells[j];
-                }
-            }
+            rank1_add(iw_acc, 4 * o, 3 * o, x_row, &deltas_cells);
             if row > 0 {
-                for ii in 0..o {
-                    for j in 0..o {
-                        fw_d[[ii, 3 * o + j]] += output[[row - 1, ii]] * deltas_cells[j];
-                    }
-                }
+                rank1_add(fw_acc, 4 * o, 3 * o, y_prev, &deltas_cells);
             }
             for j in 0..o {
                 bs_d[[0, 3 * o + j]] += deltas_cells[j];
@@ -679,16 +676,8 @@ impl LstmLayer {
                 for j in 0..o {
                     deltas_forget_gate[j] = gates_deriv(g[[row, o + j]]) * tmp_f[j];
                 }
-                for ii in 0..i {
-                    for j in 0..o {
-                        iw_d[[ii, o + j]] += recon_input[[row, ii]] * deltas_forget_gate[j];
-                    }
-                }
-                for ii in 0..o {
-                    for j in 0..o {
-                        fw_d[[ii, o + j]] += output[[row - 1, ii]] * deltas_forget_gate[j];
-                    }
-                }
+                rank1_add(iw_acc, 4 * o, o, x_row, &deltas_forget_gate);
+                rank1_add(fw_acc, 4 * o, o, y_prev, &deltas_forget_gate);
                 if self.cells_peep {
                     for j in 0..o {
                         pp_d[[1, j]] += deltas_forget_gate[j] * cs[[row - 1, j]];
@@ -728,11 +717,7 @@ impl LstmLayer {
                 for j in 0..o {
                     deltas_forget_gate[j] = gates_deriv(g[[row, o + j]]) * tmp_f[j];
                 }
-                for ii in 0..i {
-                    for j in 0..o {
-                        iw_d[[ii, o + j]] += recon_input[[row, ii]] * deltas_forget_gate[j];
-                    }
-                }
+                rank1_add(iw_acc, 4 * o, o, x_row, &deltas_forget_gate);
                 for j in 0..o {
                     bs_d[[0, o + j]] += deltas_forget_gate[j];
                 }
@@ -760,17 +745,9 @@ impl LstmLayer {
             for j in 0..o {
                 deltas_input_gate[j] = gates_deriv(g[[row, j]]) * tmp_i[j];
             }
-            for ii in 0..i {
-                for j in 0..o {
-                    iw_d[[ii, j]] += recon_input[[row, ii]] * deltas_input_gate[j];
-                }
-            }
+            rank1_add(iw_acc, 4 * o, 0, x_row, &deltas_input_gate);
             if row > 0 {
-                for ii in 0..o {
-                    for j in 0..o {
-                        fw_d[[ii, j]] += output[[row - 1, ii]] * deltas_input_gate[j];
-                    }
-                }
+                rank1_add(fw_acc, 4 * o, 0, y_prev, &deltas_input_gate);
                 if self.cells_peep {
                     for j in 0..o {
                         pp_d[[0, j]] += deltas_input_gate[j] * cs[[row - 1, j]];
@@ -796,24 +773,24 @@ impl LstmLayer {
 
             // :688-690 stack [i|f|o|c] into testM.col(row) (4O x 1).
             for j in 0..o {
-                test_m[[j, row]] = deltas_input_gate[j];
-                test_m[[o + j, row]] = deltas_forget_gate[j];
-                test_m[[2 * o + j, row]] = deltas_output_gate[j];
-                test_m[[3 * o + j, row]] = deltas_cells[j];
+                test_col[j] = deltas_input_gate[j];
+                test_col[o + j] = deltas_forget_gate[j];
+                test_col[2 * o + j] = deltas_output_gate[j];
+                test_col[3 * o + j] = deltas_cells[j];
+            }
+            if !skip_input_deltas {
+                for (k, &v) in test_col.iter().enumerate() {
+                    test_m[[k, row]] = v;
+                }
             }
 
             // :703 deltasFeedback = (_FeedbackWeights * test)^T, for the next (earlier)
             // iteration's :580. test is testM.col(row) (4O x 1).
-            let test_col = test_m.slice(ndarray::s![.., row..row + 1]).to_owned();
-            let fb = matmul_seq(&self.feedback_weights, &test_col); // O x 1
-            for j in 0..o {
-                deltas_feedback[j] = fb[[j, 0]];
-            }
+            matvec_transposed_into(&mut deltas_feedback, &feedback_t, &test_col);
         }
 
-        // :707 deltasPreviousLayer = (_InputWeights * testM)^T -> T x I. Skipped when
-        // the gate is off at the last backward layer: its one reader discards it.
-        let deltas_previous_layer = if last_layer && !self.input_deltas {
+        // :707 deltasPreviousLayer = (_InputWeights * testM)^T -> T x I.
+        let deltas_previous_layer = if skip_input_deltas {
             Array2::zeros((0, 0))
         } else {
             let dpl = matmul_seq(&self.input_weights, &test_m); // I x T
@@ -843,6 +820,8 @@ impl LstmLayer {
     /// rows, run the forward-order `feed_backward`, reverse the returned deltas. The
     /// caches are STORED time-reversed after `feed_forward_reverse` and consumed
     /// AS-IS here (do NOT un-reverse them -- see `feed_forward_reverse`, risk R9).
+    /// The reversed input and output are copied row-major, so `feed_backward`
+    /// borrows them instead of copying a negative-stride array again.
     pub fn feed_backward_reverse(
         &mut self,
         input: &Array2<f64>,
@@ -851,8 +830,14 @@ impl LstmLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
-        let output_rev = output.slice(ndarray::s![..;-1, ..]).to_owned();
+        let input_rev = input
+            .slice(ndarray::s![..;-1, ..])
+            .as_standard_layout()
+            .into_owned();
+        let output_rev = output
+            .slice(ndarray::s![..;-1, ..])
+            .as_standard_layout()
+            .into_owned();
         let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
         let dpl = self.feed_backward(
             &input_rev,
@@ -1163,26 +1148,38 @@ impl NeuronLayer {
 
         // :157-166 width-tolerant input reconstruction (T x I, zero-padded /
         // truncated on the COLUMN axis to match _InputSize).
-        let recon_input: Array2<f64> = if cols > i {
-            input.slice(ndarray::s![.., ..i]).to_owned()
+        let recon_input: CowArray<'_, f64, Ix2> = if cols > i {
+            input
+                .slice(ndarray::s![.., ..i])
+                .as_standard_layout()
+                .into_owned()
+                .into()
         } else if cols < i {
             let mut padded = Array2::<f64>::zeros((t, i));
             padded.slice_mut(ndarray::s![.., ..cols]).assign(input);
-            padded
+            padded.into()
         } else {
-            input.to_owned()
+            input.as_standard_layout()
         };
 
-        // :178-182 weightsDerivatives += input.col(jj)*deltas.row(jj) per row.
+        // :178-182 weightsDerivatives += input.col(jj)*deltas.row(jj) per row: the
+        // rank-1 kernel on a `+0.0` accumulator, equal to folding each frame's
+        // `matmul_seq` outer product (`nn/kernels.rs`, "The dense layer's outer
+        // product").
+        assert_eq!(deltas.dim().1, o, "dense backward: deltas width");
+        let recon_rows = recon_input.as_slice().expect("standard layout");
+        let deltas_std = deltas.as_standard_layout();
+        let delta_rows = deltas_std.as_slice().expect("standard layout");
         let mut weights_derivatives = Array2::<f64>::zeros((i, o));
+        let wd_acc = weights_derivatives.as_slice_mut().expect("standard layout");
         for jj in 0..deltas.dim().0 {
-            let in_row = recon_input
-                .slice(ndarray::s![jj..jj + 1, ..])
-                .t()
-                .to_owned(); // I x 1
-            let delta_row = deltas.slice(ndarray::s![jj..jj + 1, ..]).to_owned(); // 1 x O
-            let outer = matmul_seq(&in_row, &delta_row); // I x O
-            weights_derivatives += &outer;
+            rank1_add(
+                wd_acc,
+                o,
+                0,
+                &recon_rows[jj * i..(jj + 1) * i],
+                &delta_rows[jj * o..(jj + 1) * o],
+            );
         }
         // :183 biaisesDerivatives += deltas.colwise().sum().
         let mut biases_derivatives = Array2::<f64>::zeros((1, o));
@@ -1204,7 +1201,7 @@ impl NeuronLayer {
 
         // deltas (T x O) * weights^T (O x I) -> T x I, via matmul_seq (the
         // measured ascending-loop contract; Eigen diverges at NN-wide k here).
-        let w_t = self.weights.t().to_owned();
+        let w_t = self.weights.t().as_standard_layout().into_owned();
         let mut deltas_out = matmul_seq(deltas, &w_t);
         if !last_layer {
             // :204 hidden -> .* Maxmin2'(InputSeq), literally the UN-RECONSTRUCTED

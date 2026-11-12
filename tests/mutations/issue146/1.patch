@@ -4,15 +4,15 @@ catcher: CAUGHT cargo --lib nn::blstm::input_delta_gate_tests::weight_derivative
 catcher: CAUGHT cargo --lib nn::cells::tests::a_gated_cell_skips_its_input_deltas_only_as_the_last_backward_layer
 
 diff --git a/src/rust/src/nn/layers.rs b/src/rust/src/nn/layers.rs
-index 192dd0c..ce02506 100644
+index ab5c576..05a35fc 100644
 --- a/src/rust/src/nn/layers.rs
 +++ b/src/rust/src/nn/layers.rs
-@@ -813,7 +813,7 @@ impl LstmLayer {
+@@ -515,7 +515,7 @@ impl LstmLayer {
+         assert!(output_cols >= o, "LSTM backward: output width");
+         // The gate off at the last backward layer: the deltas' one reader discards
+         // them, so neither `testM` nor the :707 product is built.
+-        let skip_input_deltas = last_layer && !self.input_deltas;
++        let skip_input_deltas = !self.input_deltas;
  
-         // :707 deltasPreviousLayer = (_InputWeights * testM)^T -> T x I. Skipped when
-         // the gate is off at the last backward layer: its one reader discards it.
--        let deltas_previous_layer = if last_layer && !self.input_deltas {
-+        let deltas_previous_layer = if !self.input_deltas {
-             Array2::zeros((0, 0))
-         } else {
-             let dpl = matmul_seq(&self.input_weights, &test_m); // I x T
+         let p = &self.peep_weight;
+         let g = &self.gates;

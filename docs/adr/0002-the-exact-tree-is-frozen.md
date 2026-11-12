@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135), 2026-11-09 (issue #140), 2026-11-10 (issue #146), 2026-11-11 (issue #154)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135), 2026-11-09 (issue #140), 2026-11-10 (issue #146), 2026-11-11 (issue #154), 2026-11-12 (issue #144)
 
 ## Context
 
@@ -169,6 +169,29 @@ unmodified, and by pins
 of the fold at two and three lanes measured on the pre-change commit
 (`issue154_lane_fold.rs` against `tests/reference_data/issue154/`) and green unchanged after
 it, issue #154.
+A new class, 2026-11-12, the order-preserving loop restructure: the loop nest of a product
+changes and the value of every output element does not. Each element keeps its `+0.0` seed (the
+first term is added to it, never assigned), the operand order of each multiply and its ascending
+summation order, one add per term, with no fused multiply-add (`f64::mul_add` and `f32::mul_add`
+are `disallowed-methods` in the workspace `clippy.toml`). `nn/kernels.rs` holds four kernels:
+`matmul_seq` (same name and signature, the nest now `k` outer over blocks of up to 16
+adjacent outputs whose accumulators stay in registers, so the innermost loop runs over
+independent outputs instead of one dependent add chain; the plain `i-k-j` nest the grilling
+named was measured 2 to 6 times slower than the legacy nest on outputs under 8 wide and
+dropped), its caller-buffer variant, the same nest as a matvec over a transposed weight for the
+`n = 1` products (the transposed copy a scratch built per `feed_forward` / `feed_backward` call,
+nothing stored on a layer), and the rank-1 derivative accumulation, called where each scalar loop stood inside the
+reverse-time loop, so the `row == 0` exclusions and the gate interleave do not move. The LSTM and
+the dense layer (`nn/layers.rs`), the sLSTM and the CfC compute every product through them (the
+LSTM and the sLSTM call all four, the dense layer the product and the rank-1 add, the CfC the
+three slice kernels); Mamba and the transformer take the new nest through `matmul_seq` by import
+only, their explicit backward loops untouched. One equivalence is argued, not only measured: the dense layer's per-frame outer
+product reached its accumulator as `0.0 + x*d` and is now added as `x*d`, equal because an
+accumulator seeded `+0.0` is never `-0.0` under round-to-nearest. Proven by the goldens and
+issue #146's eight derivative pins byte-green with no test edited, and by a permanent
+differential leg in `nn/kernels.rs` comparing each kernel with a scalar reference (the legacy
+`i-j-k` nest, kept private to that test module) by `to_bits` over random shapes and values,
+signed zeros, infinities and subnormals included, NaN elements by `is_nan`, issue #144.
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),

@@ -1,0 +1,6 @@
+# The exact tree's bit identity rests on separate multiplies and adds (nn/kernels.rs,
+# issue #144): a fused multiply-add rounds once where the legacy rounds twice.
+disallowed-methods = [
+    { path = "f64::mul_add", reason = "a fused multiply-add changes the rounding; write `a * b + c` (nn/kernels.rs)" },
+    { path = "f32::mul_add", reason = "a fused multiply-add changes the rounding; write `a * b + c` (nn/kernels.rs)" },
+]
