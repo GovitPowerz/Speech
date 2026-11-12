@@ -454,8 +454,8 @@ measurement per (leg, path, host), taken 2026-11-12 on `d83b111` (the same Apple
 `maxrss_mib` column), and `speech.ledger.prose` asserts them. Peak RSS is a cost figure like
 the walls, not a metric under the ADR-0003 STOP rule.
 
-Two earlier measurements are history. The reading that follows the table refers to the
-ORIGINAL 2026-07 one (SAD 4.58-4.60x, LID 3.53-3.57x, macOS 26.5.2). The 2026-10-02 re-measure
+Two earlier measurements are history. The "Reading --" paragraph after the before/after table
+refers to the ORIGINAL 2026-07 one (SAD 4.58-4.60x, LID 3.53-3.57x, macOS 26.5.2). The 2026-10-02 re-measure
 (`cae165a`, rustc 1.99.0) moved both paths' absolute walls (exact ~10-20% slower, fast ~10%
 slower) and the ratios to SAD 4.93x / LID 3.43-3.63x, with a 60 s peak RSS of 43.5 / 57.2 MiB
 (41.95 / 56.52 in the Phase 10 Task 5 table below); its records stay in the ledger and the
@@ -485,11 +485,11 @@ Against the 2026-10-02 records (mean wall of three processes, seconds):
 | LID phSeq corpus-gated (Twin M7) | 0.0538 -> 0.0260 (-51.7%) | 0.0157 -> 0.0140 (-10.6%) | 3.43x -> 1.86x |
 | LID cep corpus-gated (Twin M7) | 0.0415 -> 0.0221 (-46.7%) | 0.0114 -> 0.0102 (-11.1%) | 3.63x -> 2.18x |
 
-The ratios fell because the exact walls did. The two measurements are 41 days and one rustc
-patch release apart, so the exact column is not issue #144's change alone: the fast tree's
-source did not change in #144 and its walls still read 7-11% lower, a move this pair does not
-attribute. An unrecorded second pass (five processes per path, same build, minutes later) read
-3.72x, 3.69x, 1.88x and 2.18x.
+The ratios fell because the exact walls did. The two measurements are 41 days, one rustc patch
+release and 473 commits apart (`cae165a..d83b111`), so the exact column is not issue #144's
+change alone: the exact tree also moved in #121, #135 and #140, and the fast tree, whose
+behaviour #144 did not touch, was reworked in #83, #84 and #88. Its walls read 7-11% lower, a
+move this pair does not attribute.
 
 Reading -- speedup lands ABOVE the T6 Python-level scoring range (2.6-3.6x, warm-cache `.scr`/DCF
 scoring incl. PyO3 crossing + file I/O): 3.5-4.6x here, exactly the T6 report's own prediction
@@ -568,8 +568,8 @@ reading that the old bound was set at, rounded down to one decimal:
 - **LID Mode-7 arms: wall speedup >= 1.3x.** The 2.5x bound sat at 0.71 of 3.53x; the same
   fraction of 1.86x is 1.32x.
 - **SAD arms: wall speedup >= 2.8x.** The 3.5x bound sat at 0.76 of 4.58x; the same fraction of
-  3.70x is 2.83x. The arms read 3.70x and 3.71x, 5% above the old bound, which was set with
-  24% headroom.
+  3.70x is 2.83x. The arms read 3.70x and 3.71x: the old bound sat 5% under them, against the
+  24% under 4.58x it was set with.
 
 The memory bounds are unchanged and hold: SAD fast at 0.759x and 0.693x of exact against 0.85x,
 LID at 0.576x and 0.608x against 0.8x. The CI pin (`fast <= exact * 1.5` on the 60 s fixture)
@@ -1357,6 +1357,9 @@ wall speedup >= 3.5x on every row, causal-fast-vs-BLSTM-fast >= 1.3x, and fast m
 1.3x of the ~68 MB plateau (SUPERSEDED -- see Phase 10's f32-mel section: the plateau is now
 ~42 MB). A reading meaningfully below these (not within the ranges above, which
 already carry headroom) is a FINDING to investigate; there is no automated enforcement.
+NOT RE-MEASURED after issue #144 (2026-11-12): the exact kernels moved every exact cell's
+products, the denominator of this ratio, so the 3.5x wall bound is stale until these rows are
+re-run and re-derived as the Phase 7 bounds were.
 
 ## Phase 10 -- the CfC cell (Tasks 1/2/3)
 
