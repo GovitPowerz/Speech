@@ -35,9 +35,20 @@ pub fn sin_series(b: u64, a: u64) -> f64 {
     x * s(2, x)
 }
 
+/// One `[sin_series(n, 1), sin_series(n, 2)]` pair per recursion level, indexed by
+/// `log2(n)`. Levels 0 to 2 are the hard-coded base blocks and read no seed.
+type SeedTable = [[f64; 2]; 20];
+
 /// Generic FFT object; `p` is the transform power (`N = 1 << p` complex points).
+///
+/// `seeds` holds the twiddle seeds of every general-case level `n = 8, 16, ..., N`
+/// (issue #145). The legacy template evaluates them at compile time, once per `N`;
+/// the port computed them at every node of the recursion, 510 `sin_series` calls for
+/// 16 distinct values at `p = 10`. They are the same calls with the same arguments,
+/// made once here.
 pub struct Gfft {
     p: u32,
+    seeds: SeedTable,
 }
 
 impl Gfft {
@@ -47,7 +58,12 @@ impl Gfft {
             (1..=19).contains(&p),
             "GFFT power p={p} out of range [1, 19]"
         );
-        Gfft { p }
+        let mut seeds = [[0.0_f64; 2]; 20];
+        for (level, seed) in seeds.iter_mut().enumerate().take(p as usize + 1).skip(3) {
+            let n = 1u64 << level;
+            *seed = [sin_series(n, 1), sin_series(n, 2)];
+        }
+        Gfft { p, seeds }
     }
 
     /// In-place FFT: `data` is `2 * (1 << p)` interleaved re/im f64, negative
@@ -56,7 +72,7 @@ impl Gfft {
         let n = 1usize << self.p; // complex points
         assert_eq!(data.len(), 2 * n, "data len must be 2 * (1 << p)");
         scramble(data, n);
-        danielson_lanczos(data, n);
+        danielson_lanczos(data, n, &self.seeds);
     }
 }
 
@@ -136,8 +152,9 @@ fn scramble(data: &mut [f64], n: usize) {
 /// number of complex points of this block); the block spans `data[0..2*n]`. Split
 /// at offset `n` doubles (each half = `n/2` complex = `n` doubles), then the
 /// running-twiddle butterfly. Base cases `n==4` and `n==2` are the hard-coded
-/// blocks (exact statement order preserved).
-fn danielson_lanczos(data: &mut [f64], n: usize) {
+/// blocks (exact statement order preserved). `seeds` is the owning `Gfft`'s table;
+/// a node reads the pair of its own level.
+fn danielson_lanczos(data: &mut [f64], n: usize, seeds: &SeedTable) {
     if n == 4 {
         // DanielsonLanczos<4> hard-coded fused -i butterfly (fft.hpp:107-136).
         let mut tr = data[2];
@@ -179,13 +196,14 @@ fn danielson_lanczos(data: &mut [f64], n: usize) {
     }
 
     // General case (fft.hpp:78-103): recurse on both halves, then butterfly.
-    danielson_lanczos(&mut data[..n], n / 2);
-    danielson_lanczos(&mut data[n..], n / 2);
+    danielson_lanczos(&mut data[..n], n / 2, seeds);
+    danielson_lanczos(&mut data[n..], n / 2, seeds);
 
     // Twiddle seeds: wtemp = -Sin(N,1); wpr = -2*wtemp*wtemp; wpi = -Sin(N,2).
-    let mut wtemp = -sin_series(n as u64, 1);
+    let [sin_1, sin_2] = seeds[n.trailing_zeros() as usize];
+    let mut wtemp = -sin_1;
     let wpr = -2.0 * wtemp * wtemp;
-    let wpi = -sin_series(n as u64, 2);
+    let wpi = -sin_2;
     let mut wr = 1.0_f64;
     let mut wi = 0.0_f64;
 
