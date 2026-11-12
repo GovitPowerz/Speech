@@ -191,7 +191,7 @@ fn lecun_tanh_f32(x: f32) -> f32 {
 const TRANSFORMER_ALIBI_EXPONENT: f64 = -8.0;
 
 /// Ascending dot over two contiguous `n`-element slices -- the f32 stand-in for one
-/// `nn::layers::matmul_seq` output cell (`acc = 0; for kk in 0..k { acc +=
+/// `nn::kernels::matmul_seq` output cell (`acc = 0; for kk in 0..k { acc +=
 /// a*b }`). Every projection in this module routes through it, so the accumulation
 /// order is one fact rather than a dozen hand-written loops.
 #[inline]

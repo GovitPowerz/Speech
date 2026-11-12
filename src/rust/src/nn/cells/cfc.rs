@@ -117,7 +117,7 @@
 use ndarray::Array2;
 
 use super::super::activations::logistic_fn;
-use super::super::layers::matmul_seq;
+use super::super::kernels::matmul_seq;
 use super::super::layout::{BlockKind, LayerBlock};
 use super::super::network::Layer;
 

@@ -1,5 +1,5 @@
 //! Phase 7 Task 1: criterion micro-benches over the EXISTING exact kernels
-//! (`nn::layers::matmul_seq`, `features::fft::Gfft`, `features::mel::
+//! (`nn::kernels::matmul_seq`, `features::fft::Gfft`, `features::mel::
 //! MelFilterBank::apply_filter_bank`), on fixture-shaped inputs. Phase 7 Task 7
 //! adds the three fast-path twins these target names were reserved for:
 //! `faer_project_92x96` (vs `matmul_seq_92x96`), `realfft_1024` (vs
@@ -44,7 +44,7 @@ use speech::fast::nn::faer_project;
 use speech::features::fft::Gfft;
 use speech::features::mel::MelFilterBank;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
-use speech::nn::layers::matmul_seq;
+use speech::nn::kernels::matmul_seq;
 use speech::nn::layout::Stack;
 
 // ---------------------------------------------------------------------------
