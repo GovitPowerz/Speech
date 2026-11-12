@@ -95,8 +95,8 @@
 //! ## Conventions inherited from the house (`nn::layers::LstmLayer`, `cells::slstm`)
 //!
 //! - Every projection matrix is stored TRANSPOSED (`w[[k, j]] == W[j, k]`), so each
-//!   product is a plain [`matmul_seq`] call -- the ascending accumulation contract,
-//!   uniformly. The three heads live in ONE combined `B x 3H` matrix with column
+//!   product is a plain `matmul_seq` kernel call (`nn/kernels.rs`) -- the ascending
+//!   accumulation contract, uniformly. The three heads live in ONE combined `B x 3H` matrix with column
 //!   blocks `[ff1 | ff2 | gate]` (the sLSTM combined-gate-block precedent), so a
 //!   timestep runs `L + 1` products and no more.
 //! - The S1.2 flat order is a (de)serialization concern only, walked ONCE by
@@ -112,12 +112,12 @@
 //!   get a bidirectional stack out of a one-directional cell.
 //! - Input WIDTH TOLERANCE: `cols > in` crops to the left `in` columns, `cols < in`
 //!   zero-pads. The propagated deltas are always `T x in`.
-//! - All summations are ASCENDING loops (or [`matmul_seq`], the same contract).
+//! - All summations are ASCENDING loops (or the `nn/kernels.rs` kernels, the same contract).
 
 use ndarray::Array2;
 
 use super::super::activations::logistic_fn;
-use super::super::kernels::matmul_seq;
+use super::super::kernels::{matmul_seq_into, matvec_transposed_into, rank1_add, transposed};
 use super::super::layout::{BlockKind, LayerBlock};
 use super::super::network::Layer;
 
@@ -568,6 +568,18 @@ impl CfcLayer {
         let mut heads = Array2::<f64>::zeros((t_len, HEAD_NB * h));
         output.fill(0.0);
 
+        // The per-step products' weights and outputs (`a_l`, `bb_l`, the heads'
+        // `u`), reused across steps.
+        let backbone_w: Vec<&[f64]> = self
+            .backbone_weights
+            .iter()
+            .map(|m| m.as_slice().expect("standard layout"))
+            .collect();
+        let head_w = self.head_weights.as_slice().expect("standard layout");
+        let mut a = vec![0.0f64; b];
+        let mut bb = vec![0.0f64; b];
+        let mut u = vec![0.0f64; HEAD_NB * h];
+
         for t in 0..t_len {
             // z_t = [x_t | h_{t-1}]; h_{-1} = 0, which the zeroed row already is.
             for k in 0..i {
@@ -579,25 +591,32 @@ impl CfcLayer {
                 }
             }
 
-            // Backbone: L lecun_tanh layers, the first fed z_t and the rest chained.
-            let mut cur = z_cache.slice(ndarray::s![t..t + 1, ..]).to_owned(); // 1 x (i+h)
+            // Backbone: L lecun_tanh layers, the first fed z_t and the rest chained
+            // (`bb` holds the previous layer's post-activations).
             for li in 0..l {
-                let a = matmul_seq(&cur, &self.backbone_weights[li]); // 1 x B
-                for j in 0..b {
-                    let v = a[[0, j]] + self.backbone_biases[li][[0, j]];
-                    pre[li][[t, j]] = v;
-                    post[li][[t, j]] = lecun_tanh(v);
+                if li == 0 {
+                    let z_rows = z_cache.as_slice().expect("standard layout");
+                    let z_t = &z_rows[t * (i + h)..(t + 1) * (i + h)];
+                    matmul_seq_into(&mut a, z_t, backbone_w[0], (1, i + h, b)); // 1 x B
+                } else {
+                    matmul_seq_into(&mut a, &bb, backbone_w[li], (1, b, b)); // 1 x B
                 }
-                cur = post[li].slice(ndarray::s![t..t + 1, ..]).to_owned(); // 1 x B
+                for j in 0..b {
+                    let v = a[j] + self.backbone_biases[li][[0, j]];
+                    let act = lecun_tanh(v);
+                    pre[li][[t, j]] = v;
+                    post[li][[t, j]] = act;
+                    bb[j] = act;
+                }
             }
 
             // The three heads share one product (combined column blocks).
-            let u = matmul_seq(&cur, &self.head_weights); // 1 x 3H
+            matmul_seq_into(&mut u, &bb, head_w, (1, b, HEAD_NB * h)); // 1 x 3H
             for j in 0..h {
                 let (c1, c2, cg) = (BLOCK_FF1 * h + j, BLOCK_FF2 * h + j, BLOCK_GATE * h + j);
-                let ff1 = (u[[0, c1]] + self.head_biases[[0, c1]]).tanh();
-                let ff2 = (u[[0, c2]] + self.head_biases[[0, c2]]).tanh();
-                let g = logistic_fn(u[[0, cg]] + self.head_biases[[0, cg]]);
+                let ff1 = (u[c1] + self.head_biases[[0, c1]]).tanh();
+                let ff2 = (u[c2] + self.head_biases[[0, c2]]).tanh();
+                let g = logistic_fn(u[cg] + self.head_biases[[0, cg]]);
                 heads[[t, c1]] = ff1;
                 heads[[t, c2]] = ff2;
                 heads[[t, cg]] = g;
@@ -639,9 +658,11 @@ impl CfcLayer {
     /// rather than a `let _ = (..)` and a comment.
     ///
     /// `last_layer` is here for the input-delta gate alone (issue #146): with the gate
-    /// off, the last backward layer returns a `0 x 0` array. The backbone product that
-    /// yields `dx_t` also yields the carry to `t-1`, so it still runs; only the copy
-    /// into the returned matrix is skipped.
+    /// off, the last backward layer returns a `0 x 0` array. The first backbone
+    /// layer's back-projection yields `dx_t` (its first `in` rows) and the carry to
+    /// `t-1` (its last `H`); gated, the transposed scratch of that product is built
+    /// from the carry rows only, so the `dx_t` rows are never computed (issue #144).
+    /// Each carry element is the same ascending sum either way.
     pub fn feed_backward(
         &mut self,
         deltas: &Array2<f64>,
@@ -675,9 +696,40 @@ impl CfcLayer {
             Array2::<f64>::zeros((lines_nb, i))
         };
 
-        // Head pre-activation deltas as a 3H x 1 column, so the `dbb_L` propagation is
-        // one `matmul_seq` over the combined head matrix.
-        let mut d_head = Array2::<f64>::zeros((HEAD_NB * h, 1));
+        // Head pre-activation deltas as one 3H column, so the `dbb_L` propagation is
+        // one matvec over the combined head matrix.
+        let mut d_head = vec![0.0f64; HEAD_NB * h];
+
+        // The back-projections' transposed weights, built once per call
+        // (`nn/kernels.rs`): the heads', and each backbone layer's. Layer 0's keeps
+        // the carry rows only when the input deltas are skipped.
+        let head_t = transposed(self.head_weights.view());
+        let backbone_t: Vec<Vec<f64>> = (0..l)
+            .map(|li| {
+                if li == 0 && skip_input_deltas {
+                    transposed(self.backbone_weights[0].slice(ndarray::s![i.., ..]))
+                } else {
+                    transposed(self.backbone_weights[li].view())
+                }
+            })
+            .collect();
+        // `d_cur` at the backbone width, the pre-activation deltas `da`, and `dz_t`
+        // (`[dx_t | carry]`, or the carry alone when the input deltas are skipped).
+        let mut d_cur = vec![0.0f64; b];
+        let mut da = vec![0.0f64; b];
+        let mut dz = vec![0.0f64; if skip_input_deltas { h } else { i + h }];
+
+        let z_cache = self.z_cache.as_standard_layout();
+        let z_rows = z_cache.as_slice().expect("standard layout");
+        let post: Vec<_> = self
+            .backbone_post
+            .iter()
+            .map(|m| m.as_standard_layout())
+            .collect();
+        let post_rows: Vec<&[f64]> = post
+            .iter()
+            .map(|m| m.as_slice().expect("standard layout"))
+            .collect();
 
         for row in (0..lines_nb).rev() {
             for j in 0..h {
@@ -692,61 +744,63 @@ impl CfcLayer {
                 let dff2 = dh * g;
                 let dg = dh * (ff2 - ff1);
                 // tanh' = 1 - y^2 ; sigmoid' = y (1 - y), on the cached POST-values.
-                d_head[[c1, 0]] = dff1 * (1.0 - ff1 * ff1);
-                d_head[[c2, 0]] = dff2 * (1.0 - ff2 * ff2);
-                d_head[[cg, 0]] = dg * g * (1.0 - g);
+                d_head[c1] = dff1 * (1.0 - ff1 * ff1);
+                d_head[c2] = dff2 * (1.0 - ff2 * ff2);
+                d_head[cg] = dg * g * (1.0 - g);
             }
 
             // Head weights/biases: outer product with the last backbone activation.
-            for k in 0..b {
-                let bb_last = self.backbone_post[l - 1][[row, k]];
-                for c in 0..HEAD_NB * h {
-                    hw_d[[k, c]] += bb_last * d_head[[c, 0]];
-                }
-            }
+            rank1_add(
+                hw_d.as_slice_mut().expect("standard layout"),
+                HEAD_NB * h,
+                0,
+                &post_rows[l - 1][row * b..(row + 1) * b],
+                &d_head,
+            );
             for c in 0..HEAD_NB * h {
-                hb_d[[0, c]] += d_head[[c, 0]];
+                hb_d[[0, c]] += d_head[c];
             }
 
             // dbb_L = sum over the three heads of W_head^T du_head.
-            let mut d_cur = matmul_seq(&self.head_weights, &d_head); // B x 1
+            matvec_transposed_into(&mut d_cur, &head_t, &d_head); // B
 
             // Backbone, deepest layer first.
             for li in (0..l).rev() {
-                let mut da = Array2::<f64>::zeros((b, 1));
                 for j in 0..b {
-                    da[[j, 0]] = d_cur[[j, 0]] * lecun_tanh_deriv(self.backbone_pre[li][[row, j]]);
+                    da[j] = d_cur[j] * lecun_tanh_deriv(self.backbone_pre[li][[row, j]]);
                 }
                 // dW_l += da (x) in_l ; in_0 = z_t, in_l = bb_{l-1}.
-                if li == 0 {
-                    for k in 0..i + h {
-                        let zk = self.z_cache[[row, k]];
-                        for j in 0..b {
-                            bw_d[0][[k, j]] += zk * da[[j, 0]];
-                        }
-                    }
+                let in_l = if li == 0 {
+                    &z_rows[row * (i + h)..(row + 1) * (i + h)]
                 } else {
-                    for k in 0..b {
-                        let ik = self.backbone_post[li - 1][[row, k]];
-                        for j in 0..b {
-                            bw_d[li][[k, j]] += ik * da[[j, 0]];
-                        }
-                    }
-                }
+                    &post_rows[li - 1][row * b..(row + 1) * b]
+                };
+                rank1_add(
+                    bw_d[li].as_slice_mut().expect("standard layout"),
+                    b,
+                    0,
+                    in_l,
+                    &da,
+                );
                 for j in 0..b {
-                    bb_d[li][[0, j]] += da[[j, 0]];
+                    bb_d[li][[0, j]] += da[j];
                 }
-                d_cur = matmul_seq(&self.backbone_weights[li], &da); // (in+H or B) x 1
+                // d(in_l) = W_l da: B wide above layer 0, `dz_t` at layer 0.
+                if li == 0 {
+                    matvec_transposed_into(&mut dz, &backbone_t[0], &da);
+                } else {
+                    matvec_transposed_into(&mut d_cur, &backbone_t[li], &da);
+                }
             }
 
-            // d_cur is now dz_t: the head is dx_t, the tail is the carry to t-1.
-            if !skip_input_deltas {
+            // dz_t: the head is dx_t, the tail is the carry to t-1.
+            if skip_input_deltas {
+                carry.copy_from_slice(&dz);
+            } else {
                 for k in 0..i {
-                    deltas_previous_layer[[row, k]] = d_cur[[k, 0]];
+                    deltas_previous_layer[[row, k]] = dz[k];
                 }
-            }
-            for k in 0..h {
-                carry[k] = d_cur[[i + k, 0]];
+                carry.copy_from_slice(&dz[i..]);
             }
         }
 
