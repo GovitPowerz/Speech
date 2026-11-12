@@ -32,7 +32,9 @@
 //!
 //! Issue #146 adds the first target above a kernel: `blstm_fwd_bwd_v1` /
 //! `blstm_fwd_bwd_v2`, one `BlstmNetwork` forward plus backward over one window at
-//! the two SAD lineages' geometry (see `bench_blstm_fwd_bwd`).
+//! the two SAD lineages' geometry (see `bench_blstm_fwd_bwd`). Issue #144 adds one such
+//! target per new cell on its committed phase9 config and seed pack
+//! (`blstm_fwd_bwd_{slstm,mamba,cfc,transformer}`, see `bench_cell_fwd_bwd`).
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ndarray::Array2;
@@ -257,14 +259,13 @@ const SAD_WINDOW_FRAMES: usize = 327;
 /// gradient fold repeats per window per file. The net is built from the committed
 /// training config as written (geometry, cost law, normalization type), with two
 /// overrides: backprop on (the Launcher sets it per fold) and a deterministic
-/// synthetic pack. The plain path is driven directly, so the windowing drivers
-/// around it are not in the number.
-fn blstm_fwd_bwd(c: &mut Criterion, name: &str, config: &str) {
-    let path = format!(
-        "{}/../../configs/training/{config}",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let mut map = speech::toml_config::load_config(&path).expect("committed training config");
+/// synthetic pack, or the committed seed pack when `seed` names one. The plain path
+/// is driven directly, so the windowing drivers around it are not in the number.
+/// `config` and `seed` are repo-relative.
+fn blstm_fwd_bwd(c: &mut Criterion, name: &str, config: &str, seed: Option<&str>) {
+    let repo = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+    let path = format!("{repo}/{config}");
+    let mut map = speech::toml_config::load_config(&path).expect("committed config");
     map.insert("BLSTM_BackPropagationActivated".into(), "true".into());
     let cfg = BlstmConfig::from_legacy(&map, "BLSTM").expect("the config's BLSTM net");
     let in_cols = cfg.lstm_neuron_nb[0];
@@ -272,9 +273,16 @@ fn blstm_fwd_bwd(c: &mut Criterion, name: &str, config: &str) {
     let out_cols = *cfg.output_neuron_nb.last().unwrap();
 
     let mut net = BlstmNetwork::from_config(cfg).expect("net");
-    let flat: Vec<f64> = (0..net.nb_of_weights())
-        .map(|k| (((k * 11 + 3) % 97) as f64 / 97.0 - 0.5) * 0.2)
-        .collect();
+    let flat: Vec<f64> = match seed {
+        Some(seed) => {
+            speech::io::binary::read_matrix(std::path::Path::new(&format!("{repo}/{seed}")))
+                .expect("committed seed pack")
+                .2
+        }
+        None => (0..net.nb_of_weights())
+            .map(|k| (((k * 11 + 3) % 97) as f64 / 97.0 - 0.5) * 0.2)
+            .collect(),
+    };
     net.set_weights(&flat).expect("pack length");
     net.set_processing_type(false, false);
 
@@ -327,8 +335,31 @@ fn blstm_fwd_bwd(c: &mut Criterion, name: &str, config: &str) {
 }
 
 fn bench_blstm_fwd_bwd(c: &mut Criterion) {
-    blstm_fwd_bwd(c, "blstm_fwd_bwd_v1", "lre_sad.toml");
-    blstm_fwd_bwd(c, "blstm_fwd_bwd_v2", "lre_sad_v2.toml");
+    blstm_fwd_bwd(c, "blstm_fwd_bwd_v1", "configs/training/lre_sad.toml", None);
+    blstm_fwd_bwd(
+        c,
+        "blstm_fwd_bwd_v2",
+        "configs/training/lre_sad_v2.toml",
+        None,
+    );
+}
+
+/// The same unit of work for each new cell, on its committed phase9 seam config
+/// (bidirectional, recurrent `23,4` at sub-sampling 4, output `8,1`) with its seed
+/// pack, over the same 327-frame window (issue #144). The geometry is the gate
+/// configs' tiny one: the numbers compare a cell with itself across a change, not
+/// one cell with another or with the SAD lineages above.
+fn bench_cell_fwd_bwd(c: &mut Criterion) {
+    for cell in ["slstm", "mamba", "cfc", "transformer"] {
+        blstm_fwd_bwd(
+            c,
+            &format!("blstm_fwd_bwd_{cell}"),
+            &format!("tests/reference_data/phase9/{cell}_bidirectional.config"),
+            Some(&format!(
+                "tests/reference_data/phase9/{cell}_bidirectional_seed.bin"
+            )),
+        );
+    }
 }
 
 criterion_group!(
@@ -339,6 +370,7 @@ criterion_group!(
     bench_faer_project,
     bench_realfft,
     bench_mel_apply_f32,
-    bench_blstm_fwd_bwd
+    bench_blstm_fwd_bwd,
+    bench_cell_fwd_bwd
 );
 criterion_main!(kernels);
