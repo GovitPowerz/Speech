@@ -1,0 +1,39 @@
+{
+  "build": {
+    "profile": "release",
+    "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+    "target": "aarch64-apple-darwin"
+  },
+  "git_dirty": false,
+  "git_sha": "d83b1115373388b2accd02193432ee0ee692a69b",
+  "host": {
+    "arch": "arm64",
+    "chip": "Apple M4 Pro",
+    "cores": 14,
+    "os": "Darwin 25.6.0"
+  },
+  "kind": "bench",
+  "payload": {
+    "config_hash": "c943487dc2dd0309",
+    "repeat": 1,
+    "runs": [
+      {
+        "audio_s": 120.0,
+        "files": 1,
+        "maxrss_mb": 57.40625,
+        "rtf": 0.0018620124999999999,
+        "wall_s": 0.2234415
+      }
+    ]
+  },
+  "reason": null,
+  "recipe": {
+    "label": "phase7_60s",
+    "lanes": 1,
+    "lineage": "v1",
+    "path": "exact"
+  },
+  "recorded_at": "2026-11-12T16:12:52Z",
+  "schema_version": 2,
+  "supersedes": null
+}

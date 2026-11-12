@@ -448,30 +448,48 @@ paths are actually invoked elsewhere in this repo -- Image mode, backprop off), 
 the exact path has no backward-shaped allocations at all.
 
 The table below is RENDERED from the ledger (ADR-0009): every row is the latest three-process
-measurement per (leg, path, host), re-taken 2026-10-02 on the same Apple M4 Pro under macOS
-26.7.1 / rustc 1.99 through `python -m speech.ledger bench --leg <name>`. The reading that
-follows it refers to the ORIGINAL 2026-07 measurement (SAD 4.58-4.60x, LID 3.53-3.57x, macOS
-26.5.2) and is kept as history; the re-measure moved both paths' absolute walls (exact ~10-20%
-slower, fast ~10% slower) and the ratios to SAD 4.93x / LID 3.43-3.63x, which the README and
-ARCHITECTURE prose now quote and `speech.ledger.prose` asserts, together with the 60 s leg's
-peak RSS (the `maxrss_mb` column here, against 41.95 / 56.52 in the Phase 10 Task 5 table
-below, which stays as history; peak RSS is a cost figure like the walls, not a metric under
-the ADR-0003 STOP rule).
+measurement per (leg, path, host), taken 2026-11-12 on `d83b111` (the same Apple M4 Pro, rustc
+1.99.1) through `python -m speech.ledger bench --leg <name>`, after the exact kernels of issue
+#144. The README and ARCHITECTURE prose quote its ratios and the 60 s leg's peak RSS (the
+`maxrss_mib` column), and `speech.ledger.prose` asserts them. Peak RSS is a cost figure like
+the walls, not a metric under the ADR-0003 STOP rule.
+
+Two earlier measurements are history. The "Reading --" paragraph after the before/after table
+refers to the ORIGINAL 2026-07 one (SAD 4.58-4.60x, LID 3.53-3.57x, macOS 26.5.2). The 2026-10-02 re-measure
+(`cae165a`, rustc 1.99.0) moved both paths' absolute walls (exact ~10-20% slower, fast ~10%
+slower) and the ratios to SAD 4.93x / LID 3.43-3.63x, with a 60 s peak RSS of 43.5 / 57.2 MiB
+(41.95 / 56.52 in the Phase 10 Task 5 table below); its records stay in the ledger and the
+paragraph after the table compares them with the current ones.
 
 <!-- ledger:table phase7_bench_matrix -->
 | leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mib | MiB/audio-s | speedup (wall, fast vs exact) |
 |---|---|---|---|---|---|---|---|
-| SAD 60 s fixture (stereo) | 120.00 | exact | 0.3177 [0.3146-0.3215] (n=3) | 0.002647 | 57.182 | 0.4765 | baseline |
-| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0645 [0.0642-0.0648] (n=3) | 0.000537 | 43.521 | 0.3627 | 4.93x |
-| SAD corpus-gated (mono) | 75.00 | exact | 0.1996 [0.1963-0.2015] (n=3) | 0.002661 | 54.062 | 0.7208 | baseline |
-| SAD corpus-gated (mono) | 75.00 | fast | 0.0405 [0.0402-0.0409] (n=3) | 0.000539 | 39.281 | 0.5238 | 4.93x |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0538 [0.0527-0.0550] (n=3) | 0.001265 | 31.010 | 0.7290 | baseline |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0157 [0.0151-0.0167] (n=3) | 0.000368 | 20.547 | 0.4830 | 3.43x |
-| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0415 [0.0415-0.0416] (n=3) | 0.001272 | 21.979 | 0.6732 | baseline |
-| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0114 [0.0114-0.0115] (n=3) | 0.000350 | 13.495 | 0.4133 | 3.63x |
+| SAD 60 s fixture (stereo) | 120.00 | exact | 0.2187 [0.2150-0.2234] (n=3) | 0.001823 | 56.094 | 0.4674 | baseline |
+| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0590 [0.0577-0.0609] (n=3) | 0.000492 | 42.583 | 0.3549 | 3.71x |
+| SAD corpus-gated (mono) | 75.00 | exact | 0.1394 [0.1366-0.1414] (n=3) | 0.001859 | 53.661 | 0.7155 | baseline |
+| SAD corpus-gated (mono) | 75.00 | fast | 0.0377 [0.0375-0.0379] (n=3) | 0.000502 | 37.198 | 0.4960 | 3.70x |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0260 [0.0255-0.0265] (n=3) | 0.000611 | 29.656 | 0.6971 | baseline |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0140 [0.0136-0.0142] (n=3) | 0.000329 | 17.078 | 0.4015 | 1.86x |
+| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0221 [0.0217-0.0225] (n=3) | 0.000678 | 19.552 | 0.5988 | baseline |
+| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0102 [0.0101-0.0102] (n=3) | 0.000311 | 11.880 | 0.3639 | 2.18x |
 
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->
+
+Against the 2026-10-02 records (mean wall of three processes, seconds):
+
+| leg | exact, before -> after | fast, before -> after | speedup, before -> after |
+|---|---|---|---|
+| SAD 60 s fixture (stereo) | 0.3177 -> 0.2187 (-31.1%) | 0.0645 -> 0.0590 (-8.5%) | 4.93x -> 3.71x |
+| SAD corpus-gated (mono) | 0.1996 -> 0.1394 (-30.1%) | 0.0405 -> 0.0377 (-6.9%) | 4.93x -> 3.70x |
+| LID phSeq corpus-gated (Twin M7) | 0.0538 -> 0.0260 (-51.7%) | 0.0157 -> 0.0140 (-10.6%) | 3.43x -> 1.86x |
+| LID cep corpus-gated (Twin M7) | 0.0415 -> 0.0221 (-46.7%) | 0.0114 -> 0.0102 (-11.1%) | 3.63x -> 2.18x |
+
+The ratios fell because the exact walls did. The two measurements are 41 days, one rustc patch
+release and 473 commits apart (`cae165a..d83b111`), so the exact column is not issue #144's
+change alone: the exact tree also moved in #121, #135 and #140, and the fast tree, whose
+behaviour #144 did not touch, was reworked in #83, #84 and #88. Its walls read 7-11% lower, a
+move this pair does not attribute.
 
 Reading -- speedup lands ABOVE the T6 Python-level scoring range (2.6-3.6x, warm-cache `.scr`/DCF
 scoring incl. PyO3 crossing + file I/O): 3.5-4.6x here, exactly the T6 report's own prediction
@@ -520,8 +538,9 @@ operand: the same catcher and verdict, so the `0.001x` budget edit has no patch 
 
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
 R5).** SUPERSEDED for the memory half -- see Phase 10's f32-mel section (the widen is deleted; the
-SAD memory bound is now <= 0.85x of exact, measured 0.743x). Future local runs of this exact recipe
-are expected to land within:
+SAD memory bound is now <= 0.85x of exact, measured 0.743x). SUPERSEDED for both wall halves --
+see the 2026-11-12 re-derivation under this list (the wall bounds are now SAD >= 2.8x and LID
+>= 1.3x). Future local runs of this exact recipe are expected to land within:
 - SAD arms (algo 3, spectral): wall speedup >= 3.5x, memory <= 1.4x of exact (the periodogram-
   widening tax above is real and expected, not a regression signal up to this ratio). HEADROOM
   NOTE: the 1.4x ceiling sits only ~9-10% above the measured 1.22-1.28x maxrss ratios, and the
@@ -537,6 +556,24 @@ already carry headroom under the measured 3.53-4.60x speedups and 0.367-1.276x m
 FINDING to investigate, the same "measure, don't silently widen" discipline the CI parity gates
 (Tasks 4-6) already established for correctness; there is no automated enforcement of these bounds
 (spec R5: "the real numbers are local... no CI assertion on them").
+
+**FINDING and re-derivation (2026-11-12, the four legs re-run on `d83b111` after the exact
+kernels of issue #144).** Both LID arms read below the 2.5x wall bound: 1.86x (phSeq) and 2.18x
+(cep). The fast walls are lower than in the 2026-10-02 records on every leg (the before/after
+table above), so no fast-path slowdown is behind the reading: the exact LID walls fell 52% and
+47%, and a bound on a ratio moves with its denominator.
+
+Both wall bounds are re-derived on the new pair, each at the fraction of its arm's lower
+reading that the old bound was set at, rounded down to one decimal:
+- **LID Mode-7 arms: wall speedup >= 1.3x.** The 2.5x bound sat at 0.71 of 3.53x; the same
+  fraction of 1.86x is 1.32x.
+- **SAD arms: wall speedup >= 2.8x.** The 3.5x bound sat at 0.76 of 4.58x; the same fraction of
+  3.70x is 2.83x. The arms read 3.70x and 3.71x: the old bound sat 5% under them, against the
+  24% under 4.58x it was set with.
+
+The memory bounds are unchanged and hold: SAD fast at 0.759x and 0.693x of exact against 0.85x,
+LID at 0.576x and 0.608x against 0.8x. The CI pin (`fast <= exact * 1.5` on the 60 s fixture)
+carries 5.6x headroom over the measured 3.71x.
 
 ### The exact gradient fold (issue #154)
 
@@ -1320,6 +1357,9 @@ wall speedup >= 3.5x on every row, causal-fast-vs-BLSTM-fast >= 1.3x, and fast m
 1.3x of the ~68 MB plateau (SUPERSEDED -- see Phase 10's f32-mel section: the plateau is now
 ~42 MB). A reading meaningfully below these (not within the ranges above, which
 already carry headroom) is a FINDING to investigate; there is no automated enforcement.
+NOT RE-MEASURED after issue #144 (2026-11-12): the exact kernels moved every exact cell's
+products, the denominator of this ratio, so the 3.5x wall bound is stale until these rows are
+re-run and re-derived as the Phase 7 bounds were.
 
 ## Phase 10 -- the CfC cell (Tasks 1/2/3)
 
@@ -4484,6 +4524,11 @@ differential leg is the only owner of a kernel's order, and it runs in every `ca
 Left named, not done here: the Phase 7 bench legs were not re-run, so the fast-versus-exact
 speedups the README and ARCHITECTURE quote from the ledger describe the exact forward before
 this change.
+
+Done since (2026-11-12, `d83b111`): the four legs were re-run and the README and ARCHITECTURE
+sentences follow the new records. "Exact vs fast: the measured matrix + pinned budgets" in the
+Phase 7 section holds the table, the before and after per leg, and the two local wall
+bounds, re-derived there.
 
 ### The final tree, green
 
