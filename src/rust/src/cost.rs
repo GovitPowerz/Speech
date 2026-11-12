@@ -420,6 +420,9 @@ impl CostLaw {
     /// (`10*(1-target)` on-class, `10*target` off-class); class ponderations scale
     /// each element (WER path) or the whole frame row by the on-class ponderation
     /// (non-WER path).
+    // `kk` also addresses `outputs` / `onehot_target` / `out`, and `classes_ponderations`
+    // is empty when no ponderation is configured: iterating it would run no class.
+    #[allow(clippy::needless_range_loop)]
     pub fn compute_deltas(
         &self,
         outputs: &[f64],

@@ -164,8 +164,8 @@ impl ChannelResult {
         let speech = report.per_class[SegClass::Speech as usize];
         let mut global_error_rate = 0.0;
         // legacy: :317-319 j from OTHER up to (exclusive) EXCLUDED.
-        for j in (SegClass::Other as usize)..(SegClass::Excluded as usize) {
-            global_error_rate += report.per_class[j].error_rate;
+        for class in &report.per_class[(SegClass::Other as usize)..(SegClass::Excluded as usize)] {
+            global_error_rate += class.error_rate;
         }
         // No WER Pass 1 (STM/no reference) -> the legacy WordErrorRate CONSTRUCTOR
         // default (`_NbWords = -1`, rest 0), NOT `WerStats::default()` (nb_words 0).

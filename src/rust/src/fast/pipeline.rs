@@ -447,8 +447,7 @@ impl FastPipeline {
             self.fft_in.copy_from_slice(&self.frame_buf[..n]);
             r2c.process_with_scratch(&mut self.fft_in, &mut self.fft_out, &mut self.fft_scratch)
                 .expect("realfft process (fixed power-of-two length)");
-            for m in 0..self.bins {
-                let z = self.fft_out[m];
+            for z in &self.fft_out[..self.bins] {
                 out.push((z.re * z.re + z.im * z.im) / n_f);
             }
         }
