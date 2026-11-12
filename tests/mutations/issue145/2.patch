@@ -1,0 +1,17 @@
+mutation: danielson_lanczos reads the seed pair of the level below its own only above n = 256, the largest transform the FFT goldens run
+catcher: CAUGHT cargo --lib features::fft::tests::fft_matches_the_per_node_seed_recursion
+catcher: MISSED cargo --test phase1_fft_golden gfft_matches_oracle_bitexact
+catcher: CAUGHT cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+
+diff --git a/src/rust/src/features/fft.rs b/src/rust/src/features/fft.rs
+--- a/src/rust/src/features/fft.rs
++++ b/src/rust/src/features/fft.rs
+@@ -200,7 +200,7 @@
+     danielson_lanczos(&mut data[n..], n / 2, seeds);
+ 
+     // Twiddle seeds: wtemp = -Sin(N,1); wpr = -2*wtemp*wtemp; wpi = -Sin(N,2).
+-    let [sin_1, sin_2] = seeds[n.trailing_zeros() as usize];
++    let [sin_1, sin_2] = seeds[n.trailing_zeros() as usize - usize::from(n > 256)];
+     let mut wtemp = -sin_1;
+     let wpr = -2.0 * wtemp * wtemp;
+     let wpi = -sin_2;
