@@ -1,0 +1,23 @@
+mutation: matmul_seq_into seeds each element from its first term instead of +0.0
+catcher: CAUGHT cargo --lib nn::kernels::tests::every_product_is_seeded_positive_zero
+catcher: CAUGHT cargo --lib nn::kernels::tests::matmul_seq_matches_the_scalar_reference
+catcher: MISSED cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: MISSED cargo --test stack_derivative_pins mamba_stack_derivatives_are_port_truth_pinned
+
+diff --git a/src/rust/src/nn/kernels.rs b/src/rust/src/nn/kernels.rs
+index af56ae6..c832175 100644
+--- a/src/rust/src/nn/kernels.rs
++++ b/src/rust/src/nn/kernels.rs
+@@ -87,7 +87,11 @@ pub fn matmul_seq_into(out: &mut [f64], a: &[f64], b: &[f64], (m, k, n): (usize,
+         for (kk, &a_ik) in a_row.iter().enumerate() {
+             let b_row = &b[kk * n..(kk + 1) * n];
+             for (o, &b_kj) in out_row.iter_mut().zip(b_row) {
+-                *o += a_ik * b_kj;
++                if kk == 0 {
++                    *o = a_ik * b_kj;
++                } else {
++                    *o += a_ik * b_kj;
++                }
+             }
+         }
+     }

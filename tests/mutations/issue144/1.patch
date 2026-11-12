@@ -1,0 +1,20 @@
+mutation: matmul_seq_into sums each element in descending k (the legacy order reversed)
+catcher: CAUGHT cargo --lib nn::kernels::tests::matmul_seq_matches_the_scalar_reference
+catcher: CAUGHT cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: CAUGHT cargo --test stack_derivative_pins mamba_stack_derivatives_are_port_truth_pinned
+catcher: CAUGHT cargo --test stack_derivative_pins transformer_stack_derivatives_are_port_truth_pinned
+requires: oracle-libm
+
+diff --git a/src/rust/src/nn/kernels.rs b/src/rust/src/nn/kernels.rs
+index af56ae6..c40f1f8 100644
+--- a/src/rust/src/nn/kernels.rs
++++ b/src/rust/src/nn/kernels.rs
+@@ -84,7 +84,7 @@ pub fn matmul_seq_into(out: &mut [f64], a: &[f64], b: &[f64], (m, k, n): (usize,
+     for i in 0..m {
+         let a_row = &a[i * k..(i + 1) * k];
+         let out_row = &mut out[i * n..(i + 1) * n];
+-        for (kk, &a_ik) in a_row.iter().enumerate() {
++        for (kk, &a_ik) in a_row.iter().enumerate().rev() {
+             let b_row = &b[kk * n..(kk + 1) * n];
+             for (o, &b_kj) in out_row.iter_mut().zip(b_row) {
+                 *o += a_ik * b_kj;

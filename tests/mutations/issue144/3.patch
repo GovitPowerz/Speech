@@ -1,0 +1,21 @@
+mutation: rank1_add fuses its multiply and add (mul_add: one rounding where the legacy has two)
+catcher: CAUGHT cargo --lib nn::kernels::tests::rank1_add_matches_the_scalar_loops
+catcher: CAUGHT cargo --lib nn::kernels::tests::rank1_add_from_zero_matches_the_outer_product_fold
+catcher: CAUGHT cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: CAUGHT cargo --test stack_derivative_pins slstm_stack_derivatives_are_port_truth_pinned
+catcher: CAUGHT cargo --test stack_derivative_pins cfc_stack_derivatives_are_port_truth_pinned
+requires: oracle-libm
+
+diff --git a/src/rust/src/nn/kernels.rs b/src/rust/src/nn/kernels.rs
+index af56ae6..d7a4f38 100644
+--- a/src/rust/src/nn/kernels.rs
++++ b/src/rust/src/nn/kernels.rs
+@@ -131,7 +131,7 @@ pub fn rank1_add(acc: &mut [f64], stride: usize, col0: usize, x: &[f64], d: &[f6
+     for (r, &x_r) in x.iter().enumerate() {
+         let row = &mut acc[r * stride + col0..r * stride + col0 + d.len()];
+         for (a, &d_j) in row.iter_mut().zip(d) {
+-            *a += x_r * d_j;
++            *a = x_r.mul_add(d_j, *a);
+         }
+     }
+ }
