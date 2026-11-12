@@ -719,14 +719,10 @@ impl CfcLayer {
         let mut da = vec![0.0f64; b];
         let mut dz = vec![0.0f64; if skip_input_deltas { h } else { i + h }];
 
-        let z_cache = self.z_cache.as_standard_layout();
-        let z_rows = z_cache.as_slice().expect("standard layout");
-        let post: Vec<_> = self
+        // The forward builds both caches with `Array2::zeros`: row-major.
+        let z_rows = self.z_cache.as_slice().expect("standard layout");
+        let post_rows: Vec<&[f64]> = self
             .backbone_post
-            .iter()
-            .map(|m| m.as_standard_layout())
-            .collect();
-        let post_rows: Vec<&[f64]> = post
             .iter()
             .map(|m| m.as_slice().expect("standard layout"))
             .collect();

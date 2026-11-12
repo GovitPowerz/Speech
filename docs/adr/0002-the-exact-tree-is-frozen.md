@@ -179,7 +179,7 @@ adjacent outputs whose accumulators stay in registers, so the innermost loop run
 independent outputs instead of one dependent add chain; the plain `i-k-j` nest the grilling
 named was measured 2 to 6 times slower than the legacy nest on outputs under 8 wide and
 dropped), its caller-buffer variant, the same nest as a matvec over a transposed weight for the
-`n = 1` products (the transposed copy a scratch built per `feed_forward` / `feed_backward` call,
+`n = 1` products (the transposed copy a scratch built per `feed_backward` call,
 nothing stored on a layer), and the rank-1 derivative accumulation, called where each scalar loop stood inside the
 reverse-time loop, so the `row == 0` exclusions and the gate interleave do not move. The LSTM and
 the dense layer (`nn/layers.rs`), the sLSTM and the CfC compute every product through them (the
