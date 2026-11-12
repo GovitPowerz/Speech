@@ -36,16 +36,15 @@ pub fn sin_series(b: u64, a: u64) -> f64 {
 }
 
 /// One `[sin_series(n, 1), sin_series(n, 2)]` pair per recursion level, indexed by
-/// `log2(n)`. Levels 0 to 2 are the hard-coded base blocks and read no seed.
+/// `log2(n)` up to the factory's `p = 19`. Levels 1 and 2 are the hard-coded base
+/// blocks and read no seed; level 0 is never a node.
 type SeedTable = [[f64; 2]; 20];
 
 /// Generic FFT object; `p` is the transform power (`N = 1 << p` complex points).
 ///
-/// `seeds` holds the twiddle seeds of every general-case level `n = 8, 16, ..., N`
-/// (issue #145). The legacy template evaluates them at compile time, once per `N`;
-/// the port computed them at every node of the recursion, 510 `sin_series` calls for
-/// 16 distinct values at `p = 10`. They are the same calls with the same arguments,
-/// made once here.
+/// `seeds` holds the twiddle seeds of every general-case level `n = 8, 16, ..., N`:
+/// a seed depends on its level alone, so each `sin_series` call is made once here
+/// instead of at every node of the recursion (issue #145).
 pub struct Gfft {
     p: u32,
     seeds: SeedTable,
@@ -58,7 +57,7 @@ impl Gfft {
             (1..=19).contains(&p),
             "GFFT power p={p} out of range [1, 19]"
         );
-        let mut seeds = [[0.0_f64; 2]; 20];
+        let mut seeds: SeedTable = [[0.0; 2]; 20];
         for (level, seed) in seeds.iter_mut().enumerate().take(p as usize + 1).skip(3) {
             let n = 1u64 << level;
             *seed = [sin_series(n, 1), sin_series(n, 2)];
@@ -200,7 +199,7 @@ fn danielson_lanczos(data: &mut [f64], n: usize, seeds: &SeedTable) {
     danielson_lanczos(&mut data[n..], n / 2, seeds);
 
     // Twiddle seeds: wtemp = -Sin(N,1); wpr = -2*wtemp*wtemp; wpi = -Sin(N,2).
-    let [sin_1, sin_2] = seeds[n.trailing_zeros() as usize];
+    let [sin_1, sin_2] = seeds[n.ilog2() as usize];
     let mut wtemp = -sin_1;
     let wpr = -2.0 * wtemp * wtemp;
     let wpi = -sin_2;
