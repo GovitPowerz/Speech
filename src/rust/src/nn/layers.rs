@@ -439,7 +439,10 @@ impl LstmLayer {
         output: &mut Array2<f64>,
         last_layer: bool,
     ) {
-        let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
+        let input_rev = input
+            .slice(ndarray::s![..;-1, ..])
+            .as_standard_layout()
+            .into_owned();
         let mut output_rev = Array2::<f64>::zeros(output.dim());
         self.feed_forward(&input_rev, &mut output_rev, last_layer);
         output.assign(&output_rev.slice(ndarray::s![..;-1, ..]));
@@ -509,6 +512,10 @@ impl LstmLayer {
         let output = output.as_standard_layout();
         let output_rows = output.as_slice().expect("standard layout");
         let output_cols = output.dim().1;
+        assert!(output_cols >= o, "LSTM backward: output width");
+        // The gate off at the last backward layer: the deltas' one reader discards
+        // them, so neither `testM` nor the :707 product is built.
+        let skip_input_deltas = last_layer && !self.input_deltas;
 
         let p = &self.peep_weight;
         let g = &self.gates;
@@ -533,7 +540,11 @@ impl LstmLayer {
         let mut epsilon_state = vec![0.0f64; o];
 
         // testM (4O x T) stacks per-row [i|f|o|c] gate deltas for the :707 GEMM.
-        let mut test_m = Array2::<f64>::zeros((4 * o, lines_nb));
+        let mut test_m = if skip_input_deltas {
+            Array2::zeros((0, 0))
+        } else {
+            Array2::<f64>::zeros((4 * o, lines_nb))
+        };
         // The :703 matvec's operands: `_FeedbackWeights^T` (4O x O, built once per
         // call) and the row's `test` column (4O).
         let feedback_t = transposed(self.feedback_weights.view());
@@ -767,8 +778,10 @@ impl LstmLayer {
                 test_col[2 * o + j] = deltas_output_gate[j];
                 test_col[3 * o + j] = deltas_cells[j];
             }
-            for (k, &v) in test_col.iter().enumerate() {
-                test_m[[k, row]] = v;
+            if !skip_input_deltas {
+                for (k, &v) in test_col.iter().enumerate() {
+                    test_m[[k, row]] = v;
+                }
             }
 
             // :703 deltasFeedback = (_FeedbackWeights * test)^T, for the next (earlier)
@@ -776,9 +789,8 @@ impl LstmLayer {
             matvec_transposed_into(&mut deltas_feedback, &feedback_t, &test_col);
         }
 
-        // :707 deltasPreviousLayer = (_InputWeights * testM)^T -> T x I. Skipped when
-        // the gate is off at the last backward layer: its one reader discards it.
-        let deltas_previous_layer = if last_layer && !self.input_deltas {
+        // :707 deltasPreviousLayer = (_InputWeights * testM)^T -> T x I.
+        let deltas_previous_layer = if skip_input_deltas {
             Array2::zeros((0, 0))
         } else {
             let dpl = matmul_seq(&self.input_weights, &test_m); // I x T
@@ -808,6 +820,8 @@ impl LstmLayer {
     /// rows, run the forward-order `feed_backward`, reverse the returned deltas. The
     /// caches are STORED time-reversed after `feed_forward_reverse` and consumed
     /// AS-IS here (do NOT un-reverse them -- see `feed_forward_reverse`, risk R9).
+    /// The reversed input and output are copied row-major, so `feed_backward`
+    /// borrows them instead of copying a negative-stride array again.
     pub fn feed_backward_reverse(
         &mut self,
         input: &Array2<f64>,
@@ -816,8 +830,14 @@ impl LstmLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
-        let output_rev = output.slice(ndarray::s![..;-1, ..]).to_owned();
+        let input_rev = input
+            .slice(ndarray::s![..;-1, ..])
+            .as_standard_layout()
+            .into_owned();
+        let output_rev = output
+            .slice(ndarray::s![..;-1, ..])
+            .as_standard_layout()
+            .into_owned();
         let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
         let dpl = self.feed_backward(
             &input_rev,
@@ -1128,14 +1148,18 @@ impl NeuronLayer {
 
         // :157-166 width-tolerant input reconstruction (T x I, zero-padded /
         // truncated on the COLUMN axis to match _InputSize).
-        let recon_input: Array2<f64> = if cols > i {
-            input.slice(ndarray::s![.., ..i]).to_owned()
+        let recon_input: CowArray<'_, f64, Ix2> = if cols > i {
+            input
+                .slice(ndarray::s![.., ..i])
+                .as_standard_layout()
+                .into_owned()
+                .into()
         } else if cols < i {
             let mut padded = Array2::<f64>::zeros((t, i));
             padded.slice_mut(ndarray::s![.., ..cols]).assign(input);
-            padded
+            padded.into()
         } else {
-            input.to_owned()
+            input.as_standard_layout()
         };
 
         // :178-182 weightsDerivatives += input.col(jj)*deltas.row(jj) per row: the
@@ -1143,7 +1167,6 @@ impl NeuronLayer {
         // `matmul_seq` outer product (`nn/kernels.rs`, "The dense layer's outer
         // product").
         assert_eq!(deltas.dim().1, o, "dense backward: deltas width");
-        let recon_input = recon_input.as_standard_layout();
         let recon_rows = recon_input.as_slice().expect("standard layout");
         let deltas_std = deltas.as_standard_layout();
         let delta_rows = deltas_std.as_slice().expect("standard layout");
@@ -1178,7 +1201,7 @@ impl NeuronLayer {
 
         // deltas (T x O) * weights^T (O x I) -> T x I, via matmul_seq (the
         // measured ascending-loop contract; Eigen diverges at NN-wide k here).
-        let w_t = self.weights.t().to_owned();
+        let w_t = self.weights.t().as_standard_layout().into_owned();
         let mut deltas_out = matmul_seq(deltas, &w_t);
         if !last_layer {
             // :204 hidden -> .* Maxmin2'(InputSeq), literally the UN-RECONSTRUCTED

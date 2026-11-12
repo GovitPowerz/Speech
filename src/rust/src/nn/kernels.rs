@@ -1,6 +1,8 @@
 //! The exact tree's product kernels (issue #144): the matrix product, its
 //! caller-buffer variant, the transposed matvec for the `n = 1` products and the
-//! rank-1 derivative accumulation. Every exact cell computes its products here.
+//! rank-1 derivative accumulation. The LSTM, the dense layer, the sLSTM and the CfC
+//! compute every product here; Mamba and the transformer take `matmul_seq` for
+//! their forward products and keep their explicit backward loops.
 //!
 //! # The contract
 //!

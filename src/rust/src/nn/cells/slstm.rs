@@ -521,7 +521,10 @@ impl SlstmLayer {
         output: &mut Array2<f64>,
         last_layer: bool,
     ) {
-        let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
+        let input_rev = input
+            .slice(ndarray::s![..;-1, ..])
+            .as_standard_layout()
+            .into_owned();
         let mut output_rev = Array2::<f64>::zeros(output.dim());
         self.feed_forward(&input_rev, &mut output_rev, last_layer);
         output.assign(&output_rev.slice(ndarray::s![..;-1, ..]));
@@ -552,6 +555,10 @@ impl SlstmLayer {
         let output = output.as_standard_layout();
         let output_rows = output.as_slice().expect("standard layout");
         let output_cols = output.dim().1;
+        assert!(output_cols >= o, "sLSTM backward: output width");
+        // The gate off at the last backward layer: the deltas' one reader discards
+        // them, so neither `test_m` nor the `dx` product is built.
+        let skip_input_deltas = last_layer && !self.input_deltas;
 
         let g = &self.gates;
         let cs = &self.cell_states;
@@ -572,8 +579,12 @@ impl SlstmLayer {
         let mut carried_dn = vec![0.0f64; o];
 
         // Per-row pre-activation deltas, stacked [i|f|o|z] into a 4O x T matrix for
-        // the two GEMMs (the LSTM's `testM` pattern).
-        let mut test_m = Array2::<f64>::zeros((GATE_NB * o, lines_nb));
+        // the `dx` product (the LSTM's `testM` pattern).
+        let mut test_m = if skip_input_deltas {
+            Array2::zeros((0, 0))
+        } else {
+            Array2::<f64>::zeros((GATE_NB * o, lines_nb))
+        };
         // The row's column of it (4O), and `R^T` (4O x O, built once per call): the
         // operands of the rank-1 accumulations and of the recurrent matvec.
         let mut test_col = vec![0.0f64; GATE_NB * o];
@@ -615,8 +626,10 @@ impl SlstmLayer {
                 test_col[BLOCK_O * o + j] = d_o_pre;
                 test_col[BLOCK_Z * o + j] = d_z_pre;
             }
-            for (c, &v) in test_col.iter().enumerate() {
-                test_m[[c, row]] = v;
+            if !skip_input_deltas {
+                for (c, &v) in test_col.iter().enumerate() {
+                    test_m[[c, row]] = v;
+                }
             }
 
             // Weight-deriv accumulation for all four blocks at once (k = 1 outer
@@ -640,9 +653,8 @@ impl SlstmLayer {
             matvec_transposed_into(&mut deltas_feedback, &feedback_t, &test_col);
         }
 
-        // dx = (W * testM)^T -> T x in. Skipped when the gate is off at the last
-        // backward layer: its one reader discards it.
-        let deltas_previous_layer = if last_layer && !self.input_deltas {
+        // dx = (W * testM)^T -> T x in.
+        let deltas_previous_layer = if skip_input_deltas {
             Array2::zeros((0, 0))
         } else {
             let dpl = matmul_seq(&self.input_weights, &test_m); // in x T
@@ -675,8 +687,14 @@ impl SlstmLayer {
         inv_sub_sampling_ratio: usize,
         last_layer: bool,
     ) -> Array2<f64> {
-        let input_rev = input.slice(ndarray::s![..;-1, ..]).to_owned();
-        let output_rev = output.slice(ndarray::s![..;-1, ..]).to_owned();
+        let input_rev = input
+            .slice(ndarray::s![..;-1, ..])
+            .as_standard_layout()
+            .into_owned();
+        let output_rev = output
+            .slice(ndarray::s![..;-1, ..])
+            .as_standard_layout()
+            .into_owned();
         let deltas_rev = deltas.slice(ndarray::s![..;-1, ..]).to_owned();
         let dpl = self.feed_backward(
             &input_rev,

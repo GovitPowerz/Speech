@@ -173,16 +173,17 @@ A new class, 2026-11-12, the order-preserving loop restructure: the loop nest of
 changes and the value of every output element does not. Each element keeps its `+0.0` seed (the
 first term is added to it, never assigned), the operand order of each multiply and its ascending
 summation order, one add per term, with no fused multiply-add (`f64::mul_add` and `f32::mul_add`
-are `disallowed-methods` in the workspace `clippy.toml`). `nn/kernels.rs` holds the four kernels
-every exact cell calls: `matmul_seq` (same name and signature, the nest now `i-k-j`, so the
+are `disallowed-methods` in the workspace `clippy.toml`). `nn/kernels.rs` holds four kernels:
+`matmul_seq` (same name and signature, the nest now `i-k-j`, so the
 innermost loop runs over independent outputs instead of one dependent add chain), its
 caller-buffer variant, a `k`-outer matvec over a transposed weight for the `n = 1` products (the
 transposed copy a scratch built per `feed_forward` / `feed_backward` call, nothing stored on a
 layer), and the rank-1 derivative accumulation, called where each scalar loop stood inside the
 reverse-time loop, so the `row == 0` exclusions and the gate interleave do not move. The LSTM and
-the dense layer (`nn/layers.rs`), the sLSTM and the CfC call all of them; Mamba and the
-transformer take the new nest through `matmul_seq` by import only, their explicit backward loops
-untouched. One equivalence is argued, not only measured: the dense layer's per-frame outer
+the dense layer (`nn/layers.rs`), the sLSTM and the CfC compute every product through them (the
+LSTM and the sLSTM call all four, the dense layer the product and the rank-1 add, the CfC the
+three slice kernels); Mamba and the transformer take the new nest through `matmul_seq` by import
+only, their explicit backward loops untouched. One equivalence is argued, not only measured: the dense layer's per-frame outer
 product reached its accumulator as `0.0 + x*d` and is now added as `x*d`, equal because an
 accumulator seeded `+0.0` is never `-0.0` under round-to-nearest. Proven by the goldens and
 issue #146's eight derivative pins byte-green with no test edited, and by a permanent
