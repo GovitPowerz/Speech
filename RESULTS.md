@@ -556,8 +556,8 @@ between its row and the first is that cache, and its wall shows the switch costs
 <!-- ledger:table fold_grad_bench -->
 | leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |
 |---|---|---|---|---|---|
-| SAD v1 gradient fold (128 files, 1 lane) | 128 | 13920.01 | 78.47 [78.27-78.57] (n=3) | 0.005637 | 78.708 |
-| SAD v1 gradient fold (128 files, 4 lanes) | 128 | 13920.01 | 21.79 [21.65-21.89] (n=3) | 0.001565 | 287.812 |
+| SAD v1 gradient fold (128 files, 1 lane) | 128 | 13920.01 | 39.30 [39.16-39.41] (n=3) | 0.002823 | 79.115 |
+| SAD v1 gradient fold (128 files, 4 lanes) | 128 | 13920.01 | 10.98 [10.85-11.09] (n=3) | 0.000788 | 288.854 |
 | SAD v1 gradient fold (128 files, 1 lane, allocator cache on) | 128 | 13920.01 | 77.69 [77.41-78.18] (n=3) | 0.005581 | 2274.938 |
 
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
@@ -566,6 +566,10 @@ Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 Before the fold change (2026-11-11, three processes per leg on `f477670`, whose fold is the
 buffered one; the records stay in the ledger): 80.37 s and 149.8 MiB at one lane, 21.61 s and
 354.5 MiB at four. The section "Issue #154" below reads the pair.
+
+Before the exact kernels of issue #144 (2026-11-12, three processes per leg on `0526023`; the
+records stay in the ledger): 78.47 s at one lane and 21.79 s at four, at the same peak RSS. The
+section "Issue #144" below reads the pair.
 
 ### Criterion micro-benches
 
@@ -589,6 +593,11 @@ Pro, `bench` profile):
 > this section as "what the phase-7 widen bridge cost, and why it was worth removing"; the
 > live numbers are in **Phase 10 -- the full-f32 mel front-end (Task 5, spec S4)** below.
 > Every other row in this table is still live.
+
+> **SUPERSEDED (issue #144) -- the `matmul_seq_92x96` row and the 12.41x reading under it are a
+> PHASE-7 RECORD.** The exact product kernel moved to `nn/kernels.rs` on an order-preserving
+> nest: the same bits at 13.52 us, 2.74x the `faer` twin's time. The live numbers are in
+> **Issue #144** below.
 
 | target | path | scope | time |
 |---|---|---|---|
@@ -4319,3 +4328,162 @@ writer). `uv run pytest tests -q -m "not slow"`: 1210 passed, 1 skipped (six mor
 tests of the new legs and table). `uv run pytest tests/pyo3 -q`: 296. `run.py --check`:
 202 mutations, 0 problems. The close run `--changed-since origin/main`: 11 patches, 27 verdicts,
 0 differ from expected once `phase4a/1` was re-measured on its new mutation.
+
+## Issue #144 -- the exact NN kernels in one order-preserving module: the benches and the mutation battery
+
+**Live:** `tests/mutations/issue144/` (3 patches, 17 verdicts). One older patch is re-targeted,
+same catchers, same verdicts: `issue146/1`, whose condition moved to a named local.
+
+Branch `feature/issue-144-exact-nn-kernels`, off `main@b8f7e00`. Only the exact f64 tree trains,
+and its NN kernels were about 84% of a gradient fold's wall: every product an `i-j-k` scalar
+chain over bounds-checked `ndarray` indexing, the rank-1 weight-derivative accumulations scalar
+loops inside the reverse-time loop, row copies and small allocations per step. `nn/kernels.rs`
+now holds the four kernels (`matmul_seq`, `matmul_seq_into`, `matvec_transposed_into`,
+`rank1_add`) and the LSTM, the dense layer, the sLSTM and the CfC call them; Mamba and the
+transformer take the new nest through `matmul_seq` by import only. Every output element keeps
+its `+0.0` seed, the operand order of each multiply and its ascending summation order, with no
+fused multiply-add, so no number moves. ADR-0002 records the touch class, the order-preserving
+loop restructure.
+
+### The criterion targets
+
+`cargo bench --bench kernels` (`src/rust/benches/kernels.rs`), 100 samples per target, Apple M4
+Pro, `bench` profile, rustc 1.99.1. The four per-cell targets are new here: one `BlstmNetwork`
+forward plus backward over a 327-frame window on the committed bidirectional phase9 config and
+its seed pack (recurrent `23,4` at sub-sampling 4, output `8,1`), so each row compares a cell
+with itself across the change, not one cell with another.
+
+| target | scope | before | after (`0290185`) | change |
+|---|---|---|---|---|
+| `matmul_seq_92x96` | 92x23 * 23x96, the LSTM input projection | 61.62 us (`b8f7e00`) | 13.52 us | -78.1% |
+| `blstm_fwd_bwd_v1` | `lre_sad.toml`, LSTM `23,24,24`, 327 frames | 3.771 ms (`62f5711`) | 1.201 ms | -68.2% |
+| `blstm_fwd_bwd_v2` | `lre_sad_v2.toml`, LSTM `11,24,24`, 327 frames | 2.853 ms (`62f5711`) | 0.990 ms | -65.3% |
+| `blstm_fwd_bwd_slstm` | phase9 sLSTM, bidirectional | 307.4 us (`62f5711`) | 87.0 us | -71.7% |
+| `blstm_fwd_bwd_cfc` | phase9 CfC, bidirectional | 266.2 us (`62f5711`) | 109.0 us | -59.0% |
+| `blstm_fwd_bwd_transformer` | phase9 transformer, bidirectional | 187.5 us (`62f5711`) | 158.3 us | -15.6% |
+| `blstm_fwd_bwd_mamba` | phase9 Mamba, bidirectional | 253.5 us (`62f5711`) | 231.3 us | -8.7% |
+
+- **The gate.** The grilling set 2.0 ms on `blstm_fwd_bwd_v1` after the LSTM plus dense step,
+  a miss being a stop. That step (`319dc0a`) read 1.441 ms (v2 1.200 ms); the sLSTM step read
+  129.9 us and the CfC step 170.7 us. The table holds the final code.
+- **The fast twin.** `faer_project_92x96` reads 4.940 us on the same run (4.917 us on
+  `b8f7e00`), so the f32 projection is 2.74x faster than the exact product at that shape, where
+  Phase 7 measured 12.41x. The fast tree did not change.
+- Mamba and the transformer gain only what their forward products gain: their backward loops are
+  explicit and were left out by decision.
+
+### The gradient-fold legs
+
+One exact gradient fold of the SAD v1 arm over 128 train files (13,920 s of audio), three fresh
+processes per leg, `MallocLargeCache=0`, Apple M4 Pro. Both columns are ledger records; the
+rendered table in "The exact gradient fold" above holds the after column.
+
+| leg | before (`0526023`): wall, peak RSS | after (`0290185`): wall, peak RSS | wall change |
+|---|---|---|---|
+| one lane | 78.47 s, 78.7 MiB | 39.30 s [39.16-39.41], 79.1 MiB | -49.9% |
+| four lanes | 21.79 s, 287.8 MiB | 10.98 s [10.85-11.09], 288.9 MiB | -49.6% |
+
+The fold wall is recorded, not gated. The grilling's estimate was about 45 s at one lane after
+the LSTM plus dense step alone. One lane now costs 2.82 ms per audio second.
+
+### The nest that was measured and dropped
+
+The grilling named an `i-k-j` nest: the output row is the accumulator and the innermost loop
+runs over it. It passed the gate, and a per-shape comparison against the legacy nest showed what
+the gate could not: every term pays a load and a store, so a narrow output is slower than the
+scalar chain it replaced. Ratios to the legacy `i-j-k` nest, the minimum of 400 batches of 20
+calls in one process (a one-off harness, not a criterion target; below 1.0 is faster):
+
+| shape | plain `i-k-j` | blocked (final) |
+|---|---|---|
+| 81x92 * 92x96 | 0.27 | 0.19 |
+| 24x96 * 96x81 | 0.33 | 0.20 |
+| 1x24 * 24x96 | 0.33 | 0.24 |
+| 81x48 * 48x12 | 1.13 | 0.32 |
+| 81x23 * 23x4 | 2.35 | 0.30 |
+| 81x16 * 16x4 | 2.23 | 0.31 |
+| 81x8 * 8x1 | 5.68 | 2.36 |
+
+The final nest (`chains` / `chain_block`) sums blocks of 16, then 8, 4, 2 and 1 adjacent
+outputs, `k` outer and ascending, the block's accumulators a fixed-size local that stays in
+registers. The product and the transposed matvec share it (the 24x96 matvec reads 0.28 of the
+legacy product). One shape stays slower than the legacy nest and is not special-cased: a 1-wide
+output over many rows, which the SAD nets' last dense layer runs once per window, about 0.2 us
+of a 1.2 ms window.
+
+### The profile, and the per-row temporaries
+
+The grilling's profile of `blstm_fwd_bwd_v1` on `main` put the rank-1 accumulations at 46.5% of
+the window and `matmul_seq` at 31.6%. On the final code (`sample`, 1 ms, 8 s, top of stack, the
+bench run with `--profile-time`): `rank1_add` 23.0%, the LSTM backward body 17.8%,
+`matmul_seq_into` 15.8%, the LSTM forward body 13.1%, libm 14.0%, the transposed matvec 4.6%,
+allocation and copying 6.9% (the same reading gave 6.4% on the plain nest). The grilling hoists
+the nine per-row temporaries of the LSTM and sLSTM backward only above 10%, so they stay.
+
+### The proof that no number moved
+
+- The committed goldens and issue #146's eight derivative pins are byte-green with no test
+  edited.
+- **Differential leg.** `nn::kernels::tests`: each kernel against a scalar reference (the legacy
+  `i-j-k` nest, private to that test module; the indexed loops the rank-1 kernel replaced; the
+  dense layer's outer-product fold) by `to_bits`, over random shapes at every block boundary and
+  four value regimes (ordinary magnitudes, mostly signed zeros, subnormals and huge magnitudes,
+  infinities and NaN). NaN elements compare by `is_nan`.
+- **The dense equivalence.** The dense backward added each frame's `matmul_seq` outer product,
+  so a term reached the accumulator as `0.0 + x*d`; it is now added as `x*d`. The two are equal
+  because the accumulator is seeded `+0.0` and a sum seeded `+0.0` is never `-0.0` under
+  round-to-nearest. The module doc states it and
+  `rank1_add_from_zero_matches_the_outer_product_fold` measures it.
+- **A one-off sweep, not committed.** The pins hold single-layer stacks and one-layer CfC
+  backbones. Output and weight-derivative hashes of one forward plus backward were compared
+  between `origin/main` and the final kernel: five cells, two directions, three geometries
+  (`3,2`, `23,6`, `11,24` at 12, 44 and 81 frames), four stack sub-samplings on two-layer stacks,
+  CfC backbones of one, two and three layers. 168 cases, all bit-identical.
+- **`mul_add`.** `clippy.toml` lists `f64::mul_add` and `f32::mul_add` under
+  `disallowed-methods`; clippy resolves the primitive's inherent method (checked by planting
+  one), so no source-scan test was needed.
+
+### What the battery measured
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `chain_block` sums in descending `k` (the product and the matvec, one site) | the product leg, the matvec leg, `phase4a_train_golden::tier2_train_epoch_weights_golden`, the sLSTM, Mamba, CfC and transformer pins | CAUGHT x7: `Finite 5x23 * 23x96: element 0` / `Finite 5x23 * 23x1: element 0` / `MultiConfigResults[0,7]` / `mismatch at (0, 0)` on each pin |
+| 3 | `rank1_add` fuses its multiply and add | the two rank-1 legs, the training golden, the sLSTM and CfC pins | CAUGHT x5: `Finite 5x69 block 0 step 2: element 0` / `Finite 5x23 step 1: element 1` / `best pack deriv (0, 0)` / `mismatch at (0, 0)` / `mismatch at (3, 0)` |
+| 4 | `chain_block` seeds each element from its first term | `every_product_is_seeded_positive_zero`, the product leg, the matvec leg (CAUGHT); the training golden, the Mamba pin (MISSED) | CAUGHT x3: `matmul_seq` / `Zeros 3x7 * 7x30: element 66: got -0e0, want 0e0` / `Zeros 3x4 * 4x1: element 1`; MISSED x2 as declared |
+
+Row 4's two `MISSED` are the reason the seed has its own test: a lost `+0.0` seed shows only
+where every term of a sum is `-0.0`, which no committed net produces.
+
+Patches 1 and 3 declare `requires: oracle-libm`. Measured on the plain nest with
+`SPEECH_ORACLE_LIBM=ulp` and no declaration: every differential-leg catcher still read `CAUGHT`
+and all nine golden and pin catchers read `MISSED`, since a reordered or fused sum moves the
+goldens by one or two ULP, inside the off-oracle hybrid bound. Off the oracle libm the
+differential leg is the only owner of a kernel's order, and it runs in every `cargo test`.
+
+### Deviations from the grilling outcome
+
+- The nest is the blocked one, not the plain `i-k-j` (above). ADR-0002 names both.
+- The battery is three patches, not four: the two descending-`k` mutations became one site.
+- Step 7 (the per-row temporaries) was not taken: 6.9% is under its 10% bar.
+- The fold legs' new records carry no supersession stamp: `--supersede` exists for baseline
+  records, and a bench table renders each leg's latest records. The earlier records stay.
+- No lockfile commit: `cargo update --aggressive` and the `ndarray` re-pin left `Cargo.lock`
+  byte-identical.
+- From the review: the LSTM and sLSTM backward assert the retained output is at least `O` wide
+  (a row slice had turned an index panic into a cross-row read); with the input deltas gated off
+  `testM` is neither allocated nor filled; the reverse paths and the dense backward lost a second
+  copy each.
+
+Left named, not done here: the Phase 7 bench legs were not re-run, so the fast-versus-exact
+speedups the README and ARCHITECTURE quote from the ledger describe the exact forward before
+this change.
+
+### The final tree, green
+
+`cargo test --release --no-fail-fast --features test-support` on the final code: 1421 passed, 4
+ignored, 0 failed (the #154 close's 1415 plus the six tests of `nn::kernels`). `uv run pytest
+tests -q -m "not slow"`: 1211 passed, 1 skipped, as on `main` (the #154 close's 1210 predates
+one test its review fix added). `uv run pytest tests/pyo3 -q`: 296 passed in 13:46, about half
+its usual wall. `run.py --check`: 205 mutations, 0 problems. The close run
+`--changed-since origin/main`: 37 patches, 182 verdicts, 0 differ from expected (`issue144`'s 17
+among them, and the re-targeted `issue146/1`).
