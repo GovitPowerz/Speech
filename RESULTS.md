@@ -448,15 +448,18 @@ paths are actually invoked elsewhere in this repo -- Image mode, backprop off), 
 the exact path has no backward-shaped allocations at all.
 
 The table below is RENDERED from the ledger (ADR-0009): every row is the latest three-process
-measurement per (leg, path, host), re-taken 2026-10-02 on the same Apple M4 Pro under macOS
-26.7.1 / rustc 1.99 through `python -m speech.ledger bench --leg <name>`. The reading that
-follows it refers to the ORIGINAL 2026-07 measurement (SAD 4.58-4.60x, LID 3.53-3.57x, macOS
-26.5.2) and is kept as history; the re-measure moved both paths' absolute walls (exact ~10-20%
-slower, fast ~10% slower) and the ratios to SAD 4.93x / LID 3.43-3.63x, which the README and
-ARCHITECTURE prose now quote and `speech.ledger.prose` asserts, together with the 60 s leg's
-peak RSS (the `maxrss_mb` column here, against 41.95 / 56.52 in the Phase 10 Task 5 table
-below, which stays as history; peak RSS is a cost figure like the walls, not a metric under
-the ADR-0003 STOP rule).
+measurement per (leg, path, host), taken 2026-11-12 on `d83b111` (the same Apple M4 Pro, rustc
+1.99.1) through `python -m speech.ledger bench --leg <name>`, after the exact kernels of issue
+#144. The README and ARCHITECTURE prose quote its ratios and the 60 s leg's peak RSS (the
+`maxrss_mib` column), and `speech.ledger.prose` asserts them. Peak RSS is a cost figure like
+the walls, not a metric under the ADR-0003 STOP rule.
+
+Two earlier measurements are history. The reading that follows the table refers to the
+ORIGINAL 2026-07 one (SAD 4.58-4.60x, LID 3.53-3.57x, macOS 26.5.2). The 2026-10-02 re-measure
+(`cae165a`, rustc 1.99.0) moved both paths' absolute walls (exact ~10-20% slower, fast ~10%
+slower) and the ratios to SAD 4.93x / LID 3.43-3.63x, with a 60 s peak RSS of 43.5 / 57.2 MiB
+(41.95 / 56.52 in the Phase 10 Task 5 table below); its records stay in the ledger and the
+paragraph after the table compares them with the current ones.
 
 <!-- ledger:table phase7_bench_matrix -->
 | leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mib | MiB/audio-s | speedup (wall, fast vs exact) |
@@ -472,6 +475,21 @@ the ADR-0003 STOP rule).
 
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->
+
+Against the 2026-10-02 records (mean wall of three processes, seconds):
+
+| leg | exact, before -> after | fast, before -> after | speedup, before -> after |
+|---|---|---|---|
+| SAD 60 s fixture (stereo) | 0.3177 -> 0.2187 (-31.1%) | 0.0645 -> 0.0590 (-8.5%) | 4.93x -> 3.71x |
+| SAD corpus-gated (mono) | 0.1996 -> 0.1394 (-30.1%) | 0.0405 -> 0.0377 (-6.9%) | 4.93x -> 3.70x |
+| LID phSeq corpus-gated (Twin M7) | 0.0538 -> 0.0260 (-51.7%) | 0.0157 -> 0.0140 (-10.6%) | 3.43x -> 1.86x |
+| LID cep corpus-gated (Twin M7) | 0.0415 -> 0.0221 (-46.7%) | 0.0114 -> 0.0102 (-11.1%) | 3.63x -> 2.18x |
+
+The ratios fell because the exact walls did. The two measurements are 41 days and one rustc
+patch release apart, so the exact column is not issue #144's change alone: the fast tree's
+source did not change in #144 and its walls still read 7-11% lower, a move this pair does not
+attribute. An unrecorded second pass (five processes per path, same build, minutes later) read
+3.72x, 3.69x, 1.88x and 2.18x.
 
 Reading -- speedup lands ABOVE the T6 Python-level scoring range (2.6-3.6x, warm-cache `.scr`/DCF
 scoring incl. PyO3 crossing + file I/O): 3.5-4.6x here, exactly the T6 report's own prediction
@@ -537,6 +555,15 @@ already carry headroom under the measured 3.53-4.60x speedups and 0.367-1.276x m
 FINDING to investigate, the same "measure, don't silently widen" discipline the CI parity gates
 (Tasks 4-6) already established for correctness; there is no automated enforcement of these bounds
 (spec R5: "the real numbers are local... no CI assertion on them").
+
+**FINDING (2026-11-12, the four legs re-run on `d83b111` after the exact kernels of issue
+#144).** Both LID arms read below the 2.5x wall bound: 1.86x (phSeq) and 2.18x (cep). The bound
+is not edited here. The SAD arms read 3.70x and 3.71x against 3.5x. The fast walls are lower
+than in the 2026-10-02 records on every leg (the before/after table above), so no fast-path
+slowdown is behind the reading: the exact LID walls fell 52% and 47%. The memory bounds hold:
+SAD fast at 0.759x and 0.693x of exact against 0.85x, LID at 0.576x and 0.608x against 0.8x.
+The CI pin (`fast <= exact * 1.5` on the 60 s fixture) carries 5.6x headroom over the measured
+3.71x.
 
 ### The exact gradient fold (issue #154)
 
@@ -4484,6 +4511,11 @@ differential leg is the only owner of a kernel's order, and it runs in every `ca
 Left named, not done here: the Phase 7 bench legs were not re-run, so the fast-versus-exact
 speedups the README and ARCHITECTURE quote from the ledger describe the exact forward before
 this change.
+
+Done since (2026-11-12, `d83b111`): the four legs were re-run and the README and ARCHITECTURE
+sentences follow the new records. "Exact vs fast: the measured matrix + pinned budgets" in the
+Phase 7 section holds the table, the before and after per leg, and the finding on the LID
+arms' local wall bound.
 
 ### The final tree, green
 
