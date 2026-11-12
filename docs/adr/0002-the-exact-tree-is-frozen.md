@@ -1,6 +1,6 @@
 # ADR-0002: The exact f64 tree is behaviour-frozen; the f32 fast tree lives beside it, selected at one dispatch site
 
-**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135), 2026-11-09 (issue #140), 2026-11-10 (issue #146), 2026-11-11 (issue #154), 2026-11-12 (issue #144)
+**Status:** accepted | **Date:** 2026-07-19 (Phase 7, PR #13); touch classes extended 2026-07-31 (Phase 9), 2026-08-11 (Phase 10), 2026-08-12 (Phase 11), 2026-10-06 (issues #32, #47, #50), 2026-10-07 (issue #23), 2026-10-09 (issue #60), 2026-10-12 (issues #26, #27), 2026-10-13 (issue #25), 2026-10-29 (issues #90, #94), 2026-11-02 (issue #121), 2026-11-03 (issue #83), 2026-11-05 (issue #87), 2026-11-06 (issues #134, #136), 2026-11-07 (issue #135), 2026-11-09 (issue #140), 2026-11-10 (issue #146), 2026-11-11 (issue #154), 2026-11-12 (issues #144, #145)
 
 ## Context
 
@@ -192,6 +192,16 @@ issue #146's eight derivative pins byte-green with no test edited, and by a perm
 differential leg in `nn/kernels.rs` comparing each kernel with a scalar reference (the legacy
 `i-j-k` nest, kept private to that test module) by `to_bits` over random shapes and values,
 signed zeros, infinities and subnormals included, NaN elements by `is_nan`, issue #144.
+The golden-re-verified hoist again, 2026-11-12: the exact GFFT's twiddle seeds. The recursion
+called `sin_series(n, 1)` and `sin_series(n, 2)` at every node, 510 calls for 16 distinct values
+in a 1024-point transform; `Gfft::new` now makes each call once per level, with the arguments a
+node passed, and `danielson_lanczos` reads the pair of its own level. The negation, the `wpr`
+product and every operation of the running-twiddle butterfly stay where they were. Proven by
+the goldens byte-green with no test edited and by a permanent differential leg in
+`features/fft.rs` comparing `Gfft::fft` with the per-node recursion (kept private to that test
+module) by `to_bits` for every `p` in `1..=19`: the FFT goldens stop at `N = 256` and every
+Phase 1 golden runs order 8 or below, so that leg and the order-9 and order-10 goldens above
+Phase 1 own the two levels the training configs use, issue #145.
 Training is exact-f64 only and bails loudly on the fast variants: since issue #110 (2026-10-28)
 at the one bag-construction site, for every mode, on any of four config facts (the config-0
 epoch count and gradient-check epsilon, every config's two `BackPropagationActivated` flags),

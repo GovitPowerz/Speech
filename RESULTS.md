@@ -636,6 +636,11 @@ Pro, `bench` profile):
 > nest: the same bits at 13.52 us, 2.74x the `faer` twin's time. The live numbers are in
 > **Issue #144** below.
 
+> **SUPERSEDED (issue #145) -- the `gfft_1024` row and the 23.4x and 11.7x readings under it
+> are a PHASE-7 RECORD.** The exact GFFT computes its twiddle seeds once per transform size:
+> the same bits at 9.171 us per call, 11.5x the `realfft` twin's time per call and 5.8x per
+> frame. The live numbers are in **Issue #145** below.
+
 | target | path | scope | time |
 |---|---|---|---|
 | `matmul_seq_92x96` | exact | 92x23 * 23x96, f64 ascending loop | 57.408 us |
@@ -4539,3 +4544,62 @@ one test its review fix added). `uv run pytest tests/pyo3 -q`: 296 passed in 13:
 its usual wall. `run.py --check`: 205 mutations, 0 problems. The close run
 `--changed-since origin/main`: 37 patches, 182 verdicts, 0 differ from expected (`issue144`'s 17
 among them, and the re-targeted `issue146/1`).
+
+## Issue #145 -- the exact GFFT's twiddle seeds computed once per transform size: the bench and the mutation battery
+
+**Live:** `tests/mutations/issue145/` (2 patches, 6 verdicts).
+
+Branch `feature/gfft-seed-table`, off `main@e662681`. The exact FFT called `sin_series(n, 1)` and
+`sin_series(n, 2)` at every node of its recursion, although a seed depends on the node's size
+alone: 510 calls, 33 divisions each, for 16 distinct values in a 1024-point transform. `Gfft::new`
+now makes each call once per level and `danielson_lanczos` reads the pair of its own level. The
+negation, the `wpr` product and the running-twiddle butterfly are where they were, so no number
+moves. ADR-0002 records it under the golden-re-verified hoist.
+
+### The criterion targets
+
+`cargo bench --bench kernels` (`src/rust/benches/kernels.rs`), 100 samples per target, Apple M4
+Pro on battery, `bench` profile, rustc 1.99.1. One session, the two builds run back to back
+(before, after, before again):
+
+| target | scope | before (`1359dfa`) | after (`7c0b881`) | change |
+|---|---|---|---|---|
+| `gfft_1024` | 1024-point complex FFT, two real frames per call | 19.160 us (19.829 us on the first pass) | 9.171 us | -52.1% |
+| `realfft_1024` | the fast twin, one real frame per call | 0.793 us | 0.795 us | unchanged |
+
+- **The gate.** The grilling set `gfft_1024` at or below 0.6x of its same-session "before"
+  reading, a miss being a stop. It reads 0.48x (0.46x against the first pass).
+- **The fast twin.** `realfft_1024` is 11.5x faster per call and 5.8x per frame, where Phase 7
+  measured 23.4x and 11.7x. The fast tree did not change.
+- **The harness the grilling ran.** A standalone copy of `fft.rs` read the same ratio at every
+  order the committed configs use: 2.3x at `p = 8`, 2.2x at `p = 9`, 2.0x at `p = 10`, with the
+  table build at 0.47 us for `p = 10`.
+
+### What was measured and dropped
+
+The issue also proposed a caller-owned scratch buffer for `compute_two_real_periodogram` and row
+slices in place of the two `to_vec` copies per transform in
+`compute_segment_periodogram_estimates`. The same harness timed a whole periodogram call at
+`p = 10`: 10.4 us with the table and today's allocations, 10.6 us with a reused buffer and no
+copies. The difference is inside the noise, and the loop's stale-buffer and fresh-zeroed-tail
+semantics are load-bearing, so the buffers are as they were.
+
+### The proof that no number moved
+
+- The committed goldens are byte-green with no test edited.
+- **Differential leg.** `features::fft::tests::fft_matches_the_per_node_seed_recursion`:
+  `Gfft::fft` against the per-node recursion (private to that test module) by `to_bits` on every
+  element of a full transform, for every `p` in `1..=19`.
+- **Why the leg is needed.** The FFT goldens stop at `N = 256` and every Phase 1 golden (FFT,
+  periodogram, `inputseq_*`) runs order 8 or below. The 512 and 1024 levels are reached by the
+  order-9 and order-10 goldens above Phase 1, and nothing committed reaches a level above 1024.
+
+### What the battery measured
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `danielson_lanczos` reads the seed pair of the level below its own, at every level | the differential leg, `phase1_fft_golden::gfft_matches_oracle_bitexact`, `phase4a_train_golden::tier2_train_epoch_weights_golden` | CAUGHT x3: `p=3 idx=2` / `N=8 idx=2` / `epoch 0 weight 3` |
+| 2 | the same, only above `n = 256` | the differential leg, the training golden (CAUGHT); the FFT golden (MISSED) | CAUGHT x2: `p=9 idx=2` / `epoch 0 weight 0`; MISSED x1 as declared |
+
+Row 2's `MISSED` is the declared record that the FFT goldens stop at 256. Neither patch declares
+`requires: oracle-libm`: a wrong seed moves a value far past the off-oracle hybrid bound.
