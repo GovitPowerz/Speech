@@ -538,8 +538,9 @@ operand: the same catcher and verdict, so the `0.001x` budget edit has no patch 
 
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
 R5).** SUPERSEDED for the memory half -- see Phase 10's f32-mel section (the widen is deleted; the
-SAD memory bound is now <= 0.85x of exact, measured 0.743x). Future local runs of this exact recipe
-are expected to land within:
+SAD memory bound is now <= 0.85x of exact, measured 0.743x). SUPERSEDED for the LID wall half --
+see the 2026-11-12 re-derivation under this list (the LID wall bound is now >= 1.3x). Future local
+runs of this exact recipe are expected to land within:
 - SAD arms (algo 3, spectral): wall speedup >= 3.5x, memory <= 1.4x of exact (the periodogram-
   widening tax above is real and expected, not a regression signal up to this ratio). HEADROOM
   NOTE: the 1.4x ceiling sits only ~9-10% above the measured 1.22-1.28x maxrss ratios, and the
@@ -556,14 +557,20 @@ FINDING to investigate, the same "measure, don't silently widen" discipline the 
 (Tasks 4-6) already established for correctness; there is no automated enforcement of these bounds
 (spec R5: "the real numbers are local... no CI assertion on them").
 
-**FINDING (2026-11-12, the four legs re-run on `d83b111` after the exact kernels of issue
-#144).** Both LID arms read below the 2.5x wall bound: 1.86x (phSeq) and 2.18x (cep). The bound
-is not edited here. The SAD arms read 3.70x and 3.71x against 3.5x. The fast walls are lower
-than in the 2026-10-02 records on every leg (the before/after table above), so no fast-path
-slowdown is behind the reading: the exact LID walls fell 52% and 47%. The memory bounds hold:
-SAD fast at 0.759x and 0.693x of exact against 0.85x, LID at 0.576x and 0.608x against 0.8x.
-The CI pin (`fast <= exact * 1.5` on the 60 s fixture) carries 5.6x headroom over the measured
-3.71x.
+**FINDING and re-derivation (2026-11-12, the four legs re-run on `d83b111` after the exact
+kernels of issue #144).** Both LID arms read below the 2.5x wall bound: 1.86x (phSeq) and 2.18x
+(cep). The fast walls are lower than in the 2026-10-02 records on every leg (the before/after
+table above), so no fast-path slowdown is behind the reading: the exact LID walls fell 52% and
+47%, and a bound on a ratio moves with its denominator.
+
+The LID wall bound is re-derived on the new pair: **wall speedup >= 1.3x**. The 2.5x bound sat
+at 0.71 of the lower LID reading it was set under (2.5 / 3.53); the same fraction of 1.86x is
+1.32x, rounded down. The LID memory bound (<= 0.8x) is unchanged and holds at 0.576x and 0.608x.
+
+The SAD bounds are not re-derived. The arms read 3.70x and 3.71x against 3.5x, which is 5%
+headroom where the bound was set with 24% (3.5 / 4.58); memory reads 0.759x and 0.693x of exact
+against 0.85x. The CI pin (`fast <= exact * 1.5` on the 60 s fixture) carries 5.6x headroom over
+the measured 3.71x.
 
 ### The exact gradient fold (issue #154)
 
@@ -4514,8 +4521,8 @@ this change.
 
 Done since (2026-11-12, `d83b111`): the four legs were re-run and the README and ARCHITECTURE
 sentences follow the new records. "Exact vs fast: the measured matrix + pinned budgets" in the
-Phase 7 section holds the table, the before and after per leg, and the finding on the LID
-arms' local wall bound.
+Phase 7 section holds the table, the before and after per leg, and the LID arms' local wall
+bound, re-derived there.
 
 ### The final tree, green
 
