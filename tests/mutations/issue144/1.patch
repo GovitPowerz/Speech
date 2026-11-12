@@ -1,20 +1,23 @@
-mutation: matmul_seq_into sums each element in descending k (the legacy order reversed)
+mutation: chain_block sums each element in descending k (the legacy order reversed), in the product and in the matvec alike: one site since the blocked nest, the former issue144/2 merged here
 catcher: CAUGHT cargo --lib nn::kernels::tests::matmul_seq_matches_the_scalar_reference
+catcher: CAUGHT cargo --lib nn::kernels::tests::matvec_transposed_matches_the_scalar_reference
 catcher: CAUGHT cargo --test phase4a_train_golden tier2_train_epoch_weights_golden
+catcher: CAUGHT cargo --test stack_derivative_pins slstm_stack_derivatives_are_port_truth_pinned
 catcher: CAUGHT cargo --test stack_derivative_pins mamba_stack_derivatives_are_port_truth_pinned
+catcher: CAUGHT cargo --test stack_derivative_pins cfc_stack_derivatives_are_port_truth_pinned
 catcher: CAUGHT cargo --test stack_derivative_pins transformer_stack_derivatives_are_port_truth_pinned
 requires: oracle-libm
 
 diff --git a/src/rust/src/nn/kernels.rs b/src/rust/src/nn/kernels.rs
-index af56ae6..c40f1f8 100644
+index 72cb868..3caf711 100644
 --- a/src/rust/src/nn/kernels.rs
 +++ b/src/rust/src/nn/kernels.rs
-@@ -84,7 +84,7 @@ pub fn matmul_seq_into(out: &mut [f64], a: &[f64], b: &[f64], (m, k, n): (usize,
-     for i in 0..m {
-         let a_row = &a[i * k..(i + 1) * k];
-         let out_row = &mut out[i * n..(i + 1) * n];
--        for (kk, &a_ik) in a_row.iter().enumerate() {
-+        for (kk, &a_ik) in a_row.iter().enumerate().rev() {
-             let b_row = &b[kk * n..(kk + 1) * n];
-             for (o, &b_kj) in out_row.iter_mut().zip(b_row) {
-                 *o += a_ik * b_kj;
+@@ -141,7 +141,7 @@ fn chain_block<const W: usize, const SCALAR_FIRST: bool>(
+ ) {
+     let stride = out.len();
+     let mut acc = [0.0f64; W];
+-    for (&s_k, row) in s.iter().zip(rows.chunks_exact(stride)) {
++    for (&s_k, row) in s.iter().zip(rows.chunks_exact(stride)).rev() {
+         let block: &[f64; W] = row[j0..j0 + W].try_into().expect("block width");
+         for (a, &v) in acc.iter_mut().zip(block) {
+             *a += if SCALAR_FIRST { s_k * v } else { v * s_k };

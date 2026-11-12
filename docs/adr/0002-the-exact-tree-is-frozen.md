@@ -174,11 +174,13 @@ changes and the value of every output element does not. Each element keeps its `
 first term is added to it, never assigned), the operand order of each multiply and its ascending
 summation order, one add per term, with no fused multiply-add (`f64::mul_add` and `f32::mul_add`
 are `disallowed-methods` in the workspace `clippy.toml`). `nn/kernels.rs` holds four kernels:
-`matmul_seq` (same name and signature, the nest now `i-k-j`, so the
-innermost loop runs over independent outputs instead of one dependent add chain), its
-caller-buffer variant, a `k`-outer matvec over a transposed weight for the `n = 1` products (the
-transposed copy a scratch built per `feed_forward` / `feed_backward` call, nothing stored on a
-layer), and the rank-1 derivative accumulation, called where each scalar loop stood inside the
+`matmul_seq` (same name and signature, the nest now `k` outer over blocks of up to 16
+adjacent outputs whose accumulators stay in registers, so the innermost loop runs over
+independent outputs instead of one dependent add chain; the plain `i-k-j` nest the grilling
+named was measured 2 to 6 times slower than the legacy nest on outputs under 8 wide and
+dropped), its caller-buffer variant, the same nest as a matvec over a transposed weight for the
+`n = 1` products (the transposed copy a scratch built per `feed_forward` / `feed_backward` call,
+nothing stored on a layer), and the rank-1 derivative accumulation, called where each scalar loop stood inside the
 reverse-time loop, so the `row == 0` exclusions and the gate interleave do not move. The LSTM and
 the dense layer (`nn/layers.rs`), the sLSTM and the CfC compute every product through them (the
 LSTM and the sLSTM call all four, the dense layer the product and the rank-1 add, the CfC the

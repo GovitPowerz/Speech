@@ -22,9 +22,14 @@
 //!   rounds twice.
 //!
 //! What the restructure buys is the innermost loop running over INDEPENDENT output
-//! elements on contiguous slices (`i-k-j` for a product, `k`-outer over a transposed
-//! weight for a matvec), which the compiler vectorizes; the legacy nest's innermost
-//! loop is one dependent add chain per element, which it cannot.
+//! elements on contiguous slices, which the compiler vectorizes; the legacy nest's
+//! innermost loop is one dependent add chain per element, which it cannot. The nest
+//! is `k` outer over a BLOCK of adjacent outputs (`chains`: 16, then 8, 4, 2, 1),
+//! the block's accumulators held in registers: for a product that is `i`, block,
+//! `k`, `j`; for a matvec the same over a transposed weight. A plain `i-k-j` nest
+//! with the output row as the accumulator was measured first and dropped: it wins on
+//! wide outputs and is 2 to 6 times slower than the legacy nest on outputs under 8
+//! wide, each term paying a load and a store.
 //!
 //! Ascending `k` per element is the measured product-order contract (Phase 2 Task 1
 //! probes: Eigen DIVERGES from ascending loops on the LSTM input-projection shape and
@@ -55,7 +60,8 @@
 use ndarray::{Array2, ArrayView2};
 
 /// Ascending-`k` matrix product `a (m x k) * b (k x n)`, the product kernel of every
-/// NN product site (the legacy `main.cpp::matSeq` contract, see the module doc).
+/// NN product site (the legacy `main.cpp::matSeq` contract, see the module doc): per
+/// output row, `out[i][j] = sum_k a[i][k] * b[k][j]` through `chains`.
 ///
 /// `pub` so `benches/kernels.rs` (a separate compilation unit) can time it as
 /// `matmul_seq_92x96`.
@@ -82,17 +88,66 @@ pub fn matmul_seq_into(out: &mut [f64], a: &[f64], b: &[f64], (m, k, n): (usize,
     assert_eq!(out.len(), m * n, "matmul_seq_into output length");
     assert_eq!(a.len(), m * k, "matmul_seq_into left length");
     assert_eq!(b.len(), k * n, "matmul_seq_into right length");
-    out.fill(0.0);
     for i in 0..m {
-        let a_row = &a[i * k..(i + 1) * k];
-        let out_row = &mut out[i * n..(i + 1) * n];
-        for (kk, &a_ik) in a_row.iter().enumerate() {
-            let b_row = &b[kk * n..(kk + 1) * n];
-            for (o, &b_kj) in out_row.iter_mut().zip(b_row) {
-                *o += a_ik * b_kj;
-            }
+        chains::<true>(&mut out[i * n..(i + 1) * n], &a[i * k..(i + 1) * k], b);
+    }
+}
+
+/// `out[j] = sum_k s[k] * rows[k][j]` for every `j`, `rows` row-major with
+/// `out.len()` columns: the one loop nest behind the product and the matvec. The
+/// outputs are taken in blocks of 16, then 8, 4, 2 and 1 adjacent columns, each
+/// block summed by [`chain_block`]. `SCALAR_FIRST` is the multiply's operand order:
+/// `s[k] * rows[k][j]` when true, `rows[k][j] * s[k]` when false.
+#[inline(always)]
+fn chains<const SCALAR_FIRST: bool>(out: &mut [f64], s: &[f64], rows: &[f64]) {
+    let n = out.len();
+    let mut j = 0;
+    while n - j >= 16 {
+        chain_block::<16, SCALAR_FIRST>(out, s, rows, j);
+        j += 16;
+    }
+    if n - j >= 8 {
+        chain_block::<8, SCALAR_FIRST>(out, s, rows, j);
+        j += 8;
+    }
+    if n - j >= 4 {
+        chain_block::<4, SCALAR_FIRST>(out, s, rows, j);
+        j += 4;
+    }
+    if n - j >= 2 {
+        chain_block::<2, SCALAR_FIRST>(out, s, rows, j);
+        j += 2;
+    }
+    if n - j >= 1 {
+        chain_block::<1, SCALAR_FIRST>(out, s, rows, j);
+    }
+}
+
+/// `W` adjacent outputs from column `j0`: each starts at `+0.0` and takes its terms
+/// in ascending `k`, one add per term. The `W` accumulators are a fixed-size local,
+/// so they stay in registers across the `k` loop and the `W` chains advance side by
+/// side; a row-long accumulator in memory costs a load and a store per term, which
+/// is slower than the legacy nest once the row is short.
+///
+/// The two arms of the multiply differ in operand order only, which is each site's
+/// legacy order and no value difference (hence the `allow`).
+#[inline(always)]
+#[allow(clippy::if_same_then_else)]
+fn chain_block<const W: usize, const SCALAR_FIRST: bool>(
+    out: &mut [f64],
+    s: &[f64],
+    rows: &[f64],
+    j0: usize,
+) {
+    let stride = out.len();
+    let mut acc = [0.0f64; W];
+    for (&s_k, row) in s.iter().zip(rows.chunks_exact(stride)) {
+        let block: &[f64; W] = row[j0..j0 + W].try_into().expect("block width");
+        for (a, &v) in acc.iter_mut().zip(block) {
+            *a += if SCALAR_FIRST { s_k * v } else { v * s_k };
         }
     }
+    out[j0..j0 + W].copy_from_slice(&acc);
 }
 
 /// `w^T` as a row-major buffer (`k x m` for a `m x k` weight): the scratch
@@ -105,8 +160,9 @@ pub fn transposed(w: ArrayView2<'_, f64>) -> Vec<f64> {
 
 /// The `n = 1` product `out (m) = w (m x k) * x (k)`, given `wt = w^T` row-major
 /// ([`transposed`]): `k` outer and ascending, the output index innermost over the
-/// contiguous row `wt[k]`. Per element this is `matmul_seq(w, x)`'s chain:
-/// `+0.0`, then `+= w[i][k] * x[k]` for ascending `k`. `out` is overwritten.
+/// contiguous row `wt[k]` (`chains`, the weight as the multiply's left operand). Per
+/// element this is `matmul_seq(w, x)`'s chain: `+0.0`, then `+= w[i][k] * x[k]` for
+/// ascending `k`. `out` is overwritten.
 pub fn matvec_transposed_into(out: &mut [f64], wt: &[f64], x: &[f64]) {
     let m = out.len();
     assert_eq!(
@@ -114,13 +170,7 @@ pub fn matvec_transposed_into(out: &mut [f64], wt: &[f64], x: &[f64]) {
         x.len() * m,
         "matvec_transposed_into weight length"
     );
-    out.fill(0.0);
-    for (kk, &x_k) in x.iter().enumerate() {
-        let w_row = &wt[kk * m..(kk + 1) * m];
-        for (o, &w_ik) in out.iter_mut().zip(w_row) {
-            *o += w_ik * x_k;
-        }
-    }
+    chains::<false>(out, x, wt);
 }
 
 /// The rank-1 derivative accumulation `acc[r][col0 + j] += x[r] * d[j]`, for a
@@ -251,7 +301,7 @@ mod tests {
         a.iter().copied().collect()
     }
 
-    /// Dimensions around the vector widths and their remainders, zero included,
+    /// Dimensions around the block widths and their remainders, zero included,
     /// plus the two real product shapes (the LSTM projection's `4O = 96` and the
     /// input-delta product's long `n`).
     fn shapes(rng: &mut Rng) -> Vec<(usize, usize, usize)> {
@@ -265,6 +315,11 @@ mod tests {
             (1, 24, 96),
             (23, 96, 81),
             (24, 96, 1),
+            // Every block width at once (16 + 8 + 4 + 2 + 1), and its neighbours.
+            (2, 5, 31),
+            (3, 7, 30),
+            (2, 3, 32),
+            (2, 9, 47),
         ];
         for _ in 0..40 {
             v.push((1 + rng.below(9), 1 + rng.below(19), 1 + rng.below(19)));
