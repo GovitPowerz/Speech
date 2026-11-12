@@ -538,9 +538,9 @@ operand: the same catcher and verdict, so the `0.001x` budget edit has no patch 
 
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
 R5).** SUPERSEDED for the memory half -- see Phase 10's f32-mel section (the widen is deleted; the
-SAD memory bound is now <= 0.85x of exact, measured 0.743x). SUPERSEDED for the LID wall half --
-see the 2026-11-12 re-derivation under this list (the LID wall bound is now >= 1.3x). Future local
-runs of this exact recipe are expected to land within:
+SAD memory bound is now <= 0.85x of exact, measured 0.743x). SUPERSEDED for both wall halves --
+see the 2026-11-12 re-derivation under this list (the wall bounds are now SAD >= 2.8x and LID
+>= 1.3x). Future local runs of this exact recipe are expected to land within:
 - SAD arms (algo 3, spectral): wall speedup >= 3.5x, memory <= 1.4x of exact (the periodogram-
   widening tax above is real and expected, not a regression signal up to this ratio). HEADROOM
   NOTE: the 1.4x ceiling sits only ~9-10% above the measured 1.22-1.28x maxrss ratios, and the
@@ -563,14 +563,17 @@ kernels of issue #144).** Both LID arms read below the 2.5x wall bound: 1.86x (p
 table above), so no fast-path slowdown is behind the reading: the exact LID walls fell 52% and
 47%, and a bound on a ratio moves with its denominator.
 
-The LID wall bound is re-derived on the new pair: **wall speedup >= 1.3x**. The 2.5x bound sat
-at 0.71 of the lower LID reading it was set under (2.5 / 3.53); the same fraction of 1.86x is
-1.32x, rounded down. The LID memory bound (<= 0.8x) is unchanged and holds at 0.576x and 0.608x.
+Both wall bounds are re-derived on the new pair, each at the fraction of its arm's lower
+reading that the old bound was set at, rounded down to one decimal:
+- **LID Mode-7 arms: wall speedup >= 1.3x.** The 2.5x bound sat at 0.71 of 3.53x; the same
+  fraction of 1.86x is 1.32x.
+- **SAD arms: wall speedup >= 2.8x.** The 3.5x bound sat at 0.76 of 4.58x; the same fraction of
+  3.70x is 2.83x. The arms read 3.70x and 3.71x, 5% above the old bound, which was set with
+  24% headroom.
 
-The SAD bounds are not re-derived. The arms read 3.70x and 3.71x against 3.5x, which is 5%
-headroom where the bound was set with 24% (3.5 / 4.58); memory reads 0.759x and 0.693x of exact
-against 0.85x. The CI pin (`fast <= exact * 1.5` on the 60 s fixture) carries 5.6x headroom over
-the measured 3.71x.
+The memory bounds are unchanged and hold: SAD fast at 0.759x and 0.693x of exact against 0.85x,
+LID at 0.576x and 0.608x against 0.8x. The CI pin (`fast <= exact * 1.5` on the 60 s fixture)
+carries 5.6x headroom over the measured 3.71x.
 
 ### The exact gradient fold (issue #154)
 
@@ -4521,8 +4524,8 @@ this change.
 
 Done since (2026-11-12, `d83b111`): the four legs were re-run and the README and ARCHITECTURE
 sentences follow the new records. "Exact vs fast: the measured matrix + pinned budgets" in the
-Phase 7 section holds the table, the before and after per leg, and the LID arms' local wall
-bound, re-derived there.
+Phase 7 section holds the table, the before and after per leg, and the two local wall
+bounds, re-derived there.
 
 ### The final tree, green
 
