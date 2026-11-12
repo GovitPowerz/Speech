@@ -461,14 +461,14 @@ the ADR-0003 STOP rule).
 <!-- ledger:table phase7_bench_matrix -->
 | leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mib | MiB/audio-s | speedup (wall, fast vs exact) |
 |---|---|---|---|---|---|---|---|
-| SAD 60 s fixture (stereo) | 120.00 | exact | 0.3177 [0.3146-0.3215] (n=3) | 0.002647 | 57.182 | 0.4765 | baseline |
-| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0645 [0.0642-0.0648] (n=3) | 0.000537 | 43.521 | 0.3627 | 4.93x |
-| SAD corpus-gated (mono) | 75.00 | exact | 0.1996 [0.1963-0.2015] (n=3) | 0.002661 | 54.062 | 0.7208 | baseline |
-| SAD corpus-gated (mono) | 75.00 | fast | 0.0405 [0.0402-0.0409] (n=3) | 0.000539 | 39.281 | 0.5238 | 4.93x |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0538 [0.0527-0.0550] (n=3) | 0.001265 | 31.010 | 0.7290 | baseline |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0157 [0.0151-0.0167] (n=3) | 0.000368 | 20.547 | 0.4830 | 3.43x |
-| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0415 [0.0415-0.0416] (n=3) | 0.001272 | 21.979 | 0.6732 | baseline |
-| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0114 [0.0114-0.0115] (n=3) | 0.000350 | 13.495 | 0.4133 | 3.63x |
+| SAD 60 s fixture (stereo) | 120.00 | exact | 0.2187 [0.2150-0.2234] (n=3) | 0.001823 | 56.094 | 0.4674 | baseline |
+| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0590 [0.0577-0.0609] (n=3) | 0.000492 | 42.583 | 0.3549 | 3.71x |
+| SAD corpus-gated (mono) | 75.00 | exact | 0.1394 [0.1366-0.1414] (n=3) | 0.001859 | 53.661 | 0.7155 | baseline |
+| SAD corpus-gated (mono) | 75.00 | fast | 0.0377 [0.0375-0.0379] (n=3) | 0.000502 | 37.198 | 0.4960 | 3.70x |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0260 [0.0255-0.0265] (n=3) | 0.000611 | 29.656 | 0.6971 | baseline |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0140 [0.0136-0.0142] (n=3) | 0.000329 | 17.078 | 0.4015 | 1.86x |
+| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0221 [0.0217-0.0225] (n=3) | 0.000678 | 19.552 | 0.5988 | baseline |
+| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0102 [0.0101-0.0102] (n=3) | 0.000311 | 11.880 | 0.3639 | 2.18x |
 
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->
