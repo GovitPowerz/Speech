@@ -4473,6 +4473,13 @@ differential leg is the only owner of a kernel's order, and it runs in every `ca
   (a row slice had turned an index panic into a cross-row read); with the input deltas gated off
   `testM` is neither allocated nor filled; the reverse paths and the dense backward lost a second
   copy each.
+- From the second review: `matmul_seq` reads `a` row by row, so a time-reversed operand (Mamba's
+  and the transformer's reverse forwards, whose input keeps its negative row stride) is read in
+  place instead of copied to row-major first; a column-major `a` copies one row at a time. One
+  machine, HEAD's kernel then the change, back to back: `blstm_fwd_bwd_mamba` -5.9%,
+  `blstm_fwd_bwd_transformer` -0.5%, `matmul_seq_92x96` -0.8%, `blstm_fwd_bwd_v1` unchanged
+  (p = 0.19). The CfC backward reads its two caches directly (the forward builds both
+  row-major), and the transposed scratch is documented as a backward-only one.
 
 Left named, not done here: the Phase 7 bench legs were not re-run, so the fast-versus-exact
 speedups the README and ARCHITECTURE quote from the ledger describe the exact forward before

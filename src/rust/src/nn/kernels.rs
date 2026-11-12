@@ -61,7 +61,9 @@ use ndarray::{Array2, ArrayView2};
 
 /// Ascending-`k` matrix product `a (m x k) * b (k x n)`, the product kernel of every
 /// NN product site (the legacy `main.cpp::matSeq` contract, see the module doc): per
-/// output row, `out[i][j] = sum_k a[i][k] * b[k][j]` through `chains`.
+/// output row, `out[i][j] = sum_k a[i][k] * b[k][j]` through `chains`. `a` is read
+/// row by row, so a time-reversed `a` (contiguous rows, negative row stride) is read
+/// in place; only a row that is not contiguous is copied.
 ///
 /// `pub` so `benches/kernels.rs` (a separate compilation unit) can time it as
 /// `matmul_seq_92x96`.
@@ -69,16 +71,18 @@ pub fn matmul_seq(a: &Array2<f64>, b: &Array2<f64>) -> Array2<f64> {
     let (m, k) = a.dim();
     let (kb, n) = b.dim();
     assert_eq!(k, kb, "matmul_seq inner dim mismatch");
-    let a = a.as_standard_layout();
     let b = b.as_standard_layout();
-    let mut out = vec![0.0f64; m * n];
-    matmul_seq_into(
-        &mut out,
-        a.as_slice().expect("standard layout"),
-        b.as_slice().expect("standard layout"),
-        (m, k, n),
-    );
-    Array2::from_shape_vec((m, n), out).expect("m * n elements")
+    let b = b.as_slice().expect("standard layout");
+    let mut out = Array2::<f64>::zeros((m, n));
+    for (mut out_row, a_row) in out.rows_mut().into_iter().zip(a.rows()) {
+        let row = a_row.as_standard_layout();
+        chains::<true>(
+            out_row.as_slice_mut().expect("standard layout"),
+            row.as_slice().expect("contiguous row"),
+            b,
+        );
+    }
+    out
 }
 
 /// [`matmul_seq`] on row-major slices, written into a caller-provided buffer:
@@ -151,9 +155,9 @@ fn chain_block<const W: usize, const SCALAR_FIRST: bool>(
 }
 
 /// `w^T` as a row-major buffer (`k x m` for a `m x k` weight): the scratch
-/// [`matvec_transposed_into`] reads. Built once per `feed_forward` / `feed_backward`
-/// call and dropped with it; nothing is stored on a layer, so no copy can go stale
-/// at `set_weights` or at an update.
+/// [`matvec_transposed_into`] reads. Built once per `feed_backward` call (no forward
+/// reads a transposed weight) and dropped with it; nothing is stored on a layer, so
+/// no copy can go stale at `set_weights` or at an update.
 pub fn transposed(w: ArrayView2<'_, f64>) -> Vec<f64> {
     w.t().iter().copied().collect()
 }
@@ -363,6 +367,16 @@ mod tests {
             &flat(&matmul_seq(&a_rev, &b_t)),
             &flat(&want),
             "reversed * transposed",
+        );
+        // A column-major `a`: its rows are not contiguous, so each one is copied.
+        let a_t = b.t().to_owned(); // 5 x 9
+        let b_rev = matrix(&mut rng, Regime::Finite, 9, 4)
+            .slice(ndarray::s![..;-1, ..])
+            .to_owned();
+        assert_bits(
+            &flat(&matmul_seq(&a_t, &b_rev)),
+            &flat(&reference_matmul(&a_t, &b_rev)),
+            "transposed * reversed",
         );
     }
 
