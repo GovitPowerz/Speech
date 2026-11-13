@@ -506,6 +506,14 @@ impl FastBlstm {
         &self.forward_layers[0].input_weights
     }
 
+    /// Test hook: the `[fwd | bwd]` hidden rows the last [`Self::feed_forward`] handed
+    /// the output MLP, `rows x 2 * lstm_out` row-major, for the issue #147 bit fixtures
+    /// (the posteriors alone can round a one-ULP hidden difference away).
+    #[cfg(feature = "test-support")]
+    pub fn debug_hidden(&self, rows: usize) -> &[f32] {
+        &self.ws.hcat[..rows * 2 * self.lstm_out]
+    }
+
     /// Core bidirectional forward (`nn::blstm::BlstmNetwork::feed_forward`). `input`
     /// is `frames x cols` (cols may exceed the net input via the crop gate). Returns
     /// the posteriors `output_length x output_size`, held in the reused `output`
