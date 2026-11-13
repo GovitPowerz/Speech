@@ -458,17 +458,22 @@ impl Engine {
     /// `(network_index, {mean_error, mean_relative_error, per_weight})` per
     /// backprop-active network of config 0, ascending index. `per_weight` is an
     /// `Nx3` array of `(backprop_normalized, numerical, abs_diff)` rows. COPY:
-    /// the report triples are packed into a fresh `Nx3` numpy array.
+    /// the report triples are packed into a fresh `Nx3` numpy array. The sweep
+    /// is `1 + 2 * min(N, max_weights)` corpus folds per network, so the GIL
+    /// is released for it as `run` releases it (issue #152).
     fn grad_check<'py>(
         &mut self,
         py: Python<'py>,
         epsilon: f64,
         max_weights: usize,
     ) -> PyResult<Vec<(usize, Bound<'py, PyDict>)>> {
-        let reports = self
-            .inner
-            .grad_check(epsilon, max_weights)
-            .map_err(to_pyerr)?;
+        let reports = py
+            .detach(|| {
+                self.inner
+                    .grad_check(epsilon, max_weights)
+                    .map_err(|e| format!("{e:#}"))
+            })
+            .map_err(PyRuntimeError::new_err)?;
         let mut out = Vec::with_capacity(reports.len());
         for (net_idx, r) in reports {
             let n = r.per_weight.len();
