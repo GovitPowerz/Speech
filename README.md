@@ -167,7 +167,7 @@ Speech/
       nn/{network,blstm,layers,kernels,activations,train}.rs   # kernels: the exact products, order-preserving
       nn/cells/{slstm,mamba,cfc,transformer}.rs   # the CellLayer seam
       tasks/{segmenter,sad,lid,segmentation,segmentation_io,vrcts}.rs
-      fast/{nn,mel32,pipeline,plan,driver,cells,bicell,stream,stream_lid}.rs   # f32 fast + streaming
+      fast/{nn,kernels,mel32,pipeline,plan,driver,cells,bicell,stream,stream_lid}.rs   # f32 fast + streaming
       io/{mod,binary}.rs
     tests/                                 # cargo integration suites, one file per phase gate
     benches/kernels.rs                     # criterion benches: the kernels, one net forward plus backward

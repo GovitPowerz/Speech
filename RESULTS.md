@@ -4694,3 +4694,154 @@ ignored, 0 failed (the #144 close's 1421 plus the differential leg). `uv run pyt
 Re-run on `ccd0782`, the rustc 1.100.0 `needless_range_loop` rewrites in
 `engine/channel_result.rs`, `cost.rs`, `fast/pipeline.rs` and three integration tests: the
 cargo suite 1422 passed, 4 ignored, 0 failed; `run.py --check` 207 mutations, 0 problems.
+
+## Issue #147 -- the fast tree's projections through one f32 block kernel: the benches and the mutation battery
+
+**Live:** `tests/mutations/issue147/` (4 patches, 19 verdicts).
+
+Branch `feature/fast-f32-kernels`, off `main@a10dd7d`. Every hand-written projection of the fast
+tree kept one ascending f32 accumulator per output and computed the outputs one after another:
+the 16 `dot_f32` calls of the five causal cells and the bidirectional LSTM twin's recurrence.
+They now run through `fast/kernels.rs`, the f32 transcription of the exact tree's block nest
+(issue #144): `k` outer over blocks of up to 16 adjacent outputs held in registers, over a
+weight stored k-major. Each output is still summed from `+0.0` in ascending input order, one add
+per term, so no value moves.
+
+### What the grilling measured first
+
+A `sample` profile of `speech bench --path=fast` on the staged 60 s stereo SAD fixture (fast
+wall 59 ms against 155 ms exact; shares of active samples, not a record):
+
+| share | where |
+|---|---|
+| ~35% | `lstm_layer_forward` self time (recurrence, bias, peepholes) |
+| ~19% | `asinhf` + `expf` |
+| ~16% | realfft / rustfft |
+| ~6% | faer gemm |
+
+A standalone harness outside the tree (`rustc -C opt-level=3`, min of 7, a loaded machine, so
+the ratios are the finding), the block nest against the per-output dot, equal by `to_bits` on
+every shape:
+
+| outputs x k | per-output dot | k-outer blocks | ratio | plain k-outer, output row in memory |
+|---|---|---|---|---|
+| 96 x 24 | 287 ns | 78 ns | 3.7x | 2.2x |
+| 96 x 23 | 264 ns | 68 ns | 3.9x | 2.0x |
+| 192 x 64 | 1719 ns | 409 ns | 4.2x | 3.2x |
+| 64 x 256 | 4658 ns | 659 ns | 7.1x | 4.0x |
+| 12 x 48 | 76 ns | 32 ns | 2.4x | 1.2x |
+| 4 x 24 | 12.0 ns | 7.8 ns | 1.5x | 0.5x |
+| 1 x 24 | 3.3 ns | 3.8 ns | 0.9x | 0.2x |
+
+- The per-output dot costs about 0.6 cycles per term at `96 x 24`: the core already overlaps the
+  chains of adjacent outputs, so the gain is 4x, not a latency-bound one.
+- The plain `k`-outer nest loses under 8 outputs, as it did in f64 (issue #144), and was not
+  used.
+- At ONE output the block kernel reads 0.9x (3.8 ns against 3.3 ns). The narrowest projection
+  of the gate configs is four outputs wide; the dense output MLP, whose last layer is one, runs
+  `DenseRowChain` and is not in scope.
+
+### The criterion targets
+
+`cargo bench --bench kernels` (`src/rust/benches/kernels.rs`), 100 samples per target, Apple M4
+Pro on AC power, `bench` profile, rustc 1.100.0. One session, the two builds run back to back
+(before, after, before again), one forward over a 327-frame window per iteration:
+
+| target | net | before (`a060c4a`), two passes | after (`8fcc33c`) | change |
+|---|---|---|---|---|
+| `fast_blstm_fwd_v1` | `FastBlstm`, `lre_sad.toml`, LSTM `23,24,24` | 231.27 / 231.32 us | 159.47 us | -31.1% |
+| `fast_blstm_fwd_v2` | `FastBlstm`, `lre_sad_v2.toml`, LSTM `11,24,24` | 214.80 / 214.76 us | 141.01 us | -34.3% |
+| `fast_blstm_fwd_lid` | `FastBlstm`, the `BLSTM` net of `lid_blstm.toml`, LSTM `11,12` | 54.39 / 54.02 us | 42.11 us | -22.3% |
+| `fast_lstm_fwd` | `FastCausalNet`, phase9 `lstm_forward`, `23,4` | 33.46 / 33.04 us | 13.91 us | -58.2% |
+| `fast_slstm_fwd` | `FastCausalNet`, phase9 `slstm_forward` | 32.24 / 32.37 us | 11.06 us | -65.8% |
+| `fast_mamba_fwd` | `FastCausalNet`, phase9 `mamba_forward` | 25.57 / 25.74 us | 22.43 us | -12.6% |
+| `fast_cfc_fwd` | `FastCausalNet`, phase9 `cfc_forward` | 20.99 / 22.40 us | 15.24 us | -29.8% |
+| `fast_transformer_fwd` | `FastCausalNet`, phase9 `transformer_forward` | 20.09 / 20.16 us | 17.07 us | -15.2% |
+
+The change column is against the mean of the two "before" passes.
+
+- **The stop rule** was any target slower, or a geometry where the block kernel loses to the
+  per-output dot. Every target is faster.
+- **`fast_blstm_fwd_lid`** is the narrowest committed LSTM geometry (a `48 x 12` recurrence),
+  the Twin config's `BLSTM` net, not its `BLSTM_LID` net. It is here for the narrow shape.
+- **The causal targets run the gate configs' tiny geometry** (`4O = 16` for the two LSTMs,
+  projections 4 to 12 wide for the others), the narrow end of every projection: the numbers
+  compare a cell with itself.
+- **The two LSTMs gain most** because their whole pre-activation is two products over `92` and
+  `4` inputs; Mamba and the transformer spend more of a step in `exp`, `softplus` and the
+  attention loops, which did not change.
+
+### The proof that no number moved
+
+- **The kernel.** `fast::kernels::tests::the_kernel_matches_the_per_output_dot`: both entry
+  points against the per-output dot (kept private to that test module) by `to_bits`, for every
+  output count in `1..=40` plus 48, 92, 96 and 192, nine input counts, a cropped input, and
+  values with signed zeros, infinities, subnormals and `f32::MAX` mixed in; NaN by `is_nan`.
+  `every_output_is_seeded_positive_zero` owns the seed.
+- **The step bodies.** `tests/issue147_fast_bits.rs` against 13 fixtures under
+  `tests/reference_data/issue147/`, written on `a060c4a`, before any kernel change, and
+  byte-unchanged since: `FastBlstm` at three geometries and each causal cell at two (its phase9
+  seed config and a wider two-layer one), each on a full-width input and one three columns
+  narrower. A case records the posteriors and the hidden rows.
+- **Which rows are bit-exact.** A cell's own `step` output reads the block kernel and libm,
+  nothing else: those rows compare by `to_bits` on the oracle libm host and under the hybrid
+  bound elsewhere. Every posterior and every `FastBlstm` row is downstream of a faer product,
+  whose bits are the host's SIMD lowering too: those compare under the hybrid bound on every
+  host. Phase 10 declined an f32 self-golden because it would pin that lowering
+  (`docs/validation.md`); these fixtures pin none.
+- **What that leaves unowned.** Off the oracle libm host a one-ULP change to a step's combine
+  order is owned by nothing, as issue #144 left the exact tree. On every host the
+  `FastBlstm` recurrence's order is owned by the kernel leg alone; its fixture rows guard the
+  layout and the wiring.
+- Every parity and streaming leg is green unedited. Two pre-existing tests changed: the layout
+  pin `lstm_from_flat_inverts_the_set_weights_block_order` reads the k-major indexing, and one
+  module-doc line of `phase9_fast_parity.rs` names the kernel.
+
+### What the battery measured
+
+| # | mutation | caught by | missed by, as declared |
+|---|---|---|---|
+| 1 | the f32 `chain_block` sums in descending input order | the differential leg, the bit fixtures | `phase9_fast_parity::causal_parity_exact_vs_fast`, `phase7_parity_sad::sad_parity_exact_vs_fast`, the seed test |
+| 2 | an accumulator seeded from its first term | the seed test, the differential leg | the bit fixtures, both parity legs |
+| 3 | `FastLstm::step` combines `in + (bias + rec)` | the bit fixtures | the differential leg, `lstm_matches_the_exact_cell_within_the_f32_band`, the causal parity leg |
+| 4 | `k_major` swaps its indices | `k_major_is_the_transpose`, the differential leg, the LSTM layout pin, the bit fixtures, the causal parity leg | none |
+
+Patches 1 and 3 declare `requires: oracle-libm`: their fixture catch is one ULP.
+
+**`phase10/6` has a catcher.** That patch batches `FastLstm::step`'s input projection through
+faer, the symmetric substitution every one of its seven catchers has missed since Phase 10
+(`IMPROVEMENTS.md`, Phase 10 battery, item 6). The step fixtures catch it, so it carries an
+eighth catcher and `requires: oracle-libm`; off that host its seven `MISSED` read `SKIPPED`.
+
+Four older patches were re-targeted in the commit that moved their context: `phase7/1`,
+`phase9/7`, `phase10/6` and `phase10/8b`.
+
+### Deviations from the grilling outcome
+
+- **The fixtures are narrower than decided.** The outcome pinned every fixture row bit-exactly
+  on the oracle host. The review found the Phase 10 declination of exactly that; the rows
+  downstream of faer are now under the hybrid bound everywhere (above).
+- **The fixtures hold more than decided**: a second, wider geometry per causal cell, a direct
+  drive of the layer-0 `step`, and `FastBlstm`'s hidden rows through a new `test-support` hook
+  (`debug_hidden`). The posteriors alone can round a one-ULP hidden difference away.
+- **An ADR was amended.** The outcome said none; ADR-0003's consequence on symmetric edits was
+  false once the step fixtures existed, and carries one dated addition. `docs/validation.md`
+  and the DEVELOPMENT.md worked example were corrected with it.
+- **Patch 4's differential-leg verdict** is `CAUGHT` where the outcome's table predicted
+  `MISSED`: the leg builds its weights through `k_major`.
+- **The module rule text** landed with the last cell commit instead of the docs commit, since
+  it named `dot_f32`.
+- **One layout pin was re-indexed** (above), which "no test edited" did not foresee.
+- From the review: comments stating history were cut to the fact; `fast/mod.rs` lists the
+  module; the name `fast_blstm_fwd_lid` was kept as the outcome fixed it, its doc saying which
+  net it is.
+
+### The final tree, green
+
+`cargo test --release --no-fail-fast --features test-support` on `8fcc33c`: 1435 passed, 5
+ignored, 0 failed (the #145 close's 1422, plus the kernel's three tests and the ten of the
+fixture binary, eight of them the shared comparator's own; the fifth ignored test is the fixture
+writer). `uv run pytest tests -q -m "not slow"`: 1211 passed, 1 skipped, as on `main`. `uv run
+pytest tests/pyo3 -q`: 296 passed in 12:14. `run.py --check`: 211 mutations, 0 problems. The
+close run `--changed-since origin/main`, in two calls to stay under an hour each (`issue147
+phase7 phase9`, then `phase10 phase11`): 17 patches, 85 verdicts, 0 differ from expected.
