@@ -4691,3 +4691,6 @@ ignored, 0 failed (the #144 close's 1421 plus the differential leg). `uv run pyt
 "not slow"`: 1211 passed, 1 skipped, as on `main`. `uv run pytest tests/pyo3 -q`: 296 passed in
 11:42. `run.py --check`: 207 mutations, 0 problems. The close run `--changed-since origin/main`:
 2 patches, 6 verdicts, 0 differ from expected (`issue145`, re-targeted by the review fix).
+Re-run on `ccd0782`, the rustc 1.100.0 `needless_range_loop` rewrites in
+`engine/channel_result.rs`, `cost.rs`, `fast/pipeline.rs` and three integration tests: the
+cargo suite 1422 passed, 4 ignored, 0 failed; `run.py --check` 207 mutations, 0 problems.
