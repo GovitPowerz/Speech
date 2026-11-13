@@ -447,25 +447,26 @@ impl PartialEq for MambaState {
     }
 }
 
-/// f32 forward-only Mamba (S6) cell in RECURRENT form. Every projection matrix is
-/// stored ROW-MAJOR BY ITS OUTPUT INDEX, which (a) makes each output element one
-/// ascending [`dot_f32`] over a contiguous row and (b) makes `from_flat` a sequence
-/// of contiguous narrowing copies straight off the spec S3.2 pack:
+/// f32 forward-only Mamba (S6) cell in RECURRENT form. The spec S3.2 pack carries
+/// every projection matrix ROW-MAJOR BY ITS OUTPUT INDEX; `from_flat` narrows each
+/// block in pack order and transposes the five projections to the K-MAJOR layout
+/// [`super::kernels`] reads (one row of outputs per input index, issue #147), each
+/// output element still one ascending chain:
 ///
 /// | buffer | index | holds |
 /// |---|---|---|
-/// | `adapter_w` | `m*I + k` | `P[m, k]` (only when `in != out`) |
+/// | `adapter_w` | `k*d_model + m` | `P[m, k]` (only when `in != out`) |
 /// | `adapter_b` | `m` | `p[m]` |
 /// | `norm_gain` | `m` | `g[m]` |
-/// | `w_in` | `i*d_model + m` | `W_in[i, m]` |
+/// | `w_in` | `m*2*d_inner + i` | `W_in[i, m]` |
 /// | `conv_w` | `c*d_conv + k` | `conv[c, k]` |
 /// | `conv_b` | `c` | `b_conv[c]` |
-/// | `w_x` | `i*d_inner + c` | `W_x[i, c]` |
-/// | `w_dt` | `c*dt_rank + r` | `W_dt[c, r]` |
+/// | `w_x` | `c*(dt_rank + 2*d_state) + i` | `W_x[i, c]` |
+/// | `w_dt` | `r*d_inner + c` | `W_dt[c, r]` |
 /// | `b_dt` | `c` | `b_dt[c]` |
 /// | `a_mat` | `c*d_state + s` | `A[c, s] = -exp(A_log[c, s])` |
 /// | `d_skip` | `c` | `D[c]` |
-/// | `w_out` | `m*d_inner + c` | `W_out[m, c]` |
+/// | `w_out` | `c*d_model + m` | `W_out[m, c]` |
 ///
 /// `a_mat` is PRECOMPUTED at construction rather than per step. `A = -exp(A_log)` is a
 /// pure function of the (already narrowed) weights, so hoisting it is value-identical
@@ -581,20 +582,20 @@ impl FastMamba {
         };
 
         let (adapter_w, adapter_b) = if has_adapter {
-            (take(dm * input_size), take(dm))
+            (k_major(&take(dm * input_size), dm, input_size), take(dm))
         } else {
             (Vec::new(), Vec::new())
         };
         let norm_gain = take(dm);
-        let w_in = take(2 * di * dm);
+        let w_in = k_major(&take(2 * di * dm), 2 * di, dm);
         let conv_w = take(di * dc);
         let conv_b = take(di);
-        let w_x = take(zsz * di);
-        let w_dt = take(di * dr);
+        let w_x = k_major(&take(zsz * di), zsz, di);
+        let w_dt = k_major(&take(di * dr), di, dr);
         let b_dt = take(di);
         let a_log = take(di * ds);
         let d_skip = take(di);
-        let w_out = take(dm * di);
+        let w_out = k_major(&take(dm * di), dm, di);
 
         // A = -exp(A_log), the exact forward's step 7 hoisted out of the loop.
         let a_mat: Vec<f32> = a_log.iter().map(|&v| -v.exp()).collect();
@@ -701,10 +702,9 @@ impl FastMamba {
         //    in == out.
         if self.has_adapter {
             let k_in = x.len().min(self.input_size);
+            matvec_into(&mut sc.xa[..dm], &self.adapter_w, &x[..k_in]);
             for m in 0..dm {
-                let base = m * self.input_size;
-                sc.xa[m] =
-                    dot_f32(&self.adapter_w[base..base + k_in], &x[..k_in]) + self.adapter_b[m];
+                sc.xa[m] += self.adapter_b[m];
             }
         } else {
             for m in 0..dm {
@@ -723,10 +723,7 @@ impl FastMamba {
         }
 
         // 3. Input projection -> [u | res] (no bias).
-        for i in 0..2 * di {
-            let base = i * dm;
-            sc.proj[i] = dot_f32(&self.w_in[base..base + dm], &sc.xn[..dm]);
-        }
+        matvec_into(&mut sc.proj[..2 * di], &self.w_in, &sc.xn[..dm]);
 
         // 4. Depthwise CAUSAL conv over the ring + bias + SiLU. The current `u` is
         //    written at `ring_pos` FIRST, so tap `k` (offset `d_conv-1-k`, oldest
@@ -747,16 +744,12 @@ impl FastMamba {
         s.ring_pos = (slot + 1) % dc;
 
         // 5. Selectivity projection -> [dt~ | B | C] (no bias).
-        for i in 0..zsz {
-            let base = i * di;
-            sc.z[i] = dot_f32(&self.w_x[base..base + di], &sc.uc[..di]);
-        }
+        matvec_into(&mut sc.z[..zsz], &self.w_x, &sc.uc[..di]);
 
         // 6. Delta = softplus(W_dt dt~ + b_dt).
+        matvec_into(&mut sc.delta[..di], &self.w_dt, &sc.z[..dr]);
         for c in 0..di {
-            let base = c * dr;
-            let v = dot_f32(&self.w_dt[base..base + dr], &sc.z[..dr]) + self.b_dt[c];
-            sc.delta[c] = softplus_f32(v);
+            sc.delta[c] = softplus_f32(sc.delta[c] + self.b_dt[c]);
         }
 
         // 7. The selective recurrence: Abar = exp(Delta A) in (0,1) by construction.
@@ -779,9 +772,9 @@ impl FastMamba {
         for c in 0..di {
             sc.v[c] = sc.y[c] * silu_f32(sc.proj[di + c]);
         }
+        matvec_into(&mut out[..dm], &self.w_out, &sc.v[..di]);
         for m in 0..dm {
-            let base = m * di;
-            out[m] = dot_f32(&self.w_out[base..base + di], &sc.v[..di]) + sc.xa[m];
+            out[m] += sc.xa[m];
         }
     }
 
