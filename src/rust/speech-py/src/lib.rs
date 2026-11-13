@@ -417,13 +417,24 @@ impl Engine {
     }
 
     /// Seed config-`pos`'s network(s): `[sad, lid]` for algo 6, `[flat]` for
-    /// algo 3/4/5; algo 0/1/2 (no NN) is a no-op. COPY: each numpy array (or
-    /// list) is read into an owned `Vec<f64>` on the way in. An out-of-range
-    /// `pos` is an `IndexError`; a list whose length is not the config's net
-    /// count is a `RuntimeError` raised before any pack is applied (issue #60).
-    fn set_weights(&mut self, pos: usize, nets: Vec<Vec<f64>>) -> PyResult<()> {
+    /// algo 3/4/5; algo 0/1/2 (no NN) is a no-op. COPY: each pack is a
+    /// contiguous 1-D float64 numpy array, copied once into an owned `Vec<f64>`
+    /// on the way in (issue #153); a list of floats or another dtype is a
+    /// `TypeError`, a strided view a `RuntimeError`. An out-of-range `pos` is
+    /// an `IndexError`; a list whose length is not the config's net count is a
+    /// `RuntimeError` raised before any pack is applied (issue #60).
+    fn set_weights(&mut self, pos: usize, nets: Vec<PyReadonlyArray1<'_, f64>>) -> PyResult<()> {
         self.check_pos(pos)?;
-        self.inner.set_weights(pos, &nets).map_err(to_pyerr)
+        let owned = nets
+            .iter()
+            .map(|net| net.as_slice().map(<[f64]>::to_vec))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "each pack must be a contiguous 1-D float64 array: {e}"
+                ))
+            })?;
+        self.inner.set_weights(pos, &owned).map_err(to_pyerr)
     }
 
     /// Config-`pos`'s per-network `Nx2` derivative matrices (col 0 summed deriv,
