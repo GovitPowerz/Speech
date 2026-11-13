@@ -15,10 +15,10 @@ catcher: CAUGHT cargo --test phase7_parity_lid lid_parity_cep_exact_vs_fast
 catcher: CAUGHT cargo --test phase7_parity_sad sad_parity_exact_vs_fast
 
 diff --git a/src/rust/src/fast/nn.rs b/src/rust/src/fast/nn.rs
-index 816379d..71be62b 100644
+index 0ce1969..93d834b 100644
 --- a/src/rust/src/fast/nn.rs
 +++ b/src/rust/src/fast/nn.rs
-@@ -967,7 +967,10 @@ fn lstm_layer_forward(
+@@ -986,7 +986,10 @@ fn lstm_layer_forward(
              proj[g0 + j] += bias[j];
          }
  
@@ -27,6 +27,6 @@ index 816379d..71be62b 100644
 +        // PREVIOUS call (previous window / previous utterance) left in the rolling
 +        // prev_out/prev_cell/prev_gates buffers -- a session state leak across utterances.
 +        if true {
-             // Recurrence: += y_{t-1} * FeedbackWeights (all 4O columns). Feedback is
-             // column-major, so gate column j's O weights are contiguous.
-             for j in 0..four_o {
+             // Recurrence: += y_{t-1} * FeedbackWeights (all 4O columns), each column's
+             // ascending chain summed from +0.0 and added once.
+             matvec_add_into(&mut proj[g0..g0 + four_o], fb, &prev_out[..o]);

@@ -43,6 +43,7 @@
 pub mod bicell;
 pub mod cells;
 pub mod driver;
+mod kernels;
 pub mod mel32;
 pub mod nn;
 pub mod pipeline;
