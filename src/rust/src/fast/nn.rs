@@ -28,11 +28,11 @@
 //! DELIBERATE f32 DIVERGENCES (spec S4; not bugs, not IMPROVEMENTS.md material):
 //! 1. `faer::linalg::matmul` (blocked SIMD) replaces `matmul_seq` (ascending f64) for
 //!    the batched input/output projections -- different reduction order + f32.
-//! 2. The recurrence matvec is a hand-written contiguous dot over the column-major
-//!    feedback blocks, NOT a per-timestep faer matvec: the batched projection uses
-//!    faer (the brief's mandate), but a per-frame faer matvec's view-setup + dispatch
-//!    overhead exceeds a tight autovectorized `O`-length dot for the sequential
-//!    recurrence, which the brief explicitly blesses as the recurrence fallback.
+//! 2. The recurrence matvec is NOT a per-timestep faer matvec: the batched projection
+//!    uses faer (the brief's mandate), but a per-frame faer matvec pays its view setup
+//!    and dispatch at every step. It runs `super::kernels::matvec_add_into` over the
+//!    k-major feedback block (issue #147): per gate column the ascending `O`-term
+//!    chain from `+0.0`, added to the projection once, `4O` columns side by side.
 //! 3. The exp saturation/overflow guards use the f32 bound `ln(f32::MAX) ~ 88.72`
 //!    (gates/logistic) and an `80.0` softmax guard, not the exact path's f64 `700.0`
 //!    -- the correct f32 analogues (the guards only fire in saturation, unreachable on
@@ -49,6 +49,8 @@ use faer::linalg::matmul::matmul;
 use faer::{Accum, MatMut, MatRef, Par};
 
 use crate::config::{self, NnetSpec};
+
+use super::kernels::{k_major, matvec_add_into};
 
 // ---------------------------------------------------------------------------
 // f32 activation transcriptions (nn/activations.rs, f32).
@@ -261,10 +263,13 @@ impl FastMatrix {
 // Per-layer f32 weight blocks (SoA, narrowed once at construction).
 // ---------------------------------------------------------------------------
 
-/// One peephole LSTM layer's f32 weights. `input_weights`/`feedback_weights` are
-/// stored COLUMN-major exactly as the flat pack delivers them (`LSTMLayer::set_weights`
-/// reads them column-major), so faer views them zero-copy; `peep` is transposed to
-/// ROW-major (`peep[row*O + j]`) for contiguous per-unit peephole reads. Gate column
+/// One peephole LSTM layer's f32 weights. `input_weights` is stored COLUMN-major
+/// exactly as the flat pack delivers it (`LSTMLayer::set_weights` reads it
+/// column-major), so faer views it zero-copy. `feedback_weights` arrives column-major
+/// too and is stored ROW-major (`fb[k*4O + j]`, issue #147): the pack's layout is one
+/// contiguous column per gate output, the recurrence kernel reads one row of gate
+/// outputs per previous-output index (`super::kernels::k_major`). `peep` is transposed
+/// to ROW-major (`peep[row*O + j]`) for contiguous per-unit peephole reads. Gate column
 /// blocks are `[i|f|o|g]` (0..O input, O..2O forget, 2O..3O output, 3O..4O cell/g).
 #[derive(Clone)]
 struct FastLstmLayer {
@@ -274,7 +279,7 @@ struct FastLstmLayer {
     gates_peep: bool,
     gates_rec_peep: bool,
     input_weights: Vec<f32>,    // col-major (I x 4O)
-    feedback_weights: Vec<f32>, // col-major (O x 4O)
+    feedback_weights: Vec<f32>, // row-major (O x 4O), k-major for the recurrence
     peep: Vec<f32>,             // row-major (12 x O)
     biases: Vec<f32>,           // 4O
 }
@@ -399,13 +404,15 @@ impl FastBlstm {
         let narrow = |s: &[f64]| -> Vec<f32> { s.iter().map(|&x| x as f32).collect() };
 
         // One LSTM layer's four blocks, in flat order: InputWeights (I x 4O col-
-        // major), FeedbackWeights (O x 4O col-major), PeepWeight (12 x O col-major,
-        // stored ROW-major), Biaises (4O). `cells`/`gates`/`gates_rec` are the
+        // major), FeedbackWeights (O x 4O col-major, stored ROW-major), PeepWeight
+        // (12 x O col-major, stored ROW-major), Biaises (4O). `cells`/`gates`/`gates_rec` are the
         // per-direction peephole flags.
         let mut build_lstm_layer =
             |i: usize, o: usize, cells: bool, gates: bool, gates_rec: bool| -> FastLstmLayer {
                 let input_weights = narrow(take(i * 4 * o));
-                let feedback_weights = narrow(take(4 * o * o));
+                // A column-major `O x 4O` block is one contiguous `O`-long column per
+                // gate output: `4O` outputs by `O` inputs for the kernel's transpose.
+                let feedback_weights = k_major(&narrow(take(4 * o * o)), 4 * o, o);
                 // PeepWeight arrives column-major (12 x O): seg[jj*12 + ii]. Store
                 // row-major peep[ii*O + jj] for contiguous per-unit reads.
                 let peep_seg = take(12 * o);
@@ -504,6 +511,14 @@ impl FastBlstm {
     #[cfg(feature = "test-support")]
     pub fn debug_forward_l0_input_weights(&self) -> &[f32] {
         &self.forward_layers[0].input_weights
+    }
+
+    /// Test hook: the `[fwd | bwd]` hidden rows the last [`Self::feed_forward`] handed
+    /// the output MLP, `rows x 2 * lstm_out` row-major, for the issue #147 bit fixtures
+    /// (the posteriors alone can round a one-ULP hidden difference away).
+    #[cfg(feature = "test-support")]
+    pub fn debug_hidden(&self, rows: usize) -> &[f32] {
+        &self.ws.hcat[..rows * 2 * self.lstm_out]
     }
 
     /// Core bidirectional forward (`nn::blstm::BlstmNetwork::feed_forward`). `input`
@@ -956,7 +971,7 @@ fn lstm_layer_forward(
     );
 
     let p = &layer.peep; // row-major 12 x O
-    let fb = &layer.feedback_weights; // col-major O x 4O
+    let fb = &layer.feedback_weights; // row-major O x 4O
     let bias = &layer.biases;
 
     for step in 0..t {
@@ -969,16 +984,9 @@ fn lstm_layer_forward(
         }
 
         if step > 0 {
-            // Recurrence: += y_{t-1} * FeedbackWeights (all 4O columns). Feedback is
-            // column-major, so gate column j's O weights are contiguous.
-            for j in 0..four_o {
-                let col = &fb[j * o..j * o + o];
-                let mut acc = 0.0_f32;
-                for k in 0..o {
-                    acc += prev_out[k] * col[k];
-                }
-                proj[g0 + j] += acc;
-            }
+            // Recurrence: += y_{t-1} * FeedbackWeights (all 4O columns), each column's
+            // ascending chain summed from +0.0 and added once.
+            matvec_add_into(&mut proj[g0..g0 + four_o], fb, &prev_out[..o]);
             // Cells peep into i,f (rows 0,1): += c_{t-1} .* P.
             if layer.cells_peep {
                 for j in 0..o {

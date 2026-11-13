@@ -1,0 +1,21 @@
+mutation: the f32 chain_block sums each output in descending input order (the fast twin of issue144/1)
+catcher: CAUGHT cargo --lib fast::kernels::tests::the_kernel_matches_the_per_output_dot
+catcher: CAUGHT cargo --test issue147_fast_bits fast_net_outputs_keep_their_bits
+catcher: MISSED cargo --test phase9_fast_parity causal_parity_exact_vs_fast
+catcher: MISSED cargo --test phase7_parity_sad sad_parity_exact_vs_fast
+catcher: MISSED cargo --lib fast::kernels::tests::every_output_is_seeded_positive_zero
+requires: oracle-libm-f32
+
+diff --git a/src/rust/src/fast/kernels.rs b/src/rust/src/fast/kernels.rs
+index 10a150e..90dfd39 100644
+--- a/src/rust/src/fast/kernels.rs
++++ b/src/rust/src/fast/kernels.rs
+@@ -112,7 +112,7 @@ fn chains<const ADD: bool>(out: &mut [f32], wt: &[f32], x: &[f32]) {
+ fn chain_block<const W: usize, const ADD: bool>(out: &mut [f32], wt: &[f32], x: &[f32], j0: usize) {
+     let stride = out.len();
+     let mut acc = [0.0_f32; W];
+-    for (&x_k, row) in x.iter().zip(wt.chunks_exact(stride)) {
++    for (&x_k, row) in x.iter().zip(wt.chunks_exact(stride)).rev() {
+         let block: &[f32; W] = row[j0..j0 + W].try_into().expect("block width");
+         for (a, &w) in acc.iter_mut().zip(block) {
+             *a += w * x_k;

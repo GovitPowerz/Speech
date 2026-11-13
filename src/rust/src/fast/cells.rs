@@ -48,25 +48,34 @@
 //! NEVER `IMPROVEMENTS.md` -- the phase-7 rule):
 //!
 //! 1. f32 arithmetic throughout, against the exact tree's f64. The op ORDER is
-//!    preserved element-for-element (every reduction is an ascending loop over a
-//!    CONTIGUOUS slice, matching `matmul_seq`'s ascending contract), so the only
-//!    divergence is rounding width -- measured, then pinned with headroom by
-//!    `tests/phase9_fast_parity.rs` and the inline `*_matches_the_exact_cell_*` legs.
+//!    preserved element-for-element (every output is reduced from `+0.0` in ascending
+//!    input order, one add per term, no fused multiply-add, matching `matmul_seq`'s
+//!    ascending contract), so the only divergence is rounding width -- measured, then
+//!    pinned with headroom by `tests/phase9_fast_parity.rs` and the inline
+//!    `*_matches_the_exact_cell_*` legs.
 //! 2. NO batched (faer) projection. `FastBlstm` batches its input projection through
 //!    `faer_project` because it never has to expose a per-frame kernel; the causal
 //!    twins DO (streaming), and the brief's bit-identity contract is "the wrapper is
-//!    the step loop". A batched projection would make the offline and streaming
-//!    numbers differ in the last f32 ULP, which is exactly the class of drift the
-//!    phase-8 gate exists to forbid. So every projection here is a per-step dot over
-//!    a contiguous weight row -- and since phase 11 that reads EVERY PROJECTION AND
+//!    the step loop". `faer_project`'s per-element result depends on how many ROWS it
+//!    is handed, so a batched projection would make the offline and streaming numbers
+//!    differ in the last f32 ULP, which is exactly the class of drift the phase-8 gate
+//!    exists to forbid. So every projection here is a per-step product through
+//!    [`super::kernels`] (issue #147), whose result for one output depends on that
+//!    output's weights and the input alone: not on the outputs advanced alongside it,
+//!    and on no row count. Since phase 11 the property covers EVERY PROJECTION AND
 //!    EVERY ATTENTION REDUCTION (spec S5.2): [`FastTransformer::step`]'s `q.k` products
-//!    and its weighted-`v` fold are per-step ascending reductions too, never a batched
-//!    `W x W` score matrix. THIS RULE IS A DESIGN-TIME CONTROL AND NOTHING TESTS IT (the
-//!    phase-10 battery item 6 lesson, recorded in `CLAUDE.md`): a SYMMETRIC substitution
-//!    -- one applied inside the shared `step` that both the offline and streaming drivers
-//!    call -- is invisible to every self-consistency leg by construction AND sits under
-//!    the parity pins' measured*10 resolution. Review the rule; do not expect a leg to
-//!    catch its violation. The ASYMMETRIC version (batch one side only) IS caught, by the
+//!    and its weighted-`v` fold are per-step ascending loops too, never a batched
+//!    `W x W` score matrix. WHAT OWNS THE RULE (the phase-10 battery item 6 lesson,
+//!    recorded in `CLAUDE.md`): a SYMMETRIC substitution -- one applied inside the
+//!    shared `step` that both the offline and streaming drivers call -- is invisible
+//!    to every self-consistency leg by construction AND sits under the parity pins'
+//!    measured*10 resolution. Since issue #147 the kernel's own order is owned by its
+//!    differential leg, and the step bodies by the output-bit fixtures of
+//!    `tests/issue147_fast_bits.rs`, which drive each cell's `step` directly and are
+//!    bit-exact on the oracle libm host only. What stays a DESIGN-TIME control: that
+//!    every projection routes through the kernel and that no faer call enters a
+//!    step, which off the oracle host no leg catches.
+//!    Review the rule. The ASYMMETRIC version (batch one side only) IS caught, by the
 //!    streaming bit-identity legs. The dense output MLP runs the shared
 //!    `super::nn::DenseRowChain` -- still the faer kernel, but driven ONE ROW at a
 //!    time, NOT the batched `dense_net_forward` the phase-7 [`super::nn::FastBlstm`]
@@ -116,6 +125,7 @@ use anyhow::{Result, bail};
 use crate::config::NnetSpec;
 use crate::nn::blstm::{BlstmConfig, CellType, CfcParams, MambaParams, TransformerParams};
 
+use super::kernels::{k_major, matvec_add_into, matvec_into};
 use super::nn::{
     DenseRowChain, FastDenseLayer, FastMatrix, Scratch, asinh_f32, copy_view_into, ensure_len,
     gates_fn_f32, logistic_f32, sub_sample_into,
@@ -190,19 +200,6 @@ fn lecun_tanh_f32(x: f32) -> f32 {
 /// (strictly more than an equality between two `-8.0`s would).
 const TRANSFORMER_ALIBI_EXPONENT: f64 = -8.0;
 
-/// Ascending dot over two contiguous `n`-element slices -- the f32 stand-in for one
-/// `nn::kernels::matmul_seq` output cell (`acc = 0; for kk in 0..k { acc +=
-/// a*b }`). Every projection in this module routes through it, so the accumulation
-/// order is one fact rather than a dozen hand-written loops.
-#[inline]
-fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
-    let mut acc = 0.0_f32;
-    for k in 0..a.len() {
-        acc += a[k] * b[k];
-    }
-    acc
-}
-
 // ---------------------------------------------------------------------------
 // sLSTM (spec S2.1 forward, S2.2 layout).
 // ---------------------------------------------------------------------------
@@ -211,35 +208,53 @@ fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
 /// `h` (the previous output, the recurrence's input), `c` (numerator), `n`
 /// (normalizer) and `m` (the running-max stabilizer, seeded [`M_INIT_F32`]).
 ///
-/// Construction is CHEAP (four small allocations, no weight touch) and reset is
+/// Construction is CHEAP (five small allocations, no weight touch) and reset is
 /// EXPLICIT: a session takes a fresh [`FastSlstm::state`]. There is no implicit
 /// reset anywhere -- carrying a stale state across sequences is a caller bug the
-/// `split_state_*` legs exist to make visible.
-#[derive(Clone, Debug, PartialEq)]
+/// `split_state_*` legs exist to make visible. `PartialEq` compares the four carried
+/// vectors only; the scratch is sized by [`FastSlstm::state`].
+#[derive(Clone, Debug)]
 pub struct SlstmState {
     pub h: Vec<f32>,
     pub c: Vec<f32>,
     pub n: Vec<f32>,
     pub m: Vec<f32>,
+    scratch: SlstmScratch,
 }
 
-/// f32 forward-only sLSTM cell. Weights are stored as three flat SoA buffers whose
-/// per-unit rows are CONTIGUOUS, which is what lets every gate projection be one
-/// ascending [`dot_f32`] -- the same accumulation order the exact `matmul_seq` uses:
+impl PartialEq for SlstmState {
+    fn eq(&self, other: &SlstmState) -> bool {
+        self.h == other.h && self.c == other.c && self.n == other.n && self.m == other.m
+    }
+}
+
+/// [`FastSlstm::step`]'s working buffer, preallocated once per state: carries NOTHING
+/// across steps (it is fully overwritten before it is read), hence private and absent
+/// from state equality.
+#[derive(Clone, Debug, Default)]
+struct SlstmScratch {
+    /// `4O`: this step's gate pre-activations, in the `[i|f|o|z]` block order.
+    pre: Vec<f32>,
+}
+
+/// f32 forward-only sLSTM cell. Weights are stored as three flat SoA buffers, the two
+/// matrices K-MAJOR (one row of the `4O` gate outputs per input index, issue #147) so
+/// every gate projection runs through [`super::kernels`], each output summed in the
+/// ascending order the exact `matmul_seq` uses:
 ///
-/// - `rec[(a*O + j)*O + k] == R_a[j, k]`
-/// - `inp[(a*O + j)*I + k] == W_a[j, k]`
+/// - `rec[k*4O + (a*O + j)] == R_a[j, k]`
+/// - `inp[k*4O + (a*O + j)] == W_a[j, k]`
 /// - `bias[a*O + j] == b_a[j]`
 ///
-/// Those are literally the spec S2.2 flat pack re-sliced (per gate: the whole `R_a`
-/// block, then the whole `W_a` block, then `b_a`, each row-major), so `from_flat` is
-/// three contiguous narrowing copies per gate and NOT a re-derivation of the layout.
+/// The spec S2.2 flat pack carries, per gate, the whole `R_a` block, then the whole
+/// `W_a` block, then `b_a`, each row-major: `from_flat` narrows those per gate and
+/// transposes the two matrices once.
 #[derive(Clone)]
 pub struct FastSlstm {
     input_size: usize,
     output_size: usize,
-    rec: Vec<f32>,  // 4*O*O
-    inp: Vec<f32>,  // 4*O*I
+    rec: Vec<f32>,  // O x 4O, k-major
+    inp: Vec<f32>,  // I x 4O, k-major
     bias: Vec<f32>, // 4*O
 }
 
@@ -279,8 +294,8 @@ impl FastSlstm {
         FastSlstm {
             input_size: i,
             output_size: o,
-            rec,
-            inp,
+            rec: k_major(&rec, 4 * o, o),
+            inp: k_major(&inp, 4 * o, i),
             bias,
         }
     }
@@ -301,6 +316,9 @@ impl FastSlstm {
             c: vec![0.0; o],
             n: vec![0.0; o],
             m: vec![M_INIT_F32; o],
+            scratch: SlstmScratch {
+                pre: vec![0.0; 4 * o],
+            },
         }
     }
 
@@ -322,39 +340,46 @@ impl FastSlstm {
     #[allow(clippy::needless_range_loop)]
     pub fn step(&self, x: &[f32], s: &mut SlstmState, out: &mut [f32]) {
         let (o, i) = (self.output_size, self.input_size);
+        let four_o = 4 * o;
+        let SlstmState {
+            h,
+            c,
+            n,
+            m,
+            scratch,
+        } = s;
+        let pre = &mut scratch.pre;
         let k_in = x.len().min(i);
         let xs = &x[..k_in];
-        for j in 0..o {
-            // The four gate pre-activations for unit j, in the block order [i|f|o|z].
-            let mut pre = [0.0_f32; 4];
-            for (a, p) in pre.iter_mut().enumerate() {
-                let base_in = (a * o + j) * i;
-                let mut acc = dot_f32(&self.inp[base_in..base_in + k_in], xs);
-                acc += self.bias[a * o + j];
-                let base_rec = (a * o + j) * o;
-                acc += dot_f32(&self.rec[base_rec..base_rec + o], &s.h[..o]);
-                *p = acc;
-            }
 
-            let i_pre = pre[0];
-            let fm = pre[1] + s.m[j];
+        // The 4O gate pre-activations, in the block order [i|f|o|z]: input projection,
+        // + bias, + the recurrent chain (summed from +0.0 on its own, added once).
+        matvec_into(&mut pre[..four_o], &self.inp, xs);
+        for jj in 0..four_o {
+            pre[jj] += self.bias[jj];
+        }
+        matvec_add_into(&mut pre[..four_o], &self.rec, &h[..o]);
+
+        for j in 0..o {
+            let i_pre = pre[j];
+            let fm = pre[o + j] + m[j];
             let m_t = if fm > i_pre { fm } else { i_pre };
             let ip = (i_pre - m_t).exp();
             let fp = (fm - m_t).exp();
-            let z = pre[3].tanh();
-            let og = logistic_f32(pre[2]);
+            let z = pre[3 * o + j].tanh();
+            let og = logistic_f32(pre[2 * o + j]);
 
-            let c_t = fp * s.c[j] + ip * z;
-            let n_t = fp * s.n[j] + ip;
+            let c_t = fp * c[j] + ip * z;
+            let n_t = fp * n[j] + ip;
 
-            s.m[j] = m_t;
-            s.c[j] = c_t;
-            s.n[j] = n_t;
+            m[j] = m_t;
+            c[j] = c_t;
+            n[j] = n_t;
             out[j] = og * (c_t / n_t);
         }
         // h is rolled AFTER every unit is done: the recurrence above must read the
         // PREVIOUS step's whole output, never a half-updated one.
-        s.h[..o].copy_from_slice(&out[..o]);
+        h[..o].copy_from_slice(&out[..o]);
     }
 
     /// Whole-sequence forward: a fresh [`Self::state`] then [`Self::step`] per row.
@@ -418,25 +443,26 @@ impl PartialEq for MambaState {
     }
 }
 
-/// f32 forward-only Mamba (S6) cell in RECURRENT form. Every projection matrix is
-/// stored ROW-MAJOR BY ITS OUTPUT INDEX, which (a) makes each output element one
-/// ascending [`dot_f32`] over a contiguous row and (b) makes `from_flat` a sequence
-/// of contiguous narrowing copies straight off the spec S3.2 pack:
+/// f32 forward-only Mamba (S6) cell in RECURRENT form. The spec S3.2 pack carries
+/// every projection matrix ROW-MAJOR BY ITS OUTPUT INDEX; `from_flat` narrows each
+/// block in pack order and transposes the five projections to the K-MAJOR layout
+/// [`super::kernels`] reads (one row of outputs per input index, issue #147), each
+/// output element still one ascending chain:
 ///
 /// | buffer | index | holds |
 /// |---|---|---|
-/// | `adapter_w` | `m*I + k` | `P[m, k]` (only when `in != out`) |
+/// | `adapter_w` | `k*d_model + m` | `P[m, k]` (only when `in != out`) |
 /// | `adapter_b` | `m` | `p[m]` |
 /// | `norm_gain` | `m` | `g[m]` |
-/// | `w_in` | `i*d_model + m` | `W_in[i, m]` |
+/// | `w_in` | `m*2*d_inner + i` | `W_in[i, m]` |
 /// | `conv_w` | `c*d_conv + k` | `conv[c, k]` |
 /// | `conv_b` | `c` | `b_conv[c]` |
-/// | `w_x` | `i*d_inner + c` | `W_x[i, c]` |
-/// | `w_dt` | `c*dt_rank + r` | `W_dt[c, r]` |
+/// | `w_x` | `c*(dt_rank + 2*d_state) + i` | `W_x[i, c]` |
+/// | `w_dt` | `r*d_inner + c` | `W_dt[c, r]` |
 /// | `b_dt` | `c` | `b_dt[c]` |
 /// | `a_mat` | `c*d_state + s` | `A[c, s] = -exp(A_log[c, s])` |
 /// | `d_skip` | `c` | `D[c]` |
-/// | `w_out` | `m*d_inner + c` | `W_out[m, c]` |
+/// | `w_out` | `c*d_model + m` | `W_out[m, c]` |
 ///
 /// `a_mat` is PRECOMPUTED at construction rather than per step. `A = -exp(A_log)` is a
 /// pure function of the (already narrowed) weights, so hoisting it is value-identical
@@ -552,20 +578,20 @@ impl FastMamba {
         };
 
         let (adapter_w, adapter_b) = if has_adapter {
-            (take(dm * input_size), take(dm))
+            (k_major(&take(dm * input_size), dm, input_size), take(dm))
         } else {
             (Vec::new(), Vec::new())
         };
         let norm_gain = take(dm);
-        let w_in = take(2 * di * dm);
+        let w_in = k_major(&take(2 * di * dm), 2 * di, dm);
         let conv_w = take(di * dc);
         let conv_b = take(di);
-        let w_x = take(zsz * di);
-        let w_dt = take(di * dr);
+        let w_x = k_major(&take(zsz * di), zsz, di);
+        let w_dt = k_major(&take(di * dr), di, dr);
         let b_dt = take(di);
         let a_log = take(di * ds);
         let d_skip = take(di);
-        let w_out = take(dm * di);
+        let w_out = k_major(&take(dm * di), dm, di);
 
         // A = -exp(A_log), the exact forward's step 7 hoisted out of the loop.
         let a_mat: Vec<f32> = a_log.iter().map(|&v| -v.exp()).collect();
@@ -672,10 +698,9 @@ impl FastMamba {
         //    in == out.
         if self.has_adapter {
             let k_in = x.len().min(self.input_size);
+            matvec_into(&mut sc.xa[..dm], &self.adapter_w, &x[..k_in]);
             for m in 0..dm {
-                let base = m * self.input_size;
-                sc.xa[m] =
-                    dot_f32(&self.adapter_w[base..base + k_in], &x[..k_in]) + self.adapter_b[m];
+                sc.xa[m] += self.adapter_b[m];
             }
         } else {
             for m in 0..dm {
@@ -694,10 +719,7 @@ impl FastMamba {
         }
 
         // 3. Input projection -> [u | res] (no bias).
-        for i in 0..2 * di {
-            let base = i * dm;
-            sc.proj[i] = dot_f32(&self.w_in[base..base + dm], &sc.xn[..dm]);
-        }
+        matvec_into(&mut sc.proj[..2 * di], &self.w_in, &sc.xn[..dm]);
 
         // 4. Depthwise CAUSAL conv over the ring + bias + SiLU. The current `u` is
         //    written at `ring_pos` FIRST, so tap `k` (offset `d_conv-1-k`, oldest
@@ -718,16 +740,12 @@ impl FastMamba {
         s.ring_pos = (slot + 1) % dc;
 
         // 5. Selectivity projection -> [dt~ | B | C] (no bias).
-        for i in 0..zsz {
-            let base = i * di;
-            sc.z[i] = dot_f32(&self.w_x[base..base + di], &sc.uc[..di]);
-        }
+        matvec_into(&mut sc.z[..zsz], &self.w_x, &sc.uc[..di]);
 
         // 6. Delta = softplus(W_dt dt~ + b_dt).
+        matvec_into(&mut sc.delta[..di], &self.w_dt, &sc.z[..dr]);
         for c in 0..di {
-            let base = c * dr;
-            let v = dot_f32(&self.w_dt[base..base + dr], &sc.z[..dr]) + self.b_dt[c];
-            sc.delta[c] = softplus_f32(v);
+            sc.delta[c] = softplus_f32(sc.delta[c] + self.b_dt[c]);
         }
 
         // 7. The selective recurrence: Abar = exp(Delta A) in (0,1) by construction.
@@ -750,9 +768,9 @@ impl FastMamba {
         for c in 0..di {
             sc.v[c] = sc.y[c] * silu_f32(sc.proj[di + c]);
         }
+        matvec_into(&mut out[..dm], &self.w_out, &sc.v[..di]);
         for m in 0..dm {
-            let base = m * di;
-            out[m] = dot_f32(&self.w_out[base..base + di], &sc.v[..di]) + sc.xa[m];
+            out[m] += sc.xa[m];
         }
     }
 
@@ -813,17 +831,17 @@ impl PartialEq for CfcState {
     }
 }
 
-/// f32 forward-only CfC cell. Every matrix is stored ROW-MAJOR BY ITS OUTPUT INDEX,
-/// which makes each output element one ascending [`dot_f32`] over a contiguous row --
-/// and which is ALREADY the spec S1.2 flat order (`for_each_slot` walks `j` outer, `k`
-/// inner), so `from_flat` is a sequence of contiguous narrowing copies and NOT a
-/// re-derivation of the layout:
+/// f32 forward-only CfC cell. The spec S1.2 flat order is row-major by output index
+/// (`for_each_slot` walks `j` outer, `k` inner); `from_flat` narrows each block in pack
+/// order and transposes every matrix to the K-MAJOR layout [`super::kernels`] reads
+/// (one row of outputs per input index, issue #147), each output element still one
+/// ascending chain:
 ///
 /// | buffer | index | holds |
 /// |---|---|---|
-/// | `bb_w[l]` | `j*fan_in + k` | `W_l[j, k]` (`fan_in = in+H` at `l == 0`, else `B`) |
+/// | `bb_w[l]` | `k*B + j` | `W_l[j, k]` (`fan_in = in+H` at `l == 0`, else `B`) |
 /// | `bb_b[l]` | `j` | `b_l[j]` |
-/// | `head_w` | `(blk*H + j)*B + k` | `W_blk[j, k]`, `blk` in `[ff1, ff2, gate]` |
+/// | `head_w` | `k*3H + (blk*H + j)` | `W_blk[j, k]`, `blk` in `[ff1, ff2, gate]` |
 /// | `head_b` | `blk*H + j` | `b_blk[j]` |
 ///
 /// The backbone is a `Vec` of per-layer buffers because layer 0 is `(in+H) -> B` and the
@@ -839,7 +857,7 @@ pub struct FastCfc {
 
     bb_w: Vec<Vec<f32>>,
     bb_b: Vec<Vec<f32>>,
-    head_w: Vec<f32>, // 3H*B
+    head_w: Vec<f32>, // B x 3H, k-major
     head_b: Vec<f32>, // 3H
 }
 
@@ -887,7 +905,7 @@ impl FastCfc {
         let mut bb_b = Vec::with_capacity(l);
         for li in 0..l {
             let fan_in = if li == 0 { input_size + h } else { b };
-            bb_w.push(take(b * fan_in));
+            bb_w.push(k_major(&take(b * fan_in), b, fan_in));
             bb_b.push(take(b));
         }
         // The three heads are INTERLEAVED in the pack (`W_1 | b_1 | W_2 | b_2 | W_t |
@@ -898,6 +916,7 @@ impl FastCfc {
             head_w.extend_from_slice(&take(h * b));
             head_b.extend_from_slice(&take(h));
         }
+        let head_w = k_major(&head_w, CFC_HEAD_NB * h, b);
 
         FastCfc {
             input_size,
@@ -952,8 +971,9 @@ impl FastCfc {
     ///
     /// Width tolerance is the exact `CfcLayer::reconcile_input` contract, reproduced
     /// LITERALLY rather than as sLSTM's fewer-terms trick: a wider `x` is CROPPED to the
-    /// left `input_size` columns and a narrower one is ZERO-PADDED into `z`, so the dot
-    /// runs over the full `in + H` width on every path exactly as `matmul_seq` does.
+    /// left `input_size` columns and a narrower one is ZERO-PADDED into `z`, so the
+    /// product runs over the full `in + H` width on every path exactly as `matmul_seq`
+    /// does.
     ///
     /// `needless_range_loop` is allowed for the same reason the exact cells allow it:
     /// the ascending index order IS the numeric contract.
@@ -992,18 +1012,15 @@ impl FastCfc {
             } else {
                 &prev[(li - 1) * b..li * b]
             };
+            matvec_into(&mut cur[..b], w, src);
             for j in 0..b {
-                let base = j * fan_in;
-                cur[j] = lecun_tanh_f32(dot_f32(&w[base..base + fan_in], src) + bias[j]);
+                cur[j] = lecun_tanh_f32(cur[j] + bias[j]);
             }
         }
 
         // 3. The three heads share one product (combined column blocks, `[ff1|ff2|g]`).
         let last = &bb[(l - 1) * b..l * b];
-        for c in 0..CFC_HEAD_NB * h {
-            let base = c * b;
-            u[c] = dot_f32(&self.head_w[base..base + b], last);
-        }
+        matvec_into(&mut u[..CFC_HEAD_NB * h], &self.head_w, last);
         for j in 0..h {
             let (c1, c2, cg) = (j, h + j, 2 * h + j);
             let ff1 = (u[c1] + self.head_b[c1]).tanh();
@@ -1085,28 +1102,27 @@ impl PartialEq for LstmState {
 /// depends on the ROW COUNT `m` once the weight matrix has more than one column
 /// (measured in Task 7 of phase 9 -- see [`super::nn::DenseRowChain`]), so a batched
 /// projection makes the offline and streamed numbers differ in the last f32 ULP at
-/// re-chunked granularities. Every projection here is therefore a per-step ascending
-/// [`dot_f32`] over a CONTIGUOUS weight row, from day one, exactly like [`FastSlstm`],
-/// [`FastMamba`] and [`FastCfc`].
+/// re-chunked granularities. Every projection here is therefore a per-step product
+/// through [`super::kernels`], whose per-output result has no row count to depend on,
+/// exactly like [`FastSlstm`], [`FastMamba`] and [`FastCfc`].
 ///
-/// Weight buffers, all narrowed `f64 -> f32` ONCE at [`Self::from_flat`] and laid out so
-/// that "one output element" is "one contiguous slice".
+/// Weight buffers, all narrowed `f64 -> f32` ONCE at [`Self::from_flat`].
 /// `nn::layers::LstmLayer::set_weights` reads `input_weights` (`I x 4O`) and `feedback_weights`
 /// (`O x 4O`) in COLUMN-major element order, and a gate COLUMN is `(a*O + j)` for gate
-/// block `a` and unit `j` -- so the flat pack ALREADY delivers each output element's
-/// weights contiguously and `from_flat` is a straight narrowing copy, not a transpose:
+/// block `a` and unit `j` -- so the flat pack delivers each output element's weights
+/// contiguously, and `from_flat` transposes both blocks to the kernel's K-MAJOR layout
+/// (one row of the `4O` gate outputs per input index, issue #147):
 ///
 /// | buffer | index | holds |
 /// |---|---|---|
-/// | `inp` | `(a*O + j)*I + k` | `input_weights[k, a*O + j]` |
-/// | `rec` | `(a*O + j)*O + k` | `feedback_weights[k, a*O + j]` |
+/// | `inp` | `k*4O + (a*O + j)` | `input_weights[k, a*O + j]` |
+/// | `rec` | `k*4O + (a*O + j)` | `feedback_weights[k, a*O + j]` |
 /// | `peep` | `r*O + j` | `peep_weight[r, j]`, `r` in `0..12` |
 /// | `bias` | `a*O + j` | `biases[0, a*O + j]` |
 ///
-/// `peep` is the ONE block that is transposed: the pack carries the `12 x O` bundle
-/// column-major (12 contiguous values per unit), and the step reads it ROW-major (one
-/// peephole family across all units), which is the [`super::nn::FastLstmLayer`] choice
-/// verbatim.
+/// `peep` is transposed too: the pack carries the `12 x O` bundle column-major (12
+/// contiguous values per unit), and the step reads it ROW-major (one peephole family
+/// across all units), which is the [`super::nn::FastLstmLayer`] choice verbatim.
 ///
 /// THE CELLWEIGHT-NARROW ASYMMETRY IS UPSTREAM OF THIS TYPE, and that is worth stating
 /// because the hazard list flags it as easy to over-generalize: the `g`/cell gate carries
@@ -1124,8 +1140,8 @@ pub struct FastLstm {
     cells_peep: bool,
     gates_peep: bool,
     gates_rec_peep: bool,
-    inp: Vec<f32>,  // 4O x I, row-major by output index
-    rec: Vec<f32>,  // 4O x O, row-major by output index
+    inp: Vec<f32>,  // I x 4O, k-major
+    rec: Vec<f32>,  // O x 4O, k-major
     peep: Vec<f32>, // 12 x O, row-major
     bias: Vec<f32>, // 4O
 }
@@ -1167,8 +1183,8 @@ impl FastLstm {
             seg
         };
 
-        let inp = narrow(take(4 * o * i));
-        let rec = narrow(take(4 * o * o));
+        let inp = k_major(&narrow(take(4 * o * i)), 4 * o, i);
+        let rec = k_major(&narrow(take(4 * o * o)), 4 * o, o);
         // The bundle arrives COLUMN-major (`seg[j*12 + r]`); store it ROW-major.
         let peep_seg = take(12 * o);
         let mut peep = vec![0.0_f32; 12 * o];
@@ -1232,9 +1248,8 @@ impl FastLstm {
     /// not two adds):
     ///
     /// 1. per gate element: input projection (ascending `k`), `+ bias`, `+ recurrence`
-    ///    (ascending `k`) -- the fused-per-element form of the exact path's three separate
-    ///    passes, which is bit-identical because gate elements are independent of each
-    ///    other at this stage;
+    ///    (ascending `k`, summed from `+0.0` on its own and added once) -- the exact
+    ///    path's three passes, all `4O` gate elements side by side;
     /// 2. peepholes into `i` and `f`, IN THE EXACT ORDER: cells (rows 0, 1) ->
     ///    gates-recurrent (rows 3, 7) -> gates, each ONE combined expression
     ///    (`i += f_{t-1}*P4 + o_{t-1}*P5`, `f += i_{t-1}*P6 + o_{t-1}*P8`);
@@ -1259,8 +1274,8 @@ impl FastLstm {
     ///
     /// Width tolerance is the exact `:313-319` projection contract: a wider `x` is CROPPED
     /// to the left `input_size` columns, a narrower one sums fewer terms (equivalent to
-    /// the exact path's "use the top `cols` weight rows", since `inp`'s per-element row is
-    /// indexed by the input index).
+    /// the exact path's "use the top `cols` weight rows": the kernel reads only the
+    /// leading `x.len()` rows of the k-major `inp`, one row per input index).
     ///
     /// `needless_range_loop` is allowed for the sibling cells' reason: `j` indexes several
     /// buffers at once and the ascending index order IS the numeric contract.
@@ -1279,14 +1294,11 @@ impl FastLstm {
         let xs = &x[..k_in];
 
         // 1. proj + bias + recurrence, per gate element (`:313-319` + `:351`).
+        matvec_into(&mut pre[..four_o], &self.inp, xs);
         for jj in 0..four_o {
-            let bi = jj * i;
-            let mut acc = dot_f32(&self.inp[bi..bi + k_in], xs);
-            acc += self.bias[jj];
-            let br = jj * o;
-            acc += dot_f32(&self.rec[br..br + o], &h[..o]);
-            pre[jj] = acc;
+            pre[jj] += self.bias[jj];
         }
+        matvec_add_into(&mut pre[..four_o], &self.rec, &h[..o]);
 
         let p = &self.peep;
         // 2a. cells peep into i, f (rows 0, 1) -- `:353-356`.
@@ -1455,25 +1467,25 @@ impl PartialEq for TransformerState {
 /// f32 forward-only windowed-causal attention cell, the twin of
 /// `nn::cells::transformer::TransformerLayer::feed_forward` transcribed op-for-op.
 ///
-/// Every matrix is stored ROW-MAJOR BY ITS OUTPUT INDEX, which makes each output element
-/// one ascending [`dot_f32`] over a contiguous row -- and which is ALREADY the spec S1.2
-/// flat order (`for_each_slot` walks the output index outer, the source index inner), so
-/// `from_flat` is a sequence of contiguous narrowing copies and NOT a re-derivation of the
-/// layout:
+/// The spec S1.2 flat order is row-major by output index (`for_each_slot` walks the
+/// output index outer, the source index inner); `from_flat` narrows each block in pack
+/// order and transposes every matrix to the K-MAJOR layout [`super::kernels`] reads (one
+/// row of outputs per input index, issue #147), each output element still one ascending
+/// chain:
 ///
 /// | buffer | index | holds |
 /// |---|---|---|
-/// | `adapter_w` | `m*in + k` | `W_a[m, k]` |
+/// | `adapter_w` | `k*H + m` | `W_a[m, k]` |
 /// | `adapter_b` | `m` | `b_a[m]` |
 /// | `gain1` | `m` | `g_1[m]` |
-/// | `qkv_w` | `r*H + m` | `W_qkv[r, m]`, `r` blocked `[q \| k \| v]` |
+/// | `qkv_w` | `m*3H + r` | `W_qkv[r, m]`, `r` blocked `[q \| k \| v]` |
 /// | `qkv_b` | `r` | `b_qkv[r]` |
-/// | `out_w` | `m*H + k` | `W_o[m, k]` |
+/// | `out_w` | `k*H + m` | `W_o[m, k]` |
 /// | `out_b` | `m` | `b_o[m]` |
 /// | `gain2` | `m` | `g_2[m]` |
-/// | `ff1_w` | `r*H + m` | `W_1[r, m]` |
+/// | `ff1_w` | `m*d_ff + r` | `W_1[r, m]` |
 /// | `ff1_b` | `r` | `b_1[r]` |
-/// | `ff2_w` | `m*d_ff + r` | `W_2[m, r]` |
+/// | `ff2_w` | `r*H + m` | `W_2[m, r]` |
 /// | `ff2_b` | `m` | `b_2[m]` |
 ///
 /// TWO CONSTRUCTION-TIME HOISTS, both DECLARED as value-identical in the
@@ -1504,17 +1516,17 @@ pub struct FastTransformer {
     sqrt_d: f32,
     slopes: Vec<f32>,
 
-    adapter_w: Vec<f32>, // H*in
+    adapter_w: Vec<f32>, // in x H, k-major
     adapter_b: Vec<f32>, // H
     gain1: Vec<f32>,     // H
-    qkv_w: Vec<f32>,     // 3H*H
+    qkv_w: Vec<f32>,     // H x 3H, k-major
     qkv_b: Vec<f32>,     // 3H
-    out_w: Vec<f32>,     // H*H
+    out_w: Vec<f32>,     // H x H, k-major
     out_b: Vec<f32>,     // H
     gain2: Vec<f32>,     // H
-    ff1_w: Vec<f32>,     // d_ff*H
+    ff1_w: Vec<f32>,     // H x d_ff, k-major
     ff1_b: Vec<f32>,     // d_ff
-    ff2_w: Vec<f32>,     // H*d_ff
+    ff2_w: Vec<f32>,     // d_ff x H, k-major
     ff2_b: Vec<f32>,     // H
 }
 
@@ -1570,17 +1582,17 @@ impl FastTransformer {
             seg.iter().map(|&x| x as f32).collect()
         };
 
-        let adapter_w = take(h * input_size);
+        let adapter_w = k_major(&take(h * input_size), h, input_size);
         let adapter_b = take(h);
         let gain1 = take(h);
-        let qkv_w = take(TRANSFORMER_QKV_NB * h * h);
+        let qkv_w = k_major(&take(TRANSFORMER_QKV_NB * h * h), TRANSFORMER_QKV_NB * h, h);
         let qkv_b = take(TRANSFORMER_QKV_NB * h);
-        let out_w = take(h * h);
+        let out_w = k_major(&take(h * h), h, h);
         let out_b = take(h);
         let gain2 = take(h);
-        let ff1_w = take(f * h);
+        let ff1_w = k_major(&take(f * h), f, h);
         let ff1_b = take(f);
-        let ff2_w = take(h * f);
+        let ff2_w = k_major(&take(h * f), h, f);
         let ff2_b = take(h);
 
         // The two declared hoists (see the struct doc): both are the EXACT cell's own f64
@@ -1715,9 +1727,9 @@ impl FastTransformer {
 
         // 1. Width adapter: x' = W_a x + b_a.
         let k_in = x.len().min(self.input_size);
+        matvec_into(&mut sc.xa[..h], &self.adapter_w, &x[..k_in]);
         for m in 0..h {
-            let base = m * self.input_size;
-            sc.xa[m] = dot_f32(&self.adapter_w[base..base + k_in], &x[..k_in]) + self.adapter_b[m];
+            sc.xa[m] += self.adapter_b[m];
         }
 
         // 2. RMSNorm_1 with the learned gain (the Mamba op order, verbatim).
@@ -1731,9 +1743,13 @@ impl FastTransformer {
         }
 
         // 3. Combined [q | k | v] projection + bias.
+        matvec_into(
+            &mut sc.qkv[..TRANSFORMER_QKV_NB * h],
+            &self.qkv_w,
+            &sc.u[..h],
+        );
         for r in 0..TRANSFORMER_QKV_NB * h {
-            let base = r * h;
-            sc.qkv[r] = dot_f32(&self.qkv_w[base..base + h], &sc.u[..h]) + self.qkv_b[r];
+            sc.qkv[r] += self.qkv_b[r];
         }
 
         // 4. Push (k_t, v_t), evicting the OLDEST at capacity: `ring_pos` advances modulo
@@ -1782,12 +1798,11 @@ impl FastTransformer {
             for jj in 0..len {
                 sc.probs[jj] /= sum;
             }
-            // The weighted `v` fold. This one reduction is an EXPLICIT ascending loop
-            // rather than a [`dot_f32`] call -- not an exception to the no-faer rule but a
-            // consequence of it: for a fixed element `e` the operand walks ring SLOTS, and
-            // a circular window is not a contiguous slice in any layout. The accumulation
-            // order (ascending `jj`, i.e. oldest first) is the exact forward's, which is
-            // what the rule is actually about.
+            // The weighted `v` fold. Like the `q.k` scores above, this reduction is an
+            // EXPLICIT ascending loop rather than a `super::kernels` call: for a fixed
+            // element `e` the operand walks ring SLOTS, and a circular window is not a
+            // contiguous slice in any layout. The accumulation order (ascending `jj`, i.e.
+            // oldest first) is the exact forward's, which is what the rule is about.
             for e in 0..d {
                 let mut acc = 0.0_f32;
                 for jj in 0..len {
@@ -1798,10 +1813,9 @@ impl FastTransformer {
         }
 
         // 6. Residual 1: s = x' + W_o attn + b_o.
+        matvec_into(&mut sc.s[..h], &self.out_w, &sc.attn[..h]);
         for m in 0..h {
-            let base = m * h;
-            sc.s[m] =
-                sc.xa[m] + dot_f32(&self.out_w[base..base + h], &sc.attn[..h]) + self.out_b[m];
+            sc.s[m] = sc.xa[m] + sc.s[m] + self.out_b[m];
         }
 
         // 7. RMSNorm_2 (same op order as RMSNorm_1, on s).
@@ -1815,13 +1829,13 @@ impl FastTransformer {
         }
 
         // 8. FFN + residual 2: h = s + W_2 silu(W_1 v_norm + b_1) + b_2.
+        matvec_into(&mut sc.act[..f], &self.ff1_w, &sc.vn[..h]);
         for r in 0..f {
-            let base = r * h;
-            sc.act[r] = silu_f32(dot_f32(&self.ff1_w[base..base + h], &sc.vn[..h]) + self.ff1_b[r]);
+            sc.act[r] = silu_f32(sc.act[r] + self.ff1_b[r]);
         }
+        matvec_into(&mut out[..h], &self.ff2_w, &sc.act[..f]);
         for m in 0..h {
-            let base = m * f;
-            out[m] = sc.s[m] + dot_f32(&self.ff2_w[base..base + f], &sc.act[..f]) + self.ff2_b[m];
+            out[m] = sc.s[m] + out[m] + self.ff2_b[m];
         }
     }
 
@@ -3040,16 +3054,17 @@ mod tests {
             let cell = FastLstm::from_flat(&flat, i, o, LSTM_PEEP);
 
             let mut rebuilt = Vec::with_capacity(n);
-            // Block 1: InputWeights (I x 4O) COLUMN-major -> `inp[(a*O+j)*I + k]`.
+            // Block 1: InputWeights (I x 4O) COLUMN-major -> `inp[k*4O + (a*O+j)]`
+            // (k-major since issue #147).
             for col in 0..4 * o {
                 for k in 0..i {
-                    rebuilt.push(cell.inp[col * i + k]);
+                    rebuilt.push(cell.inp[k * 4 * o + col]);
                 }
             }
-            // Block 2: FeedbackWeights (O x 4O) COLUMN-major -> `rec[(a*O+j)*O + k]`.
+            // Block 2: FeedbackWeights (O x 4O) COLUMN-major -> `rec[k*4O + (a*O+j)]`.
             for col in 0..4 * o {
                 for k in 0..o {
-                    rebuilt.push(cell.rec[col * o + k]);
+                    rebuilt.push(cell.rec[k * 4 * o + col]);
                 }
             }
             // Block 3: PeepWeight (12 x O) COLUMN-major -> `peep[r*O + j]` (transposed).

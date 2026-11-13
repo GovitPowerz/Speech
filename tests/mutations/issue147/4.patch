@@ -1,0 +1,20 @@
+mutation: k_major swaps its indices (kt[j * inputs + k] = w[k * outputs + j]): the transpose only of a square block
+catcher: CAUGHT cargo --lib fast::kernels::tests::k_major_is_the_transpose
+catcher: CAUGHT cargo --lib fast::kernels::tests::the_kernel_matches_the_per_output_dot
+catcher: CAUGHT cargo --lib fast::cells::tests::lstm_from_flat_inverts_the_set_weights_block_order
+catcher: CAUGHT cargo --test issue147_fast_bits fast_net_outputs_keep_their_bits
+catcher: CAUGHT cargo --test phase9_fast_parity causal_parity_exact_vs_fast
+
+diff --git a/src/rust/src/fast/kernels.rs b/src/rust/src/fast/kernels.rs
+index 10a150e..404eaa7 100644
+--- a/src/rust/src/fast/kernels.rs
++++ b/src/rust/src/fast/kernels.rs
+@@ -49,7 +49,7 @@ pub(crate) fn k_major(w: &[f32], outputs: usize, inputs: usize) -> Vec<f32> {
+     let mut kt = vec![0.0_f32; w.len()];
+     for j in 0..outputs {
+         for k in 0..inputs {
+-            kt[k * outputs + j] = w[j * inputs + k];
++            kt[j * inputs + k] = w[k * outputs + j];
+         }
+     }
+     kt

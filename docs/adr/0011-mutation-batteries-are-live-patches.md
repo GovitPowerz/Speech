@@ -17,7 +17,7 @@ nothing failing anywhere.
 
 A mutation is a committed patch, `tests/mutations/<battery>/<id>.patch`, whose header (text
 `git apply` ignores before the first `diff --git`) names the mutation, each catcher with its
-expected verdict, and any precondition (`requires: corpus`, `requires: oracle-libm`). One script,
+expected verdict, and any precondition (`requires: corpus`, `requires: oracle-libm`, `requires: oracle-libm-f32`). One script,
 `tests/mutations/run.py`, checks and runs them.
 
 **Live, not archival.** Every committed mutation applies to the current tree and holds its
@@ -77,3 +77,19 @@ still a STOP, as it is for an absent corpus: an off-oracle full run exits non-ze
 since a claim it could not verify is not green, so a full run needs the corpus AND the oracle
 libm. `SPEECH_ORACLE_LIBM=ulp` runs the whole battery as an off-oracle host would, which is how
 the sweep for further host-dependent catches was made (the #78 outcome: none beyond the two).
+
+## Amendment (issue #147): the third precondition is the host's f32 libm
+
+The fast cells' step fixtures (`tests/issue147_fast_bits.rs`) compare bit-exact through
+`common::f32_libm_strict`, which calls the f32 `expf` / `tanhf` / `log1pf` / `asinhf` the
+f64 canaries never probe. It is strict on the oracle libm host (`oracle_mode` strict) whose
+f32 functions also reproduce `tests/reference_data/issue147/libm_f32_canaries.bin`, 2048
+`(function, argument, result)` records written on the host that wrote the fixtures, under the
+same `SPEECH_ORACLE_LIBM` override. A mutation whose catch is one ULP on those rows declares
+`requires: oracle-libm-f32` (`issue147/1`, `/3`, `phase10/6`), read as the other two
+preconditions are. The runner recomputes the records through the C symbols with stdlib
+`ctypes`, after the f64 gate; the f32 gate sits inside the f64 one, so a host the f64
+canaries call off-oracle never runs the step rows strict. The two gates read one verdict
+only while each `f32` method `common::libm_f32` calls is its C symbol, which
+`the_f32_canary_functions_are_the_c_symbols` asserts on every host at every canary argument.
+The runner mutation `issue33/oracle-libm-f32-ignored` pins the skip.

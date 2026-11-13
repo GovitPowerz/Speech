@@ -52,7 +52,7 @@
 //! Same parametric legs, one more cell. Note what this row does NOT test: the
 //! bidirectional LSTM, whose fast twin is the phase-7 `FastBlstm` and whose parity lives
 //! in `phase7_parity_sad.rs`. The two LSTM kernels are separate code (batched faer vs
-//! per-step `dot_f32`) and have separate parity legs, deliberately.
+//! the per-step block kernel) and have separate parity legs, deliberately.
 //!
 //! PHASE 11 TASK 5 adds the `transformer` row (`transformer_forward.config` +
 //! `transformer_forward_seed.bin`, the committed Task-4 fixture) whose f32 twin

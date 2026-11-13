@@ -35,12 +35,19 @@
 //! the two SAD lineages' geometry (see `bench_blstm_fwd_bwd`). Issue #144 adds one such
 //! target per new cell on its committed phase9 config and seed pack
 //! (`blstm_fwd_bwd_{slstm,mamba,cfc,transformer}`, see `bench_cell_fwd_bwd`).
+//!
+//! Issue #147 adds the fast tree's net-level targets, forward only: `fast_blstm_fwd_v1`
+//! / `_v2` / `_lid` through `FastBlstm::feed_forward` (see `bench_fast_blstm_fwd`) and
+//! one `fast_<cell>_fwd` per causal cell through `FastCausalNet::feed_forward` (see
+//! `bench_fast_cell_fwd`).
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ndarray::Array2;
 use realfft::RealFftPlanner;
+use speech::fast::cells::{CellGeometry, FastCausalNet};
+use speech::fast::driver::build_aligned_spec;
 use speech::fast::mel32::FastMelBank;
-use speech::fast::nn::faer_project;
+use speech::fast::nn::{FastBlstm, FastMatrix, faer_project};
 use speech::features::fft::Gfft;
 use speech::features::mel::MelFilterBank;
 use speech::nn::blstm::{BlstmConfig, BlstmNetwork};
@@ -362,6 +369,95 @@ fn bench_cell_fwd_bwd(c: &mut Criterion) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Fast nets (issue #147).
+// ---------------------------------------------------------------------------
+
+/// The window `blstm_fwd_bwd` feeds, narrowed: the same synthetic values, f32.
+fn fast_window(in_cols: usize) -> FastMatrix {
+    let data: Vec<f64> = (0..SAD_WINDOW_FRAMES * in_cols)
+        .map(|idx| {
+            let (t, j) = (idx / in_cols, idx % in_cols);
+            ((t * 37 + j * 53 + 7) % 101) as f64 / 101.0 - 0.5
+        })
+        .collect();
+    FastMatrix::from_f64_rows(SAD_WINDOW_FRAMES, in_cols, &data)
+}
+
+/// One `FastBlstm` forward over one window: the bidirectional LSTM twin the four
+/// Phase 7 legs run, built from the `BLSTM` net of a committed config as written,
+/// on a deterministic synthetic pack. `config` is repo-relative.
+fn fast_blstm_fwd(c: &mut Criterion, name: &str, config: &str) {
+    let repo = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+    let map = speech::toml_config::load_config(&format!("{repo}/{config}")).expect("config");
+    let spec = build_aligned_spec(&map, "BLSTM").expect("the config's net");
+    let flat: Vec<f64> = (0..speech::config::element_count(&spec))
+        .map(|k| (((k * 11 + 3) % 97) as f64 / 97.0 - 0.5) * 0.2)
+        .collect();
+    let mut net = FastBlstm::from_flat(&spec, &flat).expect("net");
+    let input = fast_window(spec.lstm_neuron_nb[0]);
+    {
+        let out = net.feed_forward(&input);
+        assert!(out.rows > 0, "{name}: empty output");
+        assert!(
+            out.data.iter().all(|v| v.is_finite()),
+            "{name}: non-finite output"
+        );
+    }
+    c.bench_function(name, |bch| {
+        bch.iter(|| {
+            let out = net.feed_forward(std::hint::black_box(&input));
+            std::hint::black_box(out.data[0])
+        })
+    });
+}
+
+/// The two SAD lineages' geometry (`23,24,24` and `11,24,24`, a `96 x 24` recurrence)
+/// and the narrowest committed LSTM geometry, the `BLSTM` net of the LID config
+/// (`11,12`, a `48 x 12` recurrence).
+fn bench_fast_blstm_fwd(c: &mut Criterion) {
+    fast_blstm_fwd(c, "fast_blstm_fwd_v1", "configs/training/lre_sad.toml");
+    fast_blstm_fwd(c, "fast_blstm_fwd_v2", "configs/training/lre_sad_v2.toml");
+    fast_blstm_fwd(c, "fast_blstm_fwd_lid", "configs/lid/lid_blstm.toml");
+}
+
+/// One `FastCausalNet` forward over the same window for each causal cell, on its
+/// committed phase9 forward config (recurrent `23,4` at sub-sampling 4, output `4,1`)
+/// with its seed pack. The geometry is the gate configs' tiny one, the narrow end of
+/// every projection: the numbers compare a cell with itself across a change.
+fn bench_fast_cell_fwd(c: &mut Criterion) {
+    let repo = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
+    for cell in ["lstm", "slstm", "mamba", "cfc", "transformer"] {
+        let name = format!("fast_{cell}_fwd");
+        let base = format!("{repo}/tests/reference_data/phase9/{cell}_forward");
+        let map = speech::toml_config::load_config(&format!("{base}.config")).expect("config");
+        let bc = BlstmConfig::from_legacy(&map, "BLSTM").expect("the config's BLSTM net");
+        let spec = build_aligned_spec(&map, "BLSTM").expect("the config's net");
+        let flat =
+            speech::io::binary::read_matrix(std::path::Path::new(&format!("{base}_seed.bin")))
+                .expect("committed seed pack")
+                .2;
+        let mut net =
+            FastCausalNet::from_flat(&spec, bc.cell_type, &CellGeometry::from(&bc), &flat)
+                .expect("net");
+        let input = fast_window(spec.lstm_neuron_nb[0]);
+        {
+            let out = net.feed_forward(&input);
+            assert!(out.rows > 0, "{name}: empty output");
+            assert!(
+                out.data.iter().all(|v| v.is_finite()),
+                "{name}: non-finite output"
+            );
+        }
+        c.bench_function(&name, |bch| {
+            bch.iter(|| {
+                let out = net.feed_forward(std::hint::black_box(&input));
+                std::hint::black_box(out.data[0])
+            })
+        });
+    }
+}
+
 criterion_group!(
     kernels,
     bench_matmul_seq,
@@ -371,6 +467,8 @@ criterion_group!(
     bench_realfft,
     bench_mel_apply_f32,
     bench_blstm_fwd_bwd,
-    bench_cell_fwd_bwd
+    bench_cell_fwd_bwd,
+    bench_fast_blstm_fwd,
+    bench_fast_cell_fwd
 );
 criterion_main!(kernels);
