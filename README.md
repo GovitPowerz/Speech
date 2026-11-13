@@ -170,7 +170,7 @@ Speech/
       fast/{nn,kernels,mel32,pipeline,plan,driver,cells,bicell,stream,stream_lid}.rs   # f32 fast + streaming
       io/{mod,binary}.rs
     tests/                                 # cargo integration suites, one file per phase gate
-    benches/kernels.rs                     # criterion benches: the kernels, one net forward plus backward
+    benches/kernels.rs                     # criterion benches: the kernels, one net forward plus backward, the fast nets' forward
     speech-py/src/lib.rs                   # the PyO3 module speech_rs
   src/python/speech/                       # the optimizer / orchestrator (README.md: the module map)
     cli.py  config_bridge.py  weight_bridge.py  init_weights.py  engine.py  genome.py
