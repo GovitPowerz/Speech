@@ -48,25 +48,33 @@
 //! NEVER `IMPROVEMENTS.md` -- the phase-7 rule):
 //!
 //! 1. f32 arithmetic throughout, against the exact tree's f64. The op ORDER is
-//!    preserved element-for-element (every reduction is an ascending loop over a
-//!    CONTIGUOUS slice, matching `matmul_seq`'s ascending contract), so the only
-//!    divergence is rounding width -- measured, then pinned with headroom by
-//!    `tests/phase9_fast_parity.rs` and the inline `*_matches_the_exact_cell_*` legs.
+//!    preserved element-for-element (every output is reduced from `+0.0` in ascending
+//!    input order, one add per term, no fused multiply-add, matching `matmul_seq`'s
+//!    ascending contract), so the only divergence is rounding width -- measured, then
+//!    pinned with headroom by `tests/phase9_fast_parity.rs` and the inline
+//!    `*_matches_the_exact_cell_*` legs.
 //! 2. NO batched (faer) projection. `FastBlstm` batches its input projection through
 //!    `faer_project` because it never has to expose a per-frame kernel; the causal
 //!    twins DO (streaming), and the brief's bit-identity contract is "the wrapper is
-//!    the step loop". A batched projection would make the offline and streaming
-//!    numbers differ in the last f32 ULP, which is exactly the class of drift the
-//!    phase-8 gate exists to forbid. So every projection here is a per-step dot over
-//!    a contiguous weight row -- and since phase 11 that reads EVERY PROJECTION AND
+//!    the step loop". `faer_project`'s per-element result depends on how many ROWS it
+//!    is handed, so a batched projection would make the offline and streaming numbers
+//!    differ in the last f32 ULP, which is exactly the class of drift the phase-8 gate
+//!    exists to forbid. So every projection here is a per-step product through
+//!    [`super::kernels`] (issue #147), whose result for one output depends on that
+//!    output's weights and the input alone: not on the outputs advanced alongside it,
+//!    and on no row count. Since phase 11 the property covers EVERY PROJECTION AND
 //!    EVERY ATTENTION REDUCTION (spec S5.2): [`FastTransformer::step`]'s `q.k` products
-//!    and its weighted-`v` fold are per-step ascending reductions too, never a batched
-//!    `W x W` score matrix. THIS RULE IS A DESIGN-TIME CONTROL AND NOTHING TESTS IT (the
-//!    phase-10 battery item 6 lesson, recorded in `CLAUDE.md`): a SYMMETRIC substitution
-//!    -- one applied inside the shared `step` that both the offline and streaming drivers
-//!    call -- is invisible to every self-consistency leg by construction AND sits under
-//!    the parity pins' measured*10 resolution. Review the rule; do not expect a leg to
-//!    catch its violation. The ASYMMETRIC version (batch one side only) IS caught, by the
+//!    and its weighted-`v` fold are per-step ascending loops too, never a batched
+//!    `W x W` score matrix. WHAT OWNS THE RULE (the phase-10 battery item 6 lesson,
+//!    recorded in `CLAUDE.md`): a SYMMETRIC substitution -- one applied inside the
+//!    shared `step` that both the offline and streaming drivers call -- is invisible
+//!    to every self-consistency leg by construction AND sits under the parity pins'
+//!    measured*10 resolution. Since issue #147 the kernel's own order is owned by its
+//!    differential leg, and the step bodies by the output-bit fixtures of
+//!    `tests/issue147_fast_bits.rs`, bit-exact on the oracle libm host only. What
+//!    stays a DESIGN-TIME control: that every projection routes through the kernel and
+//!    that no faer call enters a step, which off the oracle host no leg catches.
+//!    Review the rule. The ASYMMETRIC version (batch one side only) IS caught, by the
 //!    streaming bit-identity legs. The dense output MLP runs the shared
 //!    `super::nn::DenseRowChain` -- still the faer kernel, but driven ONE ROW at a
 //!    time, NOT the batched `dense_net_forward` the phase-7 [`super::nn::FastBlstm`]
@@ -190,19 +198,6 @@ fn lecun_tanh_f32(x: f32) -> f32 {
 /// element, which catches a wrong exponent, a wrong base and a wrong `h` range at once
 /// (strictly more than an equality between two `-8.0`s would).
 const TRANSFORMER_ALIBI_EXPONENT: f64 = -8.0;
-
-/// Ascending dot over two contiguous `n`-element slices -- the f32 stand-in for one
-/// `nn::kernels::matmul_seq` output cell (`acc = 0; for kk in 0..k { acc +=
-/// a*b }`). Every projection in this module routes through it, so the accumulation
-/// order is one fact rather than a dozen hand-written loops.
-#[inline]
-fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
-    let mut acc = 0.0_f32;
-    for k in 0..a.len() {
-        acc += a[k] * b[k];
-    }
-    acc
-}
 
 // ---------------------------------------------------------------------------
 // sLSTM (spec S2.1 forward, S2.2 layout).
@@ -1470,25 +1465,25 @@ impl PartialEq for TransformerState {
 /// f32 forward-only windowed-causal attention cell, the twin of
 /// `nn::cells::transformer::TransformerLayer::feed_forward` transcribed op-for-op.
 ///
-/// Every matrix is stored ROW-MAJOR BY ITS OUTPUT INDEX, which makes each output element
-/// one ascending [`dot_f32`] over a contiguous row -- and which is ALREADY the spec S1.2
-/// flat order (`for_each_slot` walks the output index outer, the source index inner), so
-/// `from_flat` is a sequence of contiguous narrowing copies and NOT a re-derivation of the
-/// layout:
+/// The spec S1.2 flat order is row-major by output index (`for_each_slot` walks the
+/// output index outer, the source index inner); `from_flat` narrows each block in pack
+/// order and transposes every matrix to the K-MAJOR layout [`super::kernels`] reads (one
+/// row of outputs per input index, issue #147), each output element still one ascending
+/// chain:
 ///
 /// | buffer | index | holds |
 /// |---|---|---|
-/// | `adapter_w` | `m*in + k` | `W_a[m, k]` |
+/// | `adapter_w` | `k*H + m` | `W_a[m, k]` |
 /// | `adapter_b` | `m` | `b_a[m]` |
 /// | `gain1` | `m` | `g_1[m]` |
-/// | `qkv_w` | `r*H + m` | `W_qkv[r, m]`, `r` blocked `[q \| k \| v]` |
+/// | `qkv_w` | `m*3H + r` | `W_qkv[r, m]`, `r` blocked `[q \| k \| v]` |
 /// | `qkv_b` | `r` | `b_qkv[r]` |
-/// | `out_w` | `m*H + k` | `W_o[m, k]` |
+/// | `out_w` | `k*H + m` | `W_o[m, k]` |
 /// | `out_b` | `m` | `b_o[m]` |
 /// | `gain2` | `m` | `g_2[m]` |
-/// | `ff1_w` | `r*H + m` | `W_1[r, m]` |
+/// | `ff1_w` | `m*d_ff + r` | `W_1[r, m]` |
 /// | `ff1_b` | `r` | `b_1[r]` |
-/// | `ff2_w` | `m*d_ff + r` | `W_2[m, r]` |
+/// | `ff2_w` | `r*H + m` | `W_2[m, r]` |
 /// | `ff2_b` | `m` | `b_2[m]` |
 ///
 /// TWO CONSTRUCTION-TIME HOISTS, both DECLARED as value-identical in the
@@ -1519,17 +1514,17 @@ pub struct FastTransformer {
     sqrt_d: f32,
     slopes: Vec<f32>,
 
-    adapter_w: Vec<f32>, // H*in
+    adapter_w: Vec<f32>, // in x H, k-major
     adapter_b: Vec<f32>, // H
     gain1: Vec<f32>,     // H
-    qkv_w: Vec<f32>,     // 3H*H
+    qkv_w: Vec<f32>,     // H x 3H, k-major
     qkv_b: Vec<f32>,     // 3H
-    out_w: Vec<f32>,     // H*H
+    out_w: Vec<f32>,     // H x H, k-major
     out_b: Vec<f32>,     // H
     gain2: Vec<f32>,     // H
-    ff1_w: Vec<f32>,     // d_ff*H
+    ff1_w: Vec<f32>,     // H x d_ff, k-major
     ff1_b: Vec<f32>,     // d_ff
-    ff2_w: Vec<f32>,     // H*d_ff
+    ff2_w: Vec<f32>,     // d_ff x H, k-major
     ff2_b: Vec<f32>,     // H
 }
 
@@ -1585,17 +1580,17 @@ impl FastTransformer {
             seg.iter().map(|&x| x as f32).collect()
         };
 
-        let adapter_w = take(h * input_size);
+        let adapter_w = k_major(&take(h * input_size), h, input_size);
         let adapter_b = take(h);
         let gain1 = take(h);
-        let qkv_w = take(TRANSFORMER_QKV_NB * h * h);
+        let qkv_w = k_major(&take(TRANSFORMER_QKV_NB * h * h), TRANSFORMER_QKV_NB * h, h);
         let qkv_b = take(TRANSFORMER_QKV_NB * h);
-        let out_w = take(h * h);
+        let out_w = k_major(&take(h * h), h, h);
         let out_b = take(h);
         let gain2 = take(h);
-        let ff1_w = take(f * h);
+        let ff1_w = k_major(&take(f * h), f, h);
         let ff1_b = take(f);
-        let ff2_w = take(h * f);
+        let ff2_w = k_major(&take(h * f), h, f);
         let ff2_b = take(h);
 
         // The two declared hoists (see the struct doc): both are the EXACT cell's own f64
@@ -1730,9 +1725,9 @@ impl FastTransformer {
 
         // 1. Width adapter: x' = W_a x + b_a.
         let k_in = x.len().min(self.input_size);
+        matvec_into(&mut sc.xa[..h], &self.adapter_w, &x[..k_in]);
         for m in 0..h {
-            let base = m * self.input_size;
-            sc.xa[m] = dot_f32(&self.adapter_w[base..base + k_in], &x[..k_in]) + self.adapter_b[m];
+            sc.xa[m] += self.adapter_b[m];
         }
 
         // 2. RMSNorm_1 with the learned gain (the Mamba op order, verbatim).
@@ -1746,9 +1741,13 @@ impl FastTransformer {
         }
 
         // 3. Combined [q | k | v] projection + bias.
+        matvec_into(
+            &mut sc.qkv[..TRANSFORMER_QKV_NB * h],
+            &self.qkv_w,
+            &sc.u[..h],
+        );
         for r in 0..TRANSFORMER_QKV_NB * h {
-            let base = r * h;
-            sc.qkv[r] = dot_f32(&self.qkv_w[base..base + h], &sc.u[..h]) + self.qkv_b[r];
+            sc.qkv[r] += self.qkv_b[r];
         }
 
         // 4. Push (k_t, v_t), evicting the OLDEST at capacity: `ring_pos` advances modulo
@@ -1797,12 +1796,11 @@ impl FastTransformer {
             for jj in 0..len {
                 sc.probs[jj] /= sum;
             }
-            // The weighted `v` fold. This one reduction is an EXPLICIT ascending loop
-            // rather than a [`dot_f32`] call -- not an exception to the no-faer rule but a
-            // consequence of it: for a fixed element `e` the operand walks ring SLOTS, and
-            // a circular window is not a contiguous slice in any layout. The accumulation
-            // order (ascending `jj`, i.e. oldest first) is the exact forward's, which is
-            // what the rule is actually about.
+            // The weighted `v` fold. Like the `q.k` scores above, this reduction is an
+            // EXPLICIT ascending loop rather than a `super::kernels` call: for a fixed
+            // element `e` the operand walks ring SLOTS, and a circular window is not a
+            // contiguous slice in any layout. The accumulation order (ascending `jj`, i.e.
+            // oldest first) is the exact forward's, which is what the rule is about.
             for e in 0..d {
                 let mut acc = 0.0_f32;
                 for jj in 0..len {
@@ -1813,10 +1811,9 @@ impl FastTransformer {
         }
 
         // 6. Residual 1: s = x' + W_o attn + b_o.
+        matvec_into(&mut sc.s[..h], &self.out_w, &sc.attn[..h]);
         for m in 0..h {
-            let base = m * h;
-            sc.s[m] =
-                sc.xa[m] + dot_f32(&self.out_w[base..base + h], &sc.attn[..h]) + self.out_b[m];
+            sc.s[m] = sc.xa[m] + sc.s[m] + self.out_b[m];
         }
 
         // 7. RMSNorm_2 (same op order as RMSNorm_1, on s).
@@ -1830,13 +1827,13 @@ impl FastTransformer {
         }
 
         // 8. FFN + residual 2: h = s + W_2 silu(W_1 v_norm + b_1) + b_2.
+        matvec_into(&mut sc.act[..f], &self.ff1_w, &sc.vn[..h]);
         for r in 0..f {
-            let base = r * h;
-            sc.act[r] = silu_f32(dot_f32(&self.ff1_w[base..base + h], &sc.vn[..h]) + self.ff1_b[r]);
+            sc.act[r] = silu_f32(sc.act[r] + self.ff1_b[r]);
         }
+        matvec_into(&mut out[..h], &self.ff2_w, &sc.act[..f]);
         for m in 0..h {
-            let base = m * f;
-            out[m] = sc.s[m] + dot_f32(&self.ff2_w[base..base + f], &sc.act[..f]) + self.ff2_b[m];
+            out[m] = sc.s[m] + out[m] + self.ff2_b[m];
         }
     }
 
