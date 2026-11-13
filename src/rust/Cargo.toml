@@ -15,7 +15,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.9"
@@ -28,7 +27,6 @@ realfft = "3"
 # (batched input projection) with no system BLAS.
 faer = { version = "0.24", default-features = false, features = ["std"] }
 symphonia = { version = "0.5", features = ["wav", "flac", "ogg", "vorbis"] }
-quick-xml = { version = "0.37", features = ["serialize"] }
 # Phase 7 Task 1: `bench.rs::maxrss_mb` (`getrusage(RUSAGE_SELF)`) -- a real
 # [dependencies] entry, not dev-only, since `speech bench` ships in the actual
 # CLI binary.

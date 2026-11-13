@@ -448,9 +448,9 @@ paths are actually invoked elsewhere in this repo -- Image mode, backprop off), 
 the exact path has no backward-shaped allocations at all.
 
 The table below is RENDERED from the ledger (ADR-0009): every row is the latest three-process
-measurement per (leg, path, host), taken 2026-11-12 on `d83b111` (the same Apple M4 Pro, rustc
-1.99.1) through `python -m speech.ledger bench --leg <name>`, after the exact kernels of issue
-#144. The README and ARCHITECTURE prose quote its ratios and the 60 s leg's peak RSS (the
+measurement per (leg, path, host), taken 2026-11-12 on `ed74b9d` (the same Apple M4 Pro, rustc
+1.99.1, on battery) through `python -m speech.ledger bench --leg <name>`, after the exact FFT's
+seed table of issue #145. The README and ARCHITECTURE prose quote its ratios and the 60 s leg's peak RSS (the
 `maxrss_mib` column), and `speech.ledger.prose` asserts them. Peak RSS is a cost figure like
 the walls, not a metric under the ADR-0003 STOP rule.
 
@@ -458,25 +458,44 @@ Two earlier measurements are history. The "Reading --" paragraph after the befor
 refers to the ORIGINAL 2026-07 one (SAD 4.58-4.60x, LID 3.53-3.57x, macOS 26.5.2). The 2026-10-02 re-measure
 (`cae165a`, rustc 1.99.0) moved both paths' absolute walls (exact ~10-20% slower, fast ~10%
 slower) and the ratios to SAD 4.93x / LID 3.43-3.63x, with a 60 s peak RSS of 43.5 / 57.2 MiB
-(41.95 / 56.52 in the Phase 10 Task 5 table below); its records stay in the ledger and the
-paragraph after the table compares them with the current ones.
+(41.95 / 56.52 in the Phase 10 Task 5 table below); its records stay in the ledger. A third,
+the 2026-11-12 re-measure on `d83b111` after the exact kernels of issue #144, read SAD
+3.70-3.71x / LID 1.86-2.18x with a 60 s peak RSS of 42.6 / 56.1 MiB. The two tables after the
+rendered one compare each with its successor.
 
 <!-- ledger:table phase7_bench_matrix -->
 | leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mib | MiB/audio-s | speedup (wall, fast vs exact) |
 |---|---|---|---|---|---|---|---|
-| SAD 60 s fixture (stereo) | 120.00 | exact | 0.2187 [0.2150-0.2234] (n=3) | 0.001823 | 56.094 | 0.4674 | baseline |
-| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0590 [0.0577-0.0609] (n=3) | 0.000492 | 42.583 | 0.3549 | 3.71x |
-| SAD corpus-gated (mono) | 75.00 | exact | 0.1394 [0.1366-0.1414] (n=3) | 0.001859 | 53.661 | 0.7155 | baseline |
-| SAD corpus-gated (mono) | 75.00 | fast | 0.0377 [0.0375-0.0379] (n=3) | 0.000502 | 37.198 | 0.4960 | 3.70x |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0260 [0.0255-0.0265] (n=3) | 0.000611 | 29.656 | 0.6971 | baseline |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0140 [0.0136-0.0142] (n=3) | 0.000329 | 17.078 | 0.4015 | 1.86x |
-| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0221 [0.0217-0.0225] (n=3) | 0.000678 | 19.552 | 0.5988 | baseline |
-| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0102 [0.0101-0.0102] (n=3) | 0.000311 | 11.880 | 0.3639 | 2.18x |
+| SAD 60 s fixture (stereo) | 120.00 | exact | 0.1541 [0.1481-0.1649] (n=3) | 0.001284 | 55.302 | 0.4609 | baseline |
+| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0558 [0.0554-0.0561] (n=3) | 0.000465 | 41.932 | 0.3494 | 2.76x |
+| SAD corpus-gated (mono) | 75.00 | exact | 0.0974 [0.0931-0.1058] (n=3) | 0.001299 | 52.615 | 0.7015 | baseline |
+| SAD corpus-gated (mono) | 75.00 | fast | 0.0351 [0.0351-0.0353] (n=3) | 0.000469 | 37.161 | 0.4955 | 2.77x |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0245 [0.0243-0.0246] (n=3) | 0.000575 | 29.688 | 0.6979 | baseline |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0128 [0.0126-0.0129] (n=3) | 0.000300 | 17.062 | 0.4011 | 1.92x |
+| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0213 [0.0212-0.0214] (n=3) | 0.000651 | 19.693 | 0.6031 | baseline |
+| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0097 [0.0097-0.0098] (n=3) | 0.000298 | 11.917 | 0.3650 | 2.19x |
 
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->
 
-Against the 2026-10-02 records (mean wall of three processes, seconds):
+Against the `d83b111` records of the same day, before the seed table of issue #145 (mean wall
+of three processes, seconds):
+
+| leg | exact, before -> after | fast, before -> after | speedup, before -> after |
+|---|---|---|---|
+| SAD 60 s fixture (stereo) | 0.2187 -> 0.1541 (-29.5%) | 0.0590 -> 0.0558 (-5.4%) | 3.71x -> 2.76x |
+| SAD corpus-gated (mono) | 0.1394 -> 0.0974 (-30.1%) | 0.0377 -> 0.0351 (-6.9%) | 3.70x -> 2.77x |
+| LID phSeq corpus-gated (Twin M7) | 0.0260 -> 0.0245 (-5.8%) | 0.0140 -> 0.0128 (-8.6%) | 1.86x -> 1.92x |
+| LID cep corpus-gated (Twin M7) | 0.0221 -> 0.0213 (-3.6%) | 0.0102 -> 0.0097 (-4.9%) | 2.18x -> 2.19x |
+
+The SAD ratios fell because the exact SAD walls did: the exact periodogram is the code issue
+#145 changed, and the fast tree runs `realfft`. Six of the eight walls are a control. Mode 7
+builds no periodogram and the fast tree did not change, yet those walls read 3.6% to 8.6% lower
+than six hours earlier on the same machine. This pair does not attribute that move, so the
+share of the exact SAD drop that is the seed table's is about 23 to 25 points of the 30, not
+all of it.
+
+The `d83b111` records against the 2026-10-02 ones (mean wall of three processes, seconds):
 
 | leg | exact, before -> after | fast, before -> after | speedup, before -> after |
 |---|---|---|---|
@@ -539,8 +558,8 @@ operand: the same catcher and verdict, so the `0.001x` budget edit has no patch 
 **Local-only regression bounds (NOT CI-asserted, this-box numbers, Apple M4 Pro named per spec
 R5).** SUPERSEDED for the memory half -- see Phase 10's f32-mel section (the widen is deleted; the
 SAD memory bound is now <= 0.85x of exact, measured 0.743x). SUPERSEDED for both wall halves --
-see the 2026-11-12 re-derivation under this list (the wall bounds are now SAD >= 2.8x and LID
->= 1.3x). Future local runs of this exact recipe are expected to land within:
+see the two 2026-11-12 re-derivations under this list (the wall bounds are now SAD >= 2.1x and
+LID >= 1.3x). Future local runs of this exact recipe are expected to land within:
 - SAD arms (algo 3, spectral): wall speedup >= 3.5x, memory <= 1.4x of exact (the periodogram-
   widening tax above is real and expected, not a regression signal up to this ratio). HEADROOM
   NOTE: the 1.4x ceiling sits only ~9-10% above the measured 1.22-1.28x maxrss ratios, and the
@@ -575,6 +594,19 @@ The memory bounds are unchanged and hold: SAD fast at 0.759x and 0.693x of exact
 LID at 0.576x and 0.608x against 0.8x. The CI pin (`fast <= exact * 1.5` on the 60 s fixture)
 carries 5.6x headroom over the measured 3.71x.
 
+**FINDING and re-derivation (2026-11-12, the four legs re-run on `ed74b9d` after the seed table
+of issue #145).** Both SAD arms read below the 2.8x wall bound set above: 2.76x (60 s fixture)
+and 2.77x (corpus). The fast SAD walls are lower than in the `d83b111` records, so no fast-path
+slowdown is behind the reading: the exact SAD walls fell 29.5% and 30.1%, and the bound is on a
+ratio.
+
+- **SAD arms: wall speedup >= 2.1x.** The same 0.76 fraction of 2.76x is 2.11x, rounded down.
+  It supersedes the 2.8x above.
+- **LID Mode-7 arms: >= 1.3x, unchanged.** They read 1.92x and 2.19x.
+
+The memory bounds hold: SAD fast at 0.758x and 0.706x of exact against 0.85x, LID at 0.575x and
+0.605x against 0.8x. The CI pin carries 4.1x headroom over the measured 2.76x.
+
 ### The exact gradient fold (issue #154)
 
 One exact gradient fold of the SAD v1 arm as a training step runs it: the launcher's `prepare`
@@ -593,9 +625,9 @@ between its row and the first is that cache, and its wall shows the switch costs
 <!-- ledger:table fold_grad_bench -->
 | leg | files | audio_s | wall_s (mean [range], n) | rtf | maxrss_mib |
 |---|---|---|---|---|---|
-| SAD v1 gradient fold (128 files, 1 lane) | 128 | 13920.01 | 39.30 [39.16-39.41] (n=3) | 0.002823 | 79.115 |
-| SAD v1 gradient fold (128 files, 4 lanes) | 128 | 13920.01 | 10.98 [10.85-11.09] (n=3) | 0.000788 | 288.854 |
-| SAD v1 gradient fold (128 files, 1 lane, allocator cache on) | 128 | 13920.01 | 77.69 [77.41-78.18] (n=3) | 0.005581 | 2274.938 |
+| SAD v1 gradient fold (128 files, 1 lane) | 128 | 13920.01 | 31.51 [31.49-31.54] (n=3) | 0.002264 | 78.786 |
+| SAD v1 gradient fold (128 files, 4 lanes) | 128 | 13920.01 | 9.12 [9.05-9.27] (n=3) | 0.000655 | 289.339 |
+| SAD v1 gradient fold (128 files, 1 lane, allocator cache on) | 128 | 13920.01 | 30.81 [30.69-30.91] (n=3) | 0.002213 | 2785.448 |
 
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->
@@ -607,6 +639,11 @@ buffered one; the records stay in the ledger): 80.37 s and 149.8 MiB at one lane
 Before the exact kernels of issue #144 (2026-11-12, three processes per leg on `0526023`; the
 records stay in the ledger): 78.47 s at one lane and 21.79 s at four, at the same peak RSS. The
 section "Issue #144" below reads the pair.
+
+Before the exact FFT's seed table of issue #145 (2026-11-12, three processes per leg on
+`0290185`; the records stay in the ledger): 39.30 s at one lane and 10.98 s at four, at the same
+peak RSS. The allocator-cache leg had last run before issue #144 (77.69 s, 2274.9 MiB) and was
+re-run with the other two. The section "Issue #145" below reads the pair.
 
 ### Criterion micro-benches
 
@@ -635,6 +672,11 @@ Pro, `bench` profile):
 > PHASE-7 RECORD.** The exact product kernel moved to `nn/kernels.rs` on an order-preserving
 > nest: the same bits at 13.52 us, 2.74x the `faer` twin's time. The live numbers are in
 > **Issue #144** below.
+
+> **SUPERSEDED (issue #145) -- the `gfft_1024` row and the 23.4x and 11.7x readings under it
+> are a PHASE-7 RECORD.** The exact GFFT computes its twiddle seeds once per transform size:
+> the same bits at 9.171 us per call, 11.5x the `realfft` twin's time per call and 5.8x per
+> frame. The live numbers are in **Issue #145** below.
 
 | target | path | scope | time |
 |---|---|---|---|
@@ -4539,3 +4581,116 @@ one test its review fix added). `uv run pytest tests/pyo3 -q`: 296 passed in 13:
 its usual wall. `run.py --check`: 205 mutations, 0 problems. The close run
 `--changed-since origin/main`: 37 patches, 182 verdicts, 0 differ from expected (`issue144`'s 17
 among them, and the re-targeted `issue146/1`).
+
+## Issue #145 -- the exact GFFT's twiddle seeds computed once per transform size: the bench and the mutation battery
+
+**Live:** `tests/mutations/issue145/` (2 patches, 6 verdicts).
+
+Branch `feature/gfft-seed-table`, off `main@e662681`. The exact FFT called `sin_series(n, 1)` and
+`sin_series(n, 2)` at every node of its recursion, although a seed depends on the node's size
+alone: 510 calls, 33 divisions each, for 16 distinct values in a 1024-point transform. `Gfft::new`
+now makes each call once per level and `danielson_lanczos` reads the pair of its own level. The
+negation, the `wpr` product and the running-twiddle butterfly are where they were, so no number
+moves. ADR-0002 records it under the golden-re-verified hoist.
+
+### The criterion targets
+
+`cargo bench --bench kernels` (`src/rust/benches/kernels.rs`), 100 samples per target, Apple M4
+Pro on battery, `bench` profile, rustc 1.99.1. One session, the two builds run back to back
+(before, after, before again):
+
+| target | scope | before (`1359dfa`) | after (`7c0b881`) | change |
+|---|---|---|---|---|
+| `gfft_1024` | 1024-point complex FFT, two real frames per call | 19.160 us (19.829 us on the first pass) | 9.171 us | -52.1% |
+| `realfft_1024` | the fast twin, one real frame per call | 0.793 us | 0.795 us | unchanged |
+
+- **The gate.** The grilling set `gfft_1024` at or below 0.6x of its same-session "before"
+  reading, a miss being a stop. It reads 0.48x (0.46x against the first pass).
+- **The fast twin.** `realfft_1024` is 11.5x faster per call and 5.8x per frame, where Phase 7
+  measured 23.4x and 11.7x. The fast tree did not change.
+- **The harness the grilling ran.** A standalone copy of `fft.rs` read the same ratio at every
+  order the committed configs use: 2.3x at `p = 8`, 2.2x at `p = 9`, 2.0x at `p = 10`, with the
+  table build at 0.47 us for `p = 10`.
+
+### What was measured and dropped
+
+The issue also proposed a caller-owned scratch buffer for `compute_two_real_periodogram` and row
+slices in place of the two `to_vec` copies per transform in
+`compute_segment_periodogram_estimates`. The same harness timed a whole periodogram call at
+`p = 10`: 10.4 us with the table and today's allocations, 10.6 us with a reused buffer and no
+copies. The difference is inside the noise, and the loop's stale-buffer and fresh-zeroed-tail
+semantics are load-bearing, so the buffers are as they were.
+
+### The proof that no number moved
+
+- The committed goldens are byte-green with no test edited.
+- **Differential leg.** `features::fft::tests::fft_matches_the_per_node_seed_recursion`:
+  `Gfft::fft` against the per-node recursion (private to that test module) by `to_bits` on every
+  element of a full transform, for every `p` in `1..=19`.
+- **Why the leg is needed.** The FFT goldens stop at `N = 256` and every Phase 1 golden (FFT,
+  periodogram, `inputseq_*`) runs order 8 or below. The 512 and 1024 levels are reached by the
+  order-9 and order-10 goldens above Phase 1, and nothing committed reaches a level above 1024.
+
+### What the battery measured
+
+| # | mutation | named catchers | verdict (first failure line) |
+|---|---|---|---|
+| 1 | `danielson_lanczos` reads the seed pair of the level below its own, at every level | the differential leg, `phase1_fft_golden::gfft_matches_oracle_bitexact`, `phase4a_train_golden::tier2_train_epoch_weights_golden` | CAUGHT x3: `p=3 idx=2` / `N=8 idx=2` / `epoch 0 weight 3` |
+| 2 | the same, only above `n = 256` | the differential leg, the training golden (CAUGHT); the FFT golden (MISSED) | CAUGHT x2: `p=9 idx=2` / `epoch 0 weight 0`; MISSED x1 as declared |
+
+Row 2's `MISSED` is the declared record that the FFT goldens stop at 256. Neither patch declares
+`requires: oracle-libm`: a wrong seed moves a value far past the off-oracle hybrid bound.
+
+### The bench legs
+
+Three fresh processes per leg and path on `ed74b9d`, Apple M4 Pro on battery. Every row is a
+ledger record; "before" is each leg's previous record, taken earlier the same day (`d83b111`
+for the Phase 7 legs, `0290185` for the fold legs).
+
+| leg | exact wall, before -> after | fast wall, before -> after |
+|---|---|---|
+| SAD 60 s fixture (stereo) | 0.2187 s -> 0.1541 s (-29.5%) | 0.0590 s -> 0.0558 s (-5.4%) |
+| SAD corpus-gated (mono) | 0.1394 s -> 0.0974 s (-30.1%) | 0.0377 s -> 0.0351 s (-6.9%) |
+| LID phSeq (Twin M7) | 0.0260 s -> 0.0245 s (-5.8%) | 0.0140 s -> 0.0128 s (-8.6%) |
+| LID cep (Twin M7) | 0.0221 s -> 0.0213 s (-3.6%) | 0.0102 s -> 0.0097 s (-4.9%) |
+| SAD v1 gradient fold, one lane | 39.30 s -> 31.51 s [31.49-31.54] (-19.8%) | exact-only |
+| SAD v1 gradient fold, four lanes | 10.98 s -> 9.12 s [9.05-9.27] (-16.9%) | exact-only |
+
+- **The control.** The LID legs and both fast columns run none of the changed code and read
+  3.6% to 8.6% lower than their previous records. The SAD and fold rows are not corrected for
+  that move; read about 5 points of each as the session, not the change.
+- **The forward-only SAD wall** fell by 30% where the grilling estimated 17% from the criterion
+  call times the frame count. After the exact kernels of issue #144 the FFT was a larger share
+  of that wall than the estimate, made on the older split, assumed.
+- **The gradient fold**, the share the issue left unmeasured: one lane costs 2.26 ms per audio
+  second where it cost 2.82. Peak RSS is unchanged (78.8 MiB at one lane, 289.3 MiB at four).
+- **The SAD speedup** reads 2.76x and 2.77x, under the 2.8x local wall bound. "Exact vs fast:
+  the measured matrix + pinned budgets" in the Phase 7 section re-derives it at 2.1x by the
+  rule of the same day; the LID bound holds.
+- The allocator-cache fold leg was re-run with the other two (30.81 s, 2785.4 MiB): its row
+  dated from before issue #144 and no longer compared with the row above it.
+
+### Deviations from the grilling outcome
+
+- No lockfile commit: `cargo update --aggressive` and the `ndarray` re-pin left `Cargo.lock`
+  byte-identical.
+- The bench records carry no supersession stamp: `--supersede` exists for baseline records, and
+  a bench table renders each leg's latest records. The earlier records stay.
+- The outcome left `fold_grad_sad_n1_cached` out; it was re-run (above).
+- ADR-0002's entry is a paragraph, not one sentence, like every other entry of that ADR.
+- A prose number the outcome did not name moved: the README and ARCHITECTURE quote the
+  `realfft`-to-GFFT ratio, now 11.5x per call.
+- From the review: the table is read by `n.ilog2()` and typed once as `SeedTable`; the `Gfft`
+  doc states the fact without the history; the README row and the ADR name the goldens that
+  own the 512 and 1024 levels as the order-9 and order-10 ones above Phase 1.
+
+### The final tree, green
+
+`cargo test --release --no-fail-fast --features test-support` on the final code: 1422 passed, 4
+ignored, 0 failed (the #144 close's 1421 plus the differential leg). `uv run pytest tests -q -m
+"not slow"`: 1211 passed, 1 skipped, as on `main`. `uv run pytest tests/pyo3 -q`: 296 passed in
+11:42. `run.py --check`: 207 mutations, 0 problems. The close run `--changed-since origin/main`:
+2 patches, 6 verdicts, 0 differ from expected (`issue145`, re-targeted by the review fix).
+Re-run on `ccd0782`, the rustc 1.100.0 `needless_range_loop` rewrites in
+`engine/channel_result.rs`, `cost.rs`, `fast/pipeline.rs` and three integration tests: the
+cargo suite 1422 passed, 4 ignored, 0 failed; `run.py --check` 207 mutations, 0 problems.

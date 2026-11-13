@@ -134,10 +134,10 @@ fn scored_mode_result_columns() {
         let report = compute_errors(&mut hyp[chan], Some(&refc), -1);
         let speech = report.per_class[speech::tasks::segmentation::SegClass::Speech as usize];
         let mut global = 0.0;
-        for j in (speech::tasks::segmentation::SegClass::Other as usize)
-            ..(speech::tasks::segmentation::SegClass::Excluded as usize)
+        for class in &report.per_class[(speech::tasks::segmentation::SegClass::Other as usize)
+            ..(speech::tasks::segmentation::SegClass::Excluded as usize)]
         {
-            global += report.per_class[j].error_rate;
+            global += class.error_rate;
         }
         assert_eq!(row[0], 100.0 * speech.pfa, "col0 Pfa chan {chan}");
         assert_eq!(row[1], 100.0 * speech.pmiss, "col1 Pmiss chan {chan}");
@@ -231,10 +231,10 @@ fn stereo_csv_reference_loads_per_channel() {
         let report = compute_errors(&mut h, Some(&refc), nb);
         let speech = report.per_class[speech::tasks::segmentation::SegClass::Speech as usize];
         let mut global = 0.0;
-        for j in (speech::tasks::segmentation::SegClass::Other as usize)
-            ..(speech::tasks::segmentation::SegClass::Excluded as usize)
+        for class in &report.per_class[(speech::tasks::segmentation::SegClass::Other as usize)
+            ..(speech::tasks::segmentation::SegClass::Excluded as usize)]
         {
-            global += report.per_class[j].error_rate;
+            global += class.error_rate;
         }
         assert_eq!(row[0], 100.0 * speech.pfa, "col0 Pfa chan {chan}");
         assert_eq!(row[1], 100.0 * speech.pmiss, "col1 Pmiss chan {chan}");
