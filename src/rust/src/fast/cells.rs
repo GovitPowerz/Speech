@@ -215,32 +215,50 @@ fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
 /// Construction is CHEAP (four small allocations, no weight touch) and reset is
 /// EXPLICIT: a session takes a fresh [`FastSlstm::state`]. There is no implicit
 /// reset anywhere -- carrying a stale state across sequences is a caller bug the
-/// `split_state_*` legs exist to make visible.
-#[derive(Clone, Debug, PartialEq)]
+/// `split_state_*` legs exist to make visible. `PartialEq` compares the four carried
+/// vectors only; the scratch is sized by [`FastSlstm::state`].
+#[derive(Clone, Debug)]
 pub struct SlstmState {
     pub h: Vec<f32>,
     pub c: Vec<f32>,
     pub n: Vec<f32>,
     pub m: Vec<f32>,
+    scratch: SlstmScratch,
 }
 
-/// f32 forward-only sLSTM cell. Weights are stored as three flat SoA buffers whose
-/// per-unit rows are CONTIGUOUS, which is what lets every gate projection be one
-/// ascending [`dot_f32`] -- the same accumulation order the exact `matmul_seq` uses:
+impl PartialEq for SlstmState {
+    fn eq(&self, other: &SlstmState) -> bool {
+        self.h == other.h && self.c == other.c && self.n == other.n && self.m == other.m
+    }
+}
+
+/// [`FastSlstm::step`]'s working buffer, preallocated once per state: carries NOTHING
+/// across steps (it is fully overwritten before it is read), hence private and absent
+/// from state equality.
+#[derive(Clone, Debug, Default)]
+struct SlstmScratch {
+    /// `4O`: this step's gate pre-activations, in the `[i|f|o|z]` block order.
+    pre: Vec<f32>,
+}
+
+/// f32 forward-only sLSTM cell. Weights are stored as three flat SoA buffers, the two
+/// matrices K-MAJOR (one row of the `4O` gate outputs per input index, issue #147) so
+/// every gate projection runs through [`super::kernels`], each output summed in the
+/// ascending order the exact `matmul_seq` uses:
 ///
-/// - `rec[(a*O + j)*O + k] == R_a[j, k]`
-/// - `inp[(a*O + j)*I + k] == W_a[j, k]`
+/// - `rec[k*4O + (a*O + j)] == R_a[j, k]`
+/// - `inp[k*4O + (a*O + j)] == W_a[j, k]`
 /// - `bias[a*O + j] == b_a[j]`
 ///
-/// Those are literally the spec S2.2 flat pack re-sliced (per gate: the whole `R_a`
-/// block, then the whole `W_a` block, then `b_a`, each row-major), so `from_flat` is
-/// three contiguous narrowing copies per gate and NOT a re-derivation of the layout.
+/// The spec S2.2 flat pack carries, per gate, the whole `R_a` block, then the whole
+/// `W_a` block, then `b_a`, each row-major: `from_flat` narrows those per gate and
+/// transposes the two matrices once.
 #[derive(Clone)]
 pub struct FastSlstm {
     input_size: usize,
     output_size: usize,
-    rec: Vec<f32>,  // 4*O*O
-    inp: Vec<f32>,  // 4*O*I
+    rec: Vec<f32>,  // O x 4O, k-major
+    inp: Vec<f32>,  // I x 4O, k-major
     bias: Vec<f32>, // 4*O
 }
 
@@ -280,8 +298,8 @@ impl FastSlstm {
         FastSlstm {
             input_size: i,
             output_size: o,
-            rec,
-            inp,
+            rec: k_major(&rec, 4 * o, o),
+            inp: k_major(&inp, 4 * o, i),
             bias,
         }
     }
@@ -302,6 +320,9 @@ impl FastSlstm {
             c: vec![0.0; o],
             n: vec![0.0; o],
             m: vec![M_INIT_F32; o],
+            scratch: SlstmScratch {
+                pre: vec![0.0; 4 * o],
+            },
         }
     }
 
@@ -323,39 +344,46 @@ impl FastSlstm {
     #[allow(clippy::needless_range_loop)]
     pub fn step(&self, x: &[f32], s: &mut SlstmState, out: &mut [f32]) {
         let (o, i) = (self.output_size, self.input_size);
+        let four_o = 4 * o;
+        let SlstmState {
+            h,
+            c,
+            n,
+            m,
+            scratch,
+        } = s;
+        let pre = &mut scratch.pre;
         let k_in = x.len().min(i);
         let xs = &x[..k_in];
-        for j in 0..o {
-            // The four gate pre-activations for unit j, in the block order [i|f|o|z].
-            let mut pre = [0.0_f32; 4];
-            for (a, p) in pre.iter_mut().enumerate() {
-                let base_in = (a * o + j) * i;
-                let mut acc = dot_f32(&self.inp[base_in..base_in + k_in], xs);
-                acc += self.bias[a * o + j];
-                let base_rec = (a * o + j) * o;
-                acc += dot_f32(&self.rec[base_rec..base_rec + o], &s.h[..o]);
-                *p = acc;
-            }
 
-            let i_pre = pre[0];
-            let fm = pre[1] + s.m[j];
+        // The 4O gate pre-activations, in the block order [i|f|o|z]: input projection,
+        // + bias, + the recurrent chain (summed from +0.0 on its own, added once).
+        matvec_into(&mut pre[..four_o], &self.inp, xs);
+        for jj in 0..four_o {
+            pre[jj] += self.bias[jj];
+        }
+        matvec_add_into(&mut pre[..four_o], &self.rec, &h[..o]);
+
+        for j in 0..o {
+            let i_pre = pre[j];
+            let fm = pre[o + j] + m[j];
             let m_t = if fm > i_pre { fm } else { i_pre };
             let ip = (i_pre - m_t).exp();
             let fp = (fm - m_t).exp();
-            let z = pre[3].tanh();
-            let og = logistic_f32(pre[2]);
+            let z = pre[3 * o + j].tanh();
+            let og = logistic_f32(pre[2 * o + j]);
 
-            let c_t = fp * s.c[j] + ip * z;
-            let n_t = fp * s.n[j] + ip;
+            let c_t = fp * c[j] + ip * z;
+            let n_t = fp * n[j] + ip;
 
-            s.m[j] = m_t;
-            s.c[j] = c_t;
-            s.n[j] = n_t;
+            m[j] = m_t;
+            c[j] = c_t;
+            n[j] = n_t;
             out[j] = og * (c_t / n_t);
         }
         // h is rolled AFTER every unit is done: the recurrence above must read the
         // PREVIOUS step's whole output, never a half-updated one.
-        s.h[..o].copy_from_slice(&out[..o]);
+        h[..o].copy_from_slice(&out[..o]);
     }
 
     /// Whole-sequence forward: a fresh [`Self::state`] then [`Self::step`] per row.
