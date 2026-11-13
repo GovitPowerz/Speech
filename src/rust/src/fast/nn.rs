@@ -32,10 +32,7 @@
 //!    uses faer (the brief's mandate), but a per-frame faer matvec pays its view setup
 //!    and dispatch at every step. It runs `super::kernels::matvec_add_into` over the
 //!    k-major feedback block (issue #147): per gate column the ascending `O`-term
-//!    chain from `+0.0`, added to the projection once, `4O` columns side by side. The
-//!    per-column dot it replaced computed the same chains one after another; it was
-//!    described here as autovectorized, which an add chain the compiler may not
-//!    reorder is not.
+//!    chain from `+0.0`, added to the projection once, `4O` columns side by side.
 //! 3. The exp saturation/overflow guards use the f32 bound `ln(f32::MAX) ~ 88.72`
 //!    (gates/logistic) and an `80.0` softmax guard, not the exact path's f64 `700.0`
 //!    -- the correct f32 analogues (the guards only fire in saturation, unreachable on

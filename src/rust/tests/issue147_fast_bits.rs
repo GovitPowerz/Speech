@@ -5,13 +5,11 @@
 //! its layer-0 `step`), measured on the commit BEFORE the per-output dot was replaced
 //! by the k-outer block kernel, so the kernel change lands against them unmodified.
 //!
-//! What they own: the STEP BODIES. The kernel's own differential leg (in
+//! What they own: the causal STEP BODIES. The kernel's own differential leg (in
 //! `fast/kernels.rs`) compares one product with the per-output reference and cannot
 //! see how a step combines its products (`(in + bias) + rec` against
 //! `in + (bias + rec)` is a one-ULP difference), and the parity legs pin the fast tree
-//! against the exact one at a resolution far above a ULP. Each case therefore records
-//! the hidden rows as well as the posteriors: a posterior can round a one-ULP hidden
-//! difference away.
+//! against the exact one at a resolution far above a ULP.
 //!
 //! Inputs and packs are synthetic. Each causal cell runs twice: on its committed
 //! phase9 forward config with its seed pack (recurrent `23,4`), and on a wider
@@ -19,16 +17,23 @@
 //! the kernel's widest block. Both feed a full-width input and one narrower than the
 //! net's input size (the width-tolerance crop, which sums fewer terms).
 //!
-//! The comparator is the standing oracle one: bit-exact on the oracle libm host, the
-//! canary-gated hybrid bound elsewhere (every value read here passed through the
-//! cells' transcendentals). Off the oracle host a one-ULP step-order change is
-//! therefore owned by nothing.
+//! Two kinds of rows, compared differently ([`Rows`]):
+//!
+//! - a cell's own `step` outputs read the block kernel and libm, nothing else. They
+//!   are bit-exact on the oracle libm host and under the canary-gated hybrid bound
+//!   elsewhere, so off the oracle host a one-ULP step-order change is owned by nothing;
+//! - every posterior, and every `FastBlstm` row, passed through a faer product, whose
+//!   bits are the host's SIMD lowering as well. Those compare under the hybrid bound on
+//!   EVERY host: a bit-exact pin there would pin faer's lowering, the cost a
+//!   same-precision self-golden was declined for in Phase 10 (`docs/validation.md`).
+//!   They guard the layout and the wiring; the `FastBlstm` recurrence's order is the
+//!   kernel leg's alone.
 
 mod common;
 
 use std::path::PathBuf;
 
-use common::assert_oracle_eq_f32;
+use common::{assert_hybrid_eq_f32, assert_oracle_eq_f32};
 use indexmap::IndexMap;
 
 use speech::fast::cells::{CellGeometry, FastCausalNet};
@@ -41,6 +46,22 @@ const FRAMES: usize = 327;
 
 /// Steps of the direct layer-0 `step` drive.
 const STEPS: usize = 40;
+
+/// One run of fixture values, by what its bits depend on (the module doc).
+enum Rows {
+    /// A cell's own `step` outputs: the block kernel and libm.
+    Step(Vec<f32>),
+    /// Values downstream of a faer product.
+    Faer(Vec<f32>),
+}
+
+impl Rows {
+    fn values(&self) -> &[f32] {
+        match self {
+            Rows::Step(v) | Rows::Faer(v) => v,
+        }
+    }
+}
 
 fn repo() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -79,25 +100,28 @@ fn synthetic_pack(n: usize) -> Vec<f64> {
 }
 
 /// `FastBlstm` on the `prefix` net of a committed config, synthetic pack: the
-/// posteriors, then the `[fwd | bwd]` hidden rows.
-fn blstm_case(config: &str, prefix: &str) -> Vec<f32> {
+/// posteriors, then the `[fwd | bwd]` hidden rows. Its input projection is a faer
+/// product, so the hidden rows are [`Rows::Faer`] too.
+fn blstm_case(config: &str, prefix: &str) -> Vec<Rows> {
     let map = load(config);
     let spec = build_aligned_spec(&map, prefix).expect("spec");
     let flat = synthetic_pack(speech::config::element_count(&spec));
     let mut net = FastBlstm::from_flat(&spec, &flat).expect("net");
     let hidden_rows = FRAMES / spec.lstm_subsampling.iter().product::<usize>();
-    let mut out = net
+    let posteriors = net
         .feed_forward(&window(spec.lstm_neuron_nb[0], 0))
         .data
         .clone();
-    assert!(!out.is_empty(), "{config}: empty output");
-    out.extend_from_slice(net.debug_hidden(hidden_rows));
-    out
+    assert!(!posteriors.is_empty(), "{config}: empty output");
+    vec![
+        Rows::Faer(posteriors),
+        Rows::Faer(net.debug_hidden(hidden_rows).to_vec()),
+    ]
 }
 
 /// The geometry override of a causal cell's wide case: two recurrent layers whose
-/// projections leave every block width of the kernel a remainder. The transformer's
-/// width must divide by its two heads.
+/// projections are not a multiple of the kernel's widest block (`4O` is 28 then 20 for
+/// the two LSTMs). The transformer's width must divide by its two heads.
 fn widen(map: &mut IndexMap<String, String>, cell: &str) {
     let lstm = if cell == "transformer" {
         "23,6,10"
@@ -114,7 +138,7 @@ fn widen(map: &mut IndexMap<String, String>, cell: &str) {
 /// One causal cell: the net's posteriors on a full-width window and on one three
 /// columns narrower, then the layer-0 cell's `step` outputs over [`STEPS`] rows at its
 /// input width and over [`STEPS`] rows three columns narrower.
-fn causal_case(cell: &str, wide: bool) -> Vec<f32> {
+fn causal_case(cell: &str, wide: bool) -> Vec<Rows> {
     let base = format!("tests/reference_data/phase9/{cell}_forward");
     let mut map = load(&format!("{base}.config"));
     if wide {
@@ -137,7 +161,7 @@ fn causal_case(cell: &str, wide: bool) -> Vec<f32> {
     for (cols, salt) in [(in_cols, 0), (in_cols - 3, 1)] {
         let post = net.feed_forward(&window(cols, salt));
         assert!(post.rows > 0, "{cell}: empty output");
-        out.extend_from_slice(&post.data);
+        out.push(Rows::Faer(post.data.clone()));
     }
 
     let cell0 = &net.cells()[0];
@@ -153,15 +177,15 @@ fn causal_case(cell: &str, wide: bool) -> Vec<f32> {
                 &mut h[t * o..(t + 1) * o],
             );
         }
-        out.extend_from_slice(&h);
+        out.push(Rows::Step(h));
     }
     out
 }
 
 const CELLS: [&str; 5] = ["lstm", "slstm", "mamba", "cfc", "transformer"];
 
-/// Every case, by fixture name.
-fn cases() -> Vec<(String, Vec<f32>)> {
+/// Every case, by fixture name. A fixture file is its case's runs, concatenated.
+fn cases() -> Vec<(String, Vec<Rows>)> {
     let mut all = vec![
         (
             "blstm_v1".to_string(),
@@ -196,28 +220,36 @@ fn read_f32(name: &str) -> Vec<f32> {
 
 #[test]
 fn fast_net_outputs_keep_their_bits() {
-    for (name, got) in cases() {
-        assert!(
-            got.iter().all(|v| v.is_finite()),
-            "{name}: non-finite output"
-        );
+    for (name, runs) in cases() {
         let want = read_f32(&name);
-        assert_eq!(got.len(), want.len(), "{name}: length");
-        for (idx, (&g, &w)) in got.iter().zip(&want).enumerate() {
-            assert_oracle_eq_f32(g, w, &format!("{name}[{idx}]"));
+        let total: usize = runs.iter().map(|r| r.values().len()).sum();
+        assert_eq!(total, want.len(), "{name}: length");
+        let mut at = 0;
+        for (run, rows) in runs.iter().enumerate() {
+            for (idx, &g) in rows.values().iter().enumerate() {
+                assert!(g.is_finite(), "{name} run {run} [{idx}]: non-finite output");
+                let label = format!("{name} run {run} [{idx}]");
+                match rows {
+                    Rows::Step(_) => assert_oracle_eq_f32(g, want[at], &label),
+                    Rows::Faer(_) => assert_hybrid_eq_f32(g, want[at], &label),
+                }
+                at += 1;
+            }
         }
     }
 }
 
-/// The cases are not degenerate: no case's output is one repeated value.
+/// The cases are not degenerate: no run's output is one repeated value.
 #[test]
 fn the_fixtures_are_not_degenerate() {
-    for (name, got) in cases() {
-        let first = got[0].to_bits();
-        assert!(
-            got.iter().any(|v| v.to_bits() != first),
-            "{name}: constant output"
-        );
+    for (name, runs) in cases() {
+        for (run, rows) in runs.iter().enumerate() {
+            let first = rows.values()[0].to_bits();
+            assert!(
+                rows.values().iter().any(|v| v.to_bits() != first),
+                "{name} run {run}: constant output"
+            );
+        }
     }
 }
 
@@ -229,18 +261,19 @@ fn the_fixtures_are_not_degenerate() {
 #[ignore = "fixture writer: run once on the producing commit, see its doc"]
 fn write_fast_bit_fixtures() {
     std::fs::create_dir_all(fixture("x").parent().unwrap()).unwrap();
-    for (name, got) in cases() {
+    for (name, runs) in cases() {
         let path = fixture(&name);
         assert!(
             !path.exists(),
             "{} exists; delete it by hand to re-baseline the fixture",
             path.display()
         );
-        assert!(
-            got.iter().all(|v| v.is_finite()),
-            "{name}: non-finite output"
-        );
-        let bytes: Vec<u8> = got.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let bytes: Vec<u8> = runs
+            .iter()
+            .flat_map(|r| r.values())
+            .inspect(|v| assert!(v.is_finite(), "{name}: non-finite output"))
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         std::fs::write(&path, bytes).unwrap();
     }
 }

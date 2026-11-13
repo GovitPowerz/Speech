@@ -71,9 +71,10 @@
 //!    to every self-consistency leg by construction AND sits under the parity pins'
 //!    measured*10 resolution. Since issue #147 the kernel's own order is owned by its
 //!    differential leg, and the step bodies by the output-bit fixtures of
-//!    `tests/issue147_fast_bits.rs`, bit-exact on the oracle libm host only. What
-//!    stays a DESIGN-TIME control: that every projection routes through the kernel and
-//!    that no faer call enters a step, which off the oracle host no leg catches.
+//!    `tests/issue147_fast_bits.rs`, which drive each cell's `step` directly and are
+//!    bit-exact on the oracle libm host only. What stays a DESIGN-TIME control: that
+//!    every projection routes through the kernel and that no faer call enters a
+//!    step, which off the oracle host no leg catches.
 //!    Review the rule. The ASYMMETRIC version (batch one side only) IS caught, by the
 //!    streaming bit-identity legs. The dense output MLP runs the shared
 //!    `super::nn::DenseRowChain` -- still the faer kernel, but driven ONE ROW at a
@@ -207,7 +208,7 @@ const TRANSFORMER_ALIBI_EXPONENT: f64 = -8.0;
 /// `h` (the previous output, the recurrence's input), `c` (numerator), `n`
 /// (normalizer) and `m` (the running-max stabilizer, seeded [`M_INIT_F32`]).
 ///
-/// Construction is CHEAP (four small allocations, no weight touch) and reset is
+/// Construction is CHEAP (five small allocations, no weight touch) and reset is
 /// EXPLICIT: a session takes a fresh [`FastSlstm::state`]. There is no implicit
 /// reset anywhere -- carrying a stale state across sequences is a caller bug the
 /// `split_state_*` legs exist to make visible. `PartialEq` compares the four carried
@@ -970,8 +971,9 @@ impl FastCfc {
     ///
     /// Width tolerance is the exact `CfcLayer::reconcile_input` contract, reproduced
     /// LITERALLY rather than as sLSTM's fewer-terms trick: a wider `x` is CROPPED to the
-    /// left `input_size` columns and a narrower one is ZERO-PADDED into `z`, so the dot
-    /// runs over the full `in + H` width on every path exactly as `matmul_seq` does.
+    /// left `input_size` columns and a narrower one is ZERO-PADDED into `z`, so the
+    /// product runs over the full `in + H` width on every path exactly as `matmul_seq`
+    /// does.
     ///
     /// `needless_range_loop` is allowed for the same reason the exact cells allow it:
     /// the ascending index order IS the numeric contract.

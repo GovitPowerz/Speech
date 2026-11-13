@@ -639,19 +639,23 @@ pub fn assert_oracle_eq_f32(a: f32, b: f32, label: &str) {
             a.to_bits(),
             b.to_bits()
         ),
-        OracleMode::Ulp(_) => {
-            let abs_tol = (HYBRID_ABS_FACTOR as f32) * f32::EPSILON * b.abs().max(1.0);
-            assert!(
-                hybrid_ok_f32(a, b, 2, abs_tol),
-                "{label}: f32 ULP={} > 2 and |diff|={:e} > abs_tol={abs_tol:e}: a=0x{:08x} ({a}) b=0x{:08x} ({b})",
-                ulp_distance_f32(a, b)
-                    .map_or_else(|| "NaN/inf/sign".to_string(), |d| d.to_string()),
-                (a - b).abs(),
-                a.to_bits(),
-                b.to_bits()
-            );
-        }
+        OracleMode::Ulp(_) => assert_hybrid_eq_f32(a, b, label),
     }
+}
+
+/// The hybrid arm of [`assert_oracle_eq_f32`] on EVERY host (`<= 2` f32 ULP or
+/// `512*eps*max(|expected|,1)` absolute): for a value downstream of a SIMD-lowered
+/// product (faer), whose bits are not a contract even on the oracle env.
+pub fn assert_hybrid_eq_f32(a: f32, b: f32, label: &str) {
+    let abs_tol = (HYBRID_ABS_FACTOR as f32) * f32::EPSILON * b.abs().max(1.0);
+    assert!(
+        hybrid_ok_f32(a, b, 2, abs_tol),
+        "{label}: f32 ULP={} > 2 and |diff|={:e} > abs_tol={abs_tol:e}: a=0x{:08x} ({a}) b=0x{:08x} ({b})",
+        ulp_distance_f32(a, b).map_or_else(|| "NaN/inf/sign".to_string(), |d| d.to_string()),
+        (a - b).abs(),
+        a.to_bits(),
+        b.to_bits()
+    );
 }
 
 // === VRCTS structural + value-level comparison (S9.3) ========================

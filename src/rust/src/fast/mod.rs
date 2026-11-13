@@ -33,6 +33,11 @@
 //! twin (the reverse pass reads the whole sequence); the utterance-granular `stream_lid`
 //! session runs it whole per push (issue #57).
 //!
+//! Issue #147 adds `kernels`: the f32 product kernel behind every causal cell
+//! projection and behind `nn`'s recurrence, a k-outer nest over blocks of adjacent
+//! outputs that keeps each output's ascending chain (the f32 transcription of
+//! `nn::kernels`' nest, not a shared generic).
+//!
 //! Phase 10 Task 5 adds `mel32`: the f32 mel/DCT/deltas twin of `features/mel.rs`,
 //! which retires the phase-7 f64 widen bridge at BOTH `pipeline` sites (spec S4) --
 //! the fast front-end is now f32 END TO END and the per-call `T x bins` f64 widen
