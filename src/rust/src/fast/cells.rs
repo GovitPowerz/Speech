@@ -835,17 +835,17 @@ impl PartialEq for CfcState {
     }
 }
 
-/// f32 forward-only CfC cell. Every matrix is stored ROW-MAJOR BY ITS OUTPUT INDEX,
-/// which makes each output element one ascending [`dot_f32`] over a contiguous row --
-/// and which is ALREADY the spec S1.2 flat order (`for_each_slot` walks `j` outer, `k`
-/// inner), so `from_flat` is a sequence of contiguous narrowing copies and NOT a
-/// re-derivation of the layout:
+/// f32 forward-only CfC cell. The spec S1.2 flat order is row-major by output index
+/// (`for_each_slot` walks `j` outer, `k` inner); `from_flat` narrows each block in pack
+/// order and transposes every matrix to the K-MAJOR layout [`super::kernels`] reads
+/// (one row of outputs per input index, issue #147), each output element still one
+/// ascending chain:
 ///
 /// | buffer | index | holds |
 /// |---|---|---|
-/// | `bb_w[l]` | `j*fan_in + k` | `W_l[j, k]` (`fan_in = in+H` at `l == 0`, else `B`) |
+/// | `bb_w[l]` | `k*B + j` | `W_l[j, k]` (`fan_in = in+H` at `l == 0`, else `B`) |
 /// | `bb_b[l]` | `j` | `b_l[j]` |
-/// | `head_w` | `(blk*H + j)*B + k` | `W_blk[j, k]`, `blk` in `[ff1, ff2, gate]` |
+/// | `head_w` | `k*3H + (blk*H + j)` | `W_blk[j, k]`, `blk` in `[ff1, ff2, gate]` |
 /// | `head_b` | `blk*H + j` | `b_blk[j]` |
 ///
 /// The backbone is a `Vec` of per-layer buffers because layer 0 is `(in+H) -> B` and the
@@ -861,7 +861,7 @@ pub struct FastCfc {
 
     bb_w: Vec<Vec<f32>>,
     bb_b: Vec<Vec<f32>>,
-    head_w: Vec<f32>, // 3H*B
+    head_w: Vec<f32>, // B x 3H, k-major
     head_b: Vec<f32>, // 3H
 }
 
@@ -909,7 +909,7 @@ impl FastCfc {
         let mut bb_b = Vec::with_capacity(l);
         for li in 0..l {
             let fan_in = if li == 0 { input_size + h } else { b };
-            bb_w.push(take(b * fan_in));
+            bb_w.push(k_major(&take(b * fan_in), b, fan_in));
             bb_b.push(take(b));
         }
         // The three heads are INTERLEAVED in the pack (`W_1 | b_1 | W_2 | b_2 | W_t |
@@ -920,6 +920,7 @@ impl FastCfc {
             head_w.extend_from_slice(&take(h * b));
             head_b.extend_from_slice(&take(h));
         }
+        let head_w = k_major(&head_w, CFC_HEAD_NB * h, b);
 
         FastCfc {
             input_size,
@@ -1014,18 +1015,15 @@ impl FastCfc {
             } else {
                 &prev[(li - 1) * b..li * b]
             };
+            matvec_into(&mut cur[..b], w, src);
             for j in 0..b {
-                let base = j * fan_in;
-                cur[j] = lecun_tanh_f32(dot_f32(&w[base..base + fan_in], src) + bias[j]);
+                cur[j] = lecun_tanh_f32(cur[j] + bias[j]);
             }
         }
 
         // 3. The three heads share one product (combined column blocks, `[ff1|ff2|g]`).
         let last = &bb[(l - 1) * b..l * b];
-        for c in 0..CFC_HEAD_NB * h {
-            let base = c * b;
-            u[c] = dot_f32(&self.head_w[base..base + b], last);
-        }
+        matvec_into(&mut u[..CFC_HEAD_NB * h], &self.head_w, last);
         for j in 0..h {
             let (c1, c2, cg) = (j, h + j, 2 * h + j);
             let ff1 = (u[c1] + self.head_b[c1]).tanh();
