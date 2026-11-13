@@ -7,6 +7,8 @@ repository whose catchers are pytest node ids, so no cargo build runs here.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
 import math
 import struct
 import subprocess
@@ -43,11 +45,12 @@ def test_header_parses_every_key() -> None:
             "catcher: MISSED pytest tests/test_mod.py::test_value\n"
             "requires: corpus\n"
             "requires: oracle-libm\n"
+            "requires: oracle-libm-f32\n"
         ),
     )
     assert m.name == "b/1a"
     assert m.description == "VALUE off by one"
-    assert m.requires == ("corpus", "oracle-libm")
+    assert m.requires == ("corpus", "oracle-libm", "oracle-libm-f32")
     assert m.files == ("pkg/mod.py",)
     assert [(c.expected, c.kind, c.target, c.name) for c in m.catchers] == [
         ("CAUGHT", "cargo", "--lib", "tasks::segmenter::tests::hyst_step"),
@@ -243,9 +246,9 @@ def _repo(tmp_path: Path, patches: dict[str, str]) -> Path:
     return root
 
 
-def _verdicts(root: Path, name: str, corpus: bool = False, strict: bool = False) -> list[str]:
+def _verdicts(root: Path, name: str, corpus: bool = False, strict: bool = False, strict_f32: bool = False) -> list[str]:
     [mutation] = runner.load(root, [name])
-    return [r.observed for r in runner.run_mutation(root, mutation, corpus, strict)]
+    return [r.observed for r in runner.run_mutation(root, mutation, corpus, strict, strict_f32)]
 
 
 def _clean(root: Path) -> bool:
@@ -296,6 +299,13 @@ def test_requires_oracle_libm_skips_off_the_oracle_host(tmp_path: Path) -> None:
     assert _clean(root)
 
 
+def test_requires_oracle_libm_f32_skips_off_the_f32_host(tmp_path: Path) -> None:
+    root = _repo(tmp_path, {"b/1": _patch("mutation: m\ncatcher: CAUGHT pytest t/test_mod.py::test_value\nrequires: oracle-libm-f32\n")})
+    assert _verdicts(root, "b/1", strict=True) == ["SKIPPED"]
+    assert _verdicts(root, "b/1", strict=True, strict_f32=True) == ["CAUGHT"]
+    assert _clean(root)
+
+
 def _canaries(root: Path, inputs: list[float], outputs: list[float]) -> None:
     path = root / runner.CANARIES
     path.parent.mkdir(parents=True)
@@ -313,14 +323,52 @@ def test_oracle_libm_recomputes_the_canary_fixture_with_this_libm(tmp_path: Path
     assert not runner.oracle_libm(tmp_path / "off")
 
 
+def _f32_canaries(root: Path, perturb: bool = False) -> None:
+    libm = ctypes.CDLL(ctypes.util.find_library("m"))
+    records = []
+    for function, name in enumerate(runner.LIBM_F32):
+        f = getattr(libm, name)
+        f.argtypes, f.restype = [ctypes.c_float], ctypes.c_float
+        for x in (0.25, 0.75):
+            (bits,) = struct.unpack("<I", struct.pack("<f", f(x)))
+            records.append(struct.pack("<III", function, struct.unpack("<I", struct.pack("<f", x))[0], bits))
+    if perturb:
+        function, x, bits = struct.unpack("<III", records[-1])
+        records[-1] = struct.pack("<III", function, x, bits + 1)
+    path = root / runner.CANARIES_F32
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"".join(records))
+
+
+def test_oracle_libm_f32_recomputes_the_f32_canaries_inside_the_f64_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SPEECH_ORACLE_LIBM", raising=False)
+    inputs = [0.1 * k + 0.3 for k in range(18)]
+    outputs = [math.cos(x) if k < 10 else math.log(x) if k < 15 else math.exp(x) for k, x in enumerate(inputs)]
+    _canaries(tmp_path, inputs, outputs)
+    _f32_canaries(tmp_path)
+    assert runner.oracle_libm_f32(tmp_path)
+    _canaries(tmp_path / "off", inputs, outputs)
+    _f32_canaries(tmp_path / "off", perturb=True)
+    assert not runner.oracle_libm_f32(tmp_path / "off")
+    # Off the f64 oracle libm the f32 gate is closed too, whatever the f32 canaries read.
+    outputs[17] = math.nextafter(outputs[17], math.inf)
+    _canaries(tmp_path / "f64", inputs, outputs)
+    _f32_canaries(tmp_path / "f64")
+    assert not runner.oracle_libm_f32(tmp_path / "f64")
+
+
 def test_oracle_libm_honours_the_forced_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "strict")
     assert runner.oracle_libm(tmp_path)
+    assert runner.oracle_libm_f32(tmp_path)
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "ulp")
     assert not runner.oracle_libm(tmp_path)
+    assert not runner.oracle_libm_f32(tmp_path)
     monkeypatch.setenv("SPEECH_ORACLE_LIBM", "Strict")
     with pytest.raises(ValueError, match=r"strict\|ulp"):
         runner.oracle_libm(tmp_path)
+    with pytest.raises(ValueError, match=r"strict\|ulp"):
+        runner.oracle_libm_f32(tmp_path)
 
 
 def test_oracle_libm_agrees_with_the_catchers_gate(monkeypatch: pytest.MonkeyPatch) -> None:

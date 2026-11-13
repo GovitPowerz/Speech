@@ -36,7 +36,8 @@ a pin above it is a defect, not a widening).
   arithmetic only down to the pin's resolution. Below that resolution a symmetric kernel edit is
   invisible by construction, so the control is a design-time rule in the module doc, not a test.
   Since issue #147 (2026-11-13) the causal step kernels are the exception on the oracle libm
-  host: `tests/issue147_fast_bits.rs` pins their outputs bit-exact there. Elsewhere, and for
+  host whose f32 libm also reproduces the f32 canaries recorded with them:
+  `tests/issue147_fast_bits.rs` pins their outputs bit-exact there. Elsewhere, and for
   every row that passes through faer, the rule is still the only control.
 - Every phase ends with a mutation battery that applies the edits the gates claim to catch and
   records which test actually fired, gaps included (`IMPROVEMENTS.md` through Phase 10,

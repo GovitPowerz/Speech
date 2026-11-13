@@ -4,7 +4,7 @@ catcher: CAUGHT cargo --test issue147_fast_bits fast_net_outputs_keep_their_bits
 catcher: MISSED cargo --test phase9_fast_parity causal_parity_exact_vs_fast
 catcher: MISSED cargo --test phase7_parity_sad sad_parity_exact_vs_fast
 catcher: MISSED cargo --lib fast::kernels::tests::every_output_is_seeded_positive_zero
-requires: oracle-libm
+requires: oracle-libm-f32
 
 diff --git a/src/rust/src/fast/kernels.rs b/src/rust/src/fast/kernels.rs
 index 10a150e..90dfd39 100644

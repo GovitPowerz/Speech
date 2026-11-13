@@ -1274,8 +1274,8 @@ impl FastLstm {
     ///
     /// Width tolerance is the exact `:313-319` projection contract: a wider `x` is CROPPED
     /// to the left `input_size` columns, a narrower one sums fewer terms (equivalent to
-    /// the exact path's "use the top `cols` weight rows", since `inp`'s per-element row is
-    /// indexed by the input index).
+    /// the exact path's "use the top `cols` weight rows": the kernel reads only the
+    /// leading `x.len()` rows of the k-major `inp`, one row per input index).
     ///
     /// `needless_range_loop` is allowed for the sibling cells' reason: `j` indexes several
     /// buffers at once and the ascending index order IS the numeric contract.

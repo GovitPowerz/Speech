@@ -5613,7 +5613,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   probe's relaxation of the three pack-length pins. Item 6 is committed with every named leg
   MISSED, as measured; its legs are a selection from the green files the battery ran. Since issue #147
   it carries an eighth catcher, the step fixtures of `tests/issue147_fast_bits.rs`, `CAUGHT` on
-  the oracle libm host (`requires: oracle-libm`; RESULTS.md, issue #147), and its diff batches
+  the oracle libm host whose f32 libm reproduces the f32 canaries (`requires: oracle-libm-f32`; RESULTS.md, issue #147), and its diff batches
   the projection from the k-major block. Item 7's 20
   catchers include the RESULTS.md "7 Rust legs and all 4 phase-10 seam legs". Three single checks
   from the Phase 10 RESULTS.md prose sit beside the battery: `mamba-rolling-tp`, the collapsed

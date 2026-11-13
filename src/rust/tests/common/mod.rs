@@ -658,6 +658,93 @@ pub fn assert_hybrid_eq_f32(a: f32, b: f32, label: &str) {
     );
 }
 
+// === The f32 libm canaries (issue #147) ========================================
+//
+// The fast cells' `step` bodies call f32 libm functions the f64 canaries above never
+// probe. `tests/reference_data/issue147/libm_f32_canaries.bin` records them on the host
+// that wrote the `issue147` step fixtures: little-endian `u32` triples `(function,
+// argument bits, result bits)`, the function an index into [`libm_f32`]. The mutation
+// runner recomputes the same records through the C symbols (`tests/mutations/run.py`,
+// `requires: oracle-libm-f32`).
+
+/// The f32 canary fixture, repo-relative to `tests/reference_data/`.
+pub const LIBM_F32_CANARIES: &str = "issue147/libm_f32_canaries.bin";
+
+/// The f32 functions the fast `step` bodies call, by canary function index:
+/// `f32::exp`, `f32::tanh`, `f32::ln_1p`, `f32::asinh` (`expf`, `tanhf`, `log1pf`,
+/// `asinhf` on this toolchain). The argument goes through `black_box` so a constant
+/// argument is never folded at compile time with another implementation.
+pub fn libm_f32(function: u32, x: f32) -> f32 {
+    let x = std::hint::black_box(x);
+    match function {
+        0 => x.exp(),
+        1 => x.tanh(),
+        2 => x.ln_1p(),
+        3 => x.asinh(),
+        _ => panic!("f32 libm canary: unknown function {function}"),
+    }
+}
+
+/// The f32 canary records `(function, argument bits, result bits)`.
+pub fn read_libm_f32_canaries() -> Vec<(u32, u32, u32)> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/reference_data")
+        .join(LIBM_F32_CANARIES);
+    let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert_eq!(
+        bytes.len() % 12,
+        0,
+        "{LIBM_F32_CANARIES}: not whole records"
+    );
+    bytes
+        .as_chunks::<12>()
+        .0
+        .iter()
+        .map(|r| {
+            let word = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+            (word(0), word(4), word(8))
+        })
+        .collect()
+}
+
+/// True when the f32 step goldens compare bit-exact: on the oracle host ([`oracle_mode`]
+/// strict) whose f32 libm also reproduces every f32 canary. `SPEECH_ORACLE_LIBM` forces
+/// it as it forces [`oracle_mode`].
+pub fn f32_libm_strict() -> bool {
+    static STRICT: OnceLock<bool> = OnceLock::new();
+    *STRICT.get_or_init(|| {
+        let oracle = matches!(oracle_mode(), OracleMode::Strict);
+        if !oracle || std::env::var("SPEECH_ORACLE_LIBM").is_ok() {
+            return oracle;
+        }
+        let matches = read_libm_f32_canaries()
+            .into_iter()
+            .all(|(function, x, want)| libm_f32(function, f32::from_bits(x)).to_bits() == want);
+        if !matches {
+            eprintln!(
+                "f32 libm canaries differ from this platform's f32 libm; the f32 step goldens run hybrid: <=2 f32 ULP or 512*eps*max(|expected|,1) absolute"
+            );
+        }
+        matches
+    })
+}
+
+/// Bit-exact when [`f32_libm_strict`], else [`assert_hybrid_eq_f32`]: for a value that
+/// reads the f32 libm and no SIMD-lowered product (the fast cells' `step` outputs).
+pub fn assert_f32_libm_eq(a: f32, b: f32, label: &str) {
+    if f32_libm_strict() {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "{label}: a=0x{:08x} ({a}) b=0x{:08x} ({b})",
+            a.to_bits(),
+            b.to_bits()
+        );
+    } else {
+        assert_hybrid_eq_f32(a, b, label);
+    }
+}
+
 // === VRCTS structural + value-level comparison (S9.3) ========================
 //
 // Extract `key="value"` verbatim from a single XML-ish line (no quote-escaping,

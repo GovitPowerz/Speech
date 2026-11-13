@@ -15,13 +15,16 @@
 //! phase9 forward config with its seed pack (recurrent `23,4`), and on a wider
 //! two-layer geometry with a synthetic pack, whose projections are not a multiple of
 //! the kernel's widest block. Both feed a full-width input and one narrower than the
-//! net's input size (the width-tolerance crop, which sums fewer terms).
+//! net's input size (the width tolerance: fewer terms, or the CfC's literal zero-pad).
 //!
 //! Two kinds of rows, compared differently ([`Rows`]):
 //!
-//! - a cell's own `step` outputs read the block kernel and libm, nothing else. They
-//!   are bit-exact on the oracle libm host and under the canary-gated hybrid bound
-//!   elsewhere, so off the oracle host a one-ULP step-order change is owned by nothing;
+//! - a cell's own `step` outputs read the block kernel and the f32 libm (`expf`,
+//!   `tanhf`, `log1pf`, `asinhf`), nothing else. They are bit-exact on the oracle libm
+//!   host when its f32 libm also reproduces the f32 canaries recorded with these
+//!   fixtures (`common::f32_libm_strict`, the f64 canaries probing none of those
+//!   functions), and under the hybrid bound elsewhere, so there a one-ULP step-order
+//!   change is owned by nothing;
 //! - every posterior, and every `FastBlstm` row, passed through a faer product, whose
 //!   bits are the host's SIMD lowering as well. Those compare under the hybrid bound on
 //!   EVERY host: a bit-exact pin there would pin faer's lowering, the cost a
@@ -33,7 +36,9 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{assert_hybrid_eq_f32, assert_oracle_eq_f32};
+use common::{
+    LIBM_F32_CANARIES, assert_f32_libm_eq, assert_hybrid_eq_f32, libm_f32, read_libm_f32_canaries,
+};
 use indexmap::IndexMap;
 
 use speech::fast::cells::{CellGeometry, FastCausalNet};
@@ -230,7 +235,7 @@ fn fast_net_outputs_keep_their_bits() {
                 assert!(g.is_finite(), "{name} run {run} [{idx}]: non-finite output");
                 let label = format!("{name} run {run} [{idx}]");
                 match rows {
-                    Rows::Step(_) => assert_oracle_eq_f32(g, want[at], &label),
+                    Rows::Step(_) => assert_f32_libm_eq(g, want[at], &label),
                     Rows::Faer(_) => assert_hybrid_eq_f32(g, want[at], &label),
                 }
                 at += 1;
@@ -276,4 +281,78 @@ fn write_fast_bit_fixtures() {
             .collect();
         std::fs::write(&path, bytes).unwrap();
     }
+}
+
+/// The f32 canary arguments, `(function, x)`, 256 per range over what the `step` bodies
+/// feed each function: `exp` the stabilized exponents (`<= 0`, down to the f32 guard)
+/// and the logistic's, `tanh` and `asinh` the pre-activations and cell states, `ln_1p`
+/// the softplus's `exp` outputs, log-uniform in `[1e-30, 1]`. A golden-ratio walk
+/// spreads each range without round numbers.
+fn libm_f32_canary_args() -> Vec<(u32, f32)> {
+    let ln_tiny = 1.0e-30_f64.ln();
+    let ln_mid = 1.0e-3_f64.ln();
+    let ranges: [(u32, f64, f64); 8] = [
+        (0, -88.0, 0.0),
+        (0, -10.0, 10.0),
+        (1, -10.0, 10.0),
+        (1, -1.0, 1.0),
+        (2, ln_tiny, ln_mid),
+        (2, ln_mid, 0.0),
+        (3, -10.0, 10.0),
+        (3, -1.0, 1.0),
+    ];
+    ranges
+        .iter()
+        .flat_map(|&(function, lo, hi)| {
+            (0..256).map(move |k| {
+                let v = lo + (hi - lo) * (0.5 + k as f64 * 0.618_033_988_749_895).fract();
+                (function, if function == 2 { v.exp() } else { v } as f32)
+            })
+        })
+        .collect()
+}
+
+/// The fixture holds the drawn arguments with finite results, so a truncated or edited
+/// file fails here instead of silently relaxing `common::f32_libm_strict` to hybrid.
+#[test]
+fn the_f32_canaries_are_the_drawn_arguments() {
+    let records = read_libm_f32_canaries();
+    let args = libm_f32_canary_args();
+    assert_eq!(
+        records.len(),
+        args.len(),
+        "{LIBM_F32_CANARIES}: record count"
+    );
+    for (&(function, x, y), &(want_function, want_x)) in records.iter().zip(&args) {
+        assert_eq!((function, x), (want_function, want_x.to_bits()));
+        assert!(
+            f32::from_bits(y).is_finite(),
+            "function {function} at {x:#010x}"
+        );
+    }
+}
+
+/// The f32 canary writer: run ONCE, on the oracle libm host that wrote the step fixtures,
+/// with `cargo test --release --test issue147_fast_bits write_f32_libm_canaries --
+/// --ignored` from `src/rust/`. It refuses to overwrite.
+#[test]
+#[ignore = "fixture writer: run once on the oracle libm host, see its doc"]
+fn write_f32_libm_canaries() {
+    let path = repo().join("tests/reference_data").join(LIBM_F32_CANARIES);
+    assert!(
+        !path.exists(),
+        "{} exists; delete it by hand to re-record the canaries",
+        path.display()
+    );
+    let bytes: Vec<u8> = libm_f32_canary_args()
+        .into_iter()
+        .flat_map(|(function, x)| {
+            let y = libm_f32(function, x);
+            assert!(y.is_finite(), "function {function} at {x}: {y}");
+            [function, x.to_bits(), y.to_bits()]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+        })
+        .collect();
+    std::fs::write(&path, bytes).unwrap();
 }

@@ -4801,13 +4801,16 @@ The change column is against the mean of the two "before" passes.
   byte-unchanged since: `FastBlstm` at three geometries and each causal cell at two (its phase9
   seed config and a wider two-layer one), each on a full-width input and one three columns
   narrower. A case records the posteriors and the hidden rows.
-- **Which rows are bit-exact.** A cell's own `step` output reads the block kernel and libm,
-  nothing else: those rows compare by `to_bits` on the oracle libm host and under the hybrid
-  bound elsewhere. Every posterior and every `FastBlstm` row is downstream of a faer product,
+- **Which rows are bit-exact.** A cell's own `step` output reads the block kernel and the f32
+  libm (`expf`, `tanhf`, `log1pf`, `asinhf`), nothing else: those rows compare by `to_bits` on
+  the oracle libm host whose f32 functions also reproduce the 2048 f32 canaries recorded with
+  the fixtures (`tests/reference_data/issue147/libm_f32_canaries.bin`, through
+  `common::f32_libm_strict`; the f64 canaries probe none of those functions), and under the
+  hybrid bound elsewhere. Every posterior and every `FastBlstm` row is downstream of a faer product,
   whose bits are the host's SIMD lowering too: those compare under the hybrid bound on every
   host. Phase 10 declined an f32 self-golden because it would pin that lowering
   (`docs/validation.md`); these fixtures pin none.
-- **What that leaves unowned.** Off the oracle libm host a one-ULP change to a step's combine
+- **What that leaves unowned.** Off that host a one-ULP change to a step's combine
   order is owned by nothing, as issue #144 left the exact tree. On every host the
   `FastBlstm` recurrence's order is owned by the kernel leg alone; its fixture rows guard the
   layout and the wiring.
@@ -4824,12 +4827,15 @@ The change column is against the mean of the two "before" passes.
 | 3 | `FastLstm::step` combines `in + (bias + rec)` | the bit fixtures | the differential leg, `lstm_matches_the_exact_cell_within_the_f32_band`, the causal parity leg |
 | 4 | `k_major` swaps its indices | `k_major_is_the_transpose`, the differential leg, the LSTM layout pin, the bit fixtures, the causal parity leg | none |
 
-Patches 1 and 3 declare `requires: oracle-libm`: their fixture catch is one ULP.
+Patches 1 and 3 declare `requires: oracle-libm-f32`: their fixture catch is one ULP. The runner
+reads that precondition off the f64 canaries, then the f32 ones recomputed through `ctypes`
+(ADR-0011's issue #147 amendment); its runner mutation, `issue33/oracle-libm-f32-ignored`, is
+`CAUGHT` by `test_requires_oracle_libm_f32_skips_off_the_f32_host`.
 
 **`phase10/6` has a catcher.** That patch batches `FastLstm::step`'s input projection through
 faer, the symmetric substitution every one of its seven catchers has missed since Phase 10
 (`IMPROVEMENTS.md`, Phase 10 battery, item 6). The step fixtures catch it, so it carries an
-eighth catcher and `requires: oracle-libm`; off that host its seven `MISSED` read `SKIPPED`.
+eighth catcher and `requires: oracle-libm-f32`; off that host its seven `MISSED` read `SKIPPED`.
 
 Four older patches were re-targeted in the commit that moved their context: `phase7/1`,
 `phase9/7`, `phase10/6` and `phase10/8b`.

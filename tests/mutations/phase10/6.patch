@@ -7,7 +7,7 @@ catcher: MISSED cargo --test phase9_stream_causal stream_finish_equals_offline_c
 catcher: MISSED cargo --test phase9_stream_causal chunking_bit_invariance
 catcher: MISSED cargo --test phase9_stream_causal stream_causal_matches_offline_on_the_real_arm_geometry
 catcher: CAUGHT cargo --test issue147_fast_bits fast_net_outputs_keep_their_bits
-requires: oracle-libm
+requires: oracle-libm-f32
 
 diff --git a/src/rust/src/fast/cells.rs b/src/rust/src/fast/cells.rs
 index e477d83..934a294 100644

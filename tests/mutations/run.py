@@ -9,6 +9,7 @@ A mutation is `tests/mutations/<battery>/<id>.patch`: a header, then a git diff.
     catcher: <CAUGHT|MISSED> pytest <node id>
     requires: corpus
     requires: oracle-libm
+    requires: oracle-libm-f32
 
 `--check` is the cheap half CI runs: every patch applies, every catcher names exactly one test.
 A run applies one mutation, builds what its catchers need, runs each catcher, restores the
@@ -17,6 +18,9 @@ host lacks reads every catcher of the mutation as SKIPPED: `corpus` when the cor
 is absent, `oracle-libm` when this host's libm does not reproduce the oracle canaries, the
 verdict the canary-gated comparators (`common::oracle_mode`, `tests/_libm_gate.oracle_strict`)
 relax on, so a one-ULP catch that holds only under a strict comparator is declared, not missed.
+`oracle-libm-f32` is the f32 step goldens' gate (`common::f32_libm_strict`, issue #147): the
+oracle libm whose f32 `expf` / `tanhf` / `log1pf` / `asinhf` also reproduce the f32 canaries,
+recomputed here through `ctypes`.
 
 Run it with `uv run python`: pytest catchers and `maturin` run under the interpreter that runs
 this script. Stdlib only, so the Rust CI job's `python3` (>= 3.10) runs `--check --kind cargo`.
@@ -25,6 +29,8 @@ this script. Stdlib only, so the Rust CI job's `python3` (>= 3.10) runs `--check
 from __future__ import annotations
 
 import argparse
+import ctypes
+import ctypes.util
 import importlib.util
 import math
 import os
@@ -37,11 +43,15 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED = ("CAUGHT", "MISSED")
-REQUIRES = ("corpus", "oracle-libm")
+REQUIRES = ("corpus", "oracle-libm", "oracle-libm-f32")
 # `tests/conftest.py` and `src/rust/tests/common/mod.rs` both resolve the corpus here.
 CORPUS = Path("data/LRE03-LRE07")
 # The fixture both canary gates recompute: 2 x 18 column-major, [0,10) cos, [10,15) log, [15,18) exp.
 CANARIES = Path("tests/reference_data/phase1/libm_canaries.bin")
+# `common::LIBM_F32_CANARIES`: `<u32 function, u32 argument bits, u32 result bits>` records, the
+# function an index into the C symbols `common::libm_f32` calls through `f32::exp` and its siblings.
+CANARIES_F32 = Path("tests/reference_data/issue147/libm_f32_canaries.bin")
+LIBM_F32 = ("expf", "tanhf", "log1pf", "asinhf")
 CARGO_DIR = Path("src/rust")
 MATURIN = [sys.executable, "-m", "maturin", "develop", "--release", "--manifest-path", "src/rust/speech-py/Cargo.toml"]
 
@@ -140,6 +150,24 @@ def oracle_libm(root: Path) -> bool:
         x, want = values[k * rows], values[k * rows + 1]
         got = math.cos(x) if k < 10 else math.log(x) if k < 15 else math.exp(x)
         if got.hex() != want.hex():
+            return False
+    return True
+
+
+def oracle_libm_f32(root: Path) -> bool:
+    """True on the oracle libm whose f32 functions also reproduce the f32 canaries (`common::f32_libm_strict`)."""
+    forced = libm_override()
+    if forced is not None:
+        return forced == "strict"
+    if not oracle_libm(root):
+        return False
+    libm = ctypes.CDLL(ctypes.util.find_library("m"))
+    functions = [getattr(libm, name) for name in LIBM_F32]
+    for f in functions:
+        f.argtypes, f.restype = [ctypes.c_float], ctypes.c_float
+    for function, x, want in struct.iter_unpack("<III", (root / CANARIES_F32).read_bytes()):
+        (arg,) = struct.unpack("<f", struct.pack("<I", x))
+        if struct.pack("<f", functions[function](arg)) != struct.pack("<I", want):
             return False
     return True
 
@@ -248,7 +276,7 @@ def _run_catcher(root: Path, catcher: Catcher) -> tuple[str, str]:
     return pytest_verdict(res.returncode, res.stdout)
 
 
-def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) -> list[Verdict]:
+def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool, strict_f32: bool = False) -> list[Verdict]:
     def every(observed: str, failure: str) -> list[Verdict]:
         return [Verdict(mutation, c, observed, failure) for c in mutation.catchers]
 
@@ -258,6 +286,8 @@ def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool) -> 
         return every("SKIPPED", f"{CORPUS} absent")
     if "oracle-libm" in mutation.requires and not strict:
         return every("SKIPPED", "the comparators run hybrid here (the canaries, or SPEECH_ORACLE_LIBM=ulp)")
+    if "oracle-libm-f32" in mutation.requires and not strict_f32:
+        return every("SKIPPED", "the f32 step comparators run hybrid here (the f32 canaries, or SPEECH_ORACLE_LIBM=ulp)")
     if _git_apply(root, mutation).returncode:
         raise RuntimeError(f"{mutation.name}: git apply failed after --check passed")
     rebuilt = False
@@ -347,11 +377,12 @@ def main(argv: list[str], root: Path = ROOT) -> int:
     corpus = (root / CORPUS).is_dir()
     # Read only when a selected mutation declares it: a tree without the fixture runs the rest.
     strict = any("oracle-libm" in m.requires for m in mutations) and oracle_libm(root)
+    strict_f32 = any("oracle-libm-f32" in m.requires for m in mutations) and oracle_libm_f32(root)
     print("| battery | # | mutation | catcher | expected | observed |\n|---|---|---|---|---|---|", flush=True)
     results: list[Verdict] = []
     for m in mutations:
         battery, _, ident = m.name.partition("/")
-        for r in run_mutation(root, m, corpus, strict):
+        for r in run_mutation(root, m, corpus, strict, strict_f32):
             print(f"| {battery} | {ident} | {m.description} | {r.catcher.label()} | {r.catcher.expected} | {r.observed} |", flush=True)
             results.append(r)
     if any(r.failure for r in results):
