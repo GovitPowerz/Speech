@@ -89,5 +89,7 @@ same `SPEECH_ORACLE_LIBM` override. A mutation whose catch is one ULP on those r
 `requires: oracle-libm-f32` (`issue147/1`, `/3`, `phase10/6`), read as the other two
 preconditions are. The runner recomputes the records through the C symbols with stdlib
 `ctypes`, after the f64 gate; the f32 gate sits inside the f64 one, so a host the f64
-canaries call off-oracle never runs the step rows strict. The runner mutation
-`issue33/oracle-libm-f32-ignored` pins the skip.
+canaries call off-oracle never runs the step rows strict. The two gates read one verdict
+only while each `f32` method `common::libm_f32` calls is its C symbol, which
+`the_f32_canary_functions_are_the_c_symbols` asserts on every host at every canary argument.
+The runner mutation `issue33/oracle-libm-f32-ignored` pins the skip.

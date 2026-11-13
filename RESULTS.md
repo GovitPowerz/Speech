@@ -4898,3 +4898,14 @@ writer). `uv run pytest tests -q -m "not slow"`: 1211 passed, 1 skipped, as on `
 pytest tests/pyo3 -q`: 296 passed in 12:14. `run.py --check`: 211 mutations, 0 problems. The
 close run `--changed-since origin/main`, in two calls to stay under an hour each (`issue147
 phase7 phase9`, then `phase10 phase11`): 17 patches, 85 verdicts, 0 differ from expected.
+
+`a6d6bb1` then gated the step rows on the f32 canaries, and its review added the C-symbol leg
+(`the_f32_canary_functions_are_the_c_symbols`: each `f32` method the Rust gate calls against
+the symbol the runner calls, at every canary argument). On that tree: `cargo test --release
+--no-fail-fast --features test-support` 1437 passed, 6 ignored, 0 failed (the canary argument
+test and the C-symbol leg over the count above; the sixth ignored test is the canary writer);
+`pytest tests -q -m "not slow"` 1213 passed, 1 skipped (the runner's two f32 gate tests);
+`run.py --check` 212 mutations, 0 problems; `run.py issue147 phase10/6
+issue33/oracle-libm-f32-ignored issue33/oracle-libm-ignored` 7 patches, 29 verdicts, 0 differ
+from expected. `tests/pyo3` and the rest of `--changed-since origin/main` were not re-run on
+it.

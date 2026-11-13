@@ -632,15 +632,19 @@ pub fn assert_oracle_eq_f64(a: f64, b: f64, label: &str) {
 /// goldens whose divergence lives in f32 precision.
 pub fn assert_oracle_eq_f32(a: f32, b: f32, label: &str) {
     match oracle_mode() {
-        OracleMode::Strict => assert_eq!(
-            a.to_bits(),
-            b.to_bits(),
-            "{label}: a=0x{:08x} ({a}) b=0x{:08x} ({b})",
-            a.to_bits(),
-            b.to_bits()
-        ),
+        OracleMode::Strict => assert_bits_eq_f32(a, b, label),
         OracleMode::Ulp(_) => assert_hybrid_eq_f32(a, b, label),
     }
+}
+
+fn assert_bits_eq_f32(a: f32, b: f32, label: &str) {
+    assert_eq!(
+        a.to_bits(),
+        b.to_bits(),
+        "{label}: a=0x{:08x} ({a}) b=0x{:08x} ({b})",
+        a.to_bits(),
+        b.to_bits()
+    );
 }
 
 /// The hybrid arm of [`assert_oracle_eq_f32`] on EVERY host (`<= 2` f32 ULP or
@@ -672,7 +676,8 @@ pub const LIBM_F32_CANARIES: &str = "issue147/libm_f32_canaries.bin";
 
 /// The f32 functions the fast `step` bodies call, by canary function index:
 /// `f32::exp`, `f32::tanh`, `f32::ln_1p`, `f32::asinh` (`expf`, `tanhf`, `log1pf`,
-/// `asinhf` on this toolchain). The argument goes through `black_box` so a constant
+/// `asinhf` on this toolchain, pinned by `the_f32_canary_functions_are_the_c_symbols` in
+/// `issue147_fast_bits.rs`). The argument goes through `black_box` so a constant
 /// argument is never folded at compile time with another implementation.
 pub fn libm_f32(function: u32, x: f32) -> f32 {
     let x = std::hint::black_box(x);
@@ -733,13 +738,7 @@ pub fn f32_libm_strict() -> bool {
 /// reads the f32 libm and no SIMD-lowered product (the fast cells' `step` outputs).
 pub fn assert_f32_libm_eq(a: f32, b: f32, label: &str) {
     if f32_libm_strict() {
-        assert_eq!(
-            a.to_bits(),
-            b.to_bits(),
-            "{label}: a=0x{:08x} ({a}) b=0x{:08x} ({b})",
-            a.to_bits(),
-            b.to_bits()
-        );
+        assert_bits_eq_f32(a, b, label);
     } else {
         assert_hybrid_eq_f32(a, b, label);
     }

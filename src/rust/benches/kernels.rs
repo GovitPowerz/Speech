@@ -385,12 +385,12 @@ fn fast_window(in_cols: usize) -> FastMatrix {
 }
 
 /// One `FastBlstm` forward over one window: the bidirectional LSTM twin the four
-/// Phase 7 legs run, built from the `prefix` net of a committed config as written,
+/// Phase 7 legs run, built from the `BLSTM` net of a committed config as written,
 /// on a deterministic synthetic pack. `config` is repo-relative.
-fn fast_blstm_fwd(c: &mut Criterion, name: &str, config: &str, prefix: &str) {
+fn fast_blstm_fwd(c: &mut Criterion, name: &str, config: &str) {
     let repo = format!("{}/../..", env!("CARGO_MANIFEST_DIR"));
     let map = speech::toml_config::load_config(&format!("{repo}/{config}")).expect("config");
-    let spec = build_aligned_spec(&map, prefix).expect("the config's net");
+    let spec = build_aligned_spec(&map, "BLSTM").expect("the config's net");
     let flat: Vec<f64> = (0..speech::config::element_count(&spec))
         .map(|k| (((k * 11 + 3) % 97) as f64 / 97.0 - 0.5) * 0.2)
         .collect();
@@ -416,24 +416,9 @@ fn fast_blstm_fwd(c: &mut Criterion, name: &str, config: &str, prefix: &str) {
 /// and the narrowest committed LSTM geometry, the `BLSTM` net of the LID config
 /// (`11,12`, a `48 x 12` recurrence).
 fn bench_fast_blstm_fwd(c: &mut Criterion) {
-    fast_blstm_fwd(
-        c,
-        "fast_blstm_fwd_v1",
-        "configs/training/lre_sad.toml",
-        "BLSTM",
-    );
-    fast_blstm_fwd(
-        c,
-        "fast_blstm_fwd_v2",
-        "configs/training/lre_sad_v2.toml",
-        "BLSTM",
-    );
-    fast_blstm_fwd(
-        c,
-        "fast_blstm_fwd_lid",
-        "configs/lid/lid_blstm.toml",
-        "BLSTM",
-    );
+    fast_blstm_fwd(c, "fast_blstm_fwd_v1", "configs/training/lre_sad.toml");
+    fast_blstm_fwd(c, "fast_blstm_fwd_v2", "configs/training/lre_sad_v2.toml");
+    fast_blstm_fwd(c, "fast_blstm_fwd_lid", "configs/lid/lid_blstm.toml");
 }
 
 /// One `FastCausalNet` forward over the same window for each causal cell, on its

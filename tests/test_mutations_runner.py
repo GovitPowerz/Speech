@@ -261,7 +261,7 @@ _OFF_BY_ONE = _patch("mutation: off by one\ncatcher: CAUGHT pytest t/test_mod.py
 def test_run_reads_caught_and_missed_and_restores_the_tree(tmp_path: Path) -> None:
     root = _repo(tmp_path, {"b/1": _OFF_BY_ONE})
     [mutation] = runner.load(root, ["b/1"])
-    results = runner.run_mutation(root, mutation, False, False)
+    results = runner.run_mutation(root, mutation, False, False, False)
     assert [(r.observed, r.catcher.expected) for r in results] == [("CAUGHT", "CAUGHT"), ("MISSED", "MISSED")]
     assert "assert 2 == 1" in results[0].failure
     assert _clean(root)

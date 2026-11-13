@@ -276,7 +276,7 @@ def _run_catcher(root: Path, catcher: Catcher) -> tuple[str, str]:
     return pytest_verdict(res.returncode, res.stdout)
 
 
-def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool, strict_f32: bool = False) -> list[Verdict]:
+def run_mutation(root: Path, mutation: Mutation, corpus: bool, strict: bool, strict_f32: bool) -> list[Verdict]:
     def every(observed: str, failure: str) -> list[Verdict]:
         return [Verdict(mutation, c, observed, failure) for c in mutation.catchers]
 

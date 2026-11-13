@@ -37,7 +37,8 @@ mod common;
 use std::path::PathBuf;
 
 use common::{
-    LIBM_F32_CANARIES, assert_f32_libm_eq, assert_hybrid_eq_f32, libm_f32, read_libm_f32_canaries,
+    LIBM_F32_CANARIES, OracleMode, assert_f32_libm_eq, assert_hybrid_eq_f32, assert_oracle_eq_f32,
+    libm_f32, oracle_mode, read_libm_f32_canaries,
 };
 use indexmap::IndexMap;
 
@@ -323,11 +324,45 @@ fn the_f32_canaries_are_the_drawn_arguments() {
         args.len(),
         "{LIBM_F32_CANARIES}: record count"
     );
-    for (&(function, x, y), &(want_function, want_x)) in records.iter().zip(&args) {
-        assert_eq!((function, x), (want_function, want_x.to_bits()));
+    for (at, (&(function, x, y), &(want_function, want_x))) in records.iter().zip(&args).enumerate()
+    {
+        assert_eq!(function, want_function, "record {at}: function");
+        if function == 2 {
+            // Drawn through the host's f64 `ln` and `exp`.
+            let label = format!("record {at}: argument");
+            assert_oracle_eq_f32(f32::from_bits(x), want_x, &label);
+        } else {
+            assert_eq!(x, want_x.to_bits(), "record {at}: argument");
+        }
         assert!(
             f32::from_bits(y).is_finite(),
             "function {function} at {x:#010x}"
+        );
+    }
+}
+
+// The C symbols `tests/mutations/run.py` recomputes the canaries through (`LIBM_F32`).
+unsafe extern "C" {
+    safe fn expf(x: f32) -> f32;
+    safe fn tanhf(x: f32) -> f32;
+    safe fn log1pf(x: f32) -> f32;
+    safe fn asinhf(x: f32) -> f32;
+}
+
+/// The runner's f32 gate recomputes the canaries through the C symbols,
+/// `common::f32_libm_strict` through `f32`'s methods: the two read one verdict only
+/// while each method is its symbol, which the toolchain's `std` decides. On every host,
+/// at every canary argument.
+#[test]
+fn the_f32_canary_functions_are_the_c_symbols() {
+    let symbols: [extern "C" fn(f32) -> f32; 4] = [expf, tanhf, log1pf, asinhf];
+    for (function, x, _) in read_libm_f32_canaries() {
+        let x = f32::from_bits(x);
+        let c = symbols[function as usize](std::hint::black_box(x));
+        assert_eq!(
+            libm_f32(function, x).to_bits(),
+            c.to_bits(),
+            "function {function} at {x:e}"
         );
     }
 }
@@ -338,6 +373,10 @@ fn the_f32_canaries_are_the_drawn_arguments() {
 #[test]
 #[ignore = "fixture writer: run once on the oracle libm host, see its doc"]
 fn write_f32_libm_canaries() {
+    assert!(
+        matches!(oracle_mode(), OracleMode::Strict),
+        "the f32 canaries are recorded on the oracle libm host"
+    );
     let path = repo().join("tests/reference_data").join(LIBM_F32_CANARIES);
     assert!(
         !path.exists(),
