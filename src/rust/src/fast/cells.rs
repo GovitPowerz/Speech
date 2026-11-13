@@ -116,6 +116,7 @@ use anyhow::{Result, bail};
 use crate::config::NnetSpec;
 use crate::nn::blstm::{BlstmConfig, CellType, CfcParams, MambaParams, TransformerParams};
 
+use super::kernels::{k_major, matvec_add_into, matvec_into};
 use super::nn::{
     DenseRowChain, FastDenseLayer, FastMatrix, Scratch, asinh_f32, copy_view_into, ensure_len,
     gates_fn_f32, logistic_f32, sub_sample_into,
@@ -1085,28 +1086,27 @@ impl PartialEq for LstmState {
 /// depends on the ROW COUNT `m` once the weight matrix has more than one column
 /// (measured in Task 7 of phase 9 -- see [`super::nn::DenseRowChain`]), so a batched
 /// projection makes the offline and streamed numbers differ in the last f32 ULP at
-/// re-chunked granularities. Every projection here is therefore a per-step ascending
-/// [`dot_f32`] over a CONTIGUOUS weight row, from day one, exactly like [`FastSlstm`],
-/// [`FastMamba`] and [`FastCfc`].
+/// re-chunked granularities. Every projection here is therefore a per-step product
+/// through [`super::kernels`], whose per-output result has no row count to depend on,
+/// exactly like [`FastSlstm`], [`FastMamba`] and [`FastCfc`].
 ///
-/// Weight buffers, all narrowed `f64 -> f32` ONCE at [`Self::from_flat`] and laid out so
-/// that "one output element" is "one contiguous slice".
+/// Weight buffers, all narrowed `f64 -> f32` ONCE at [`Self::from_flat`].
 /// `nn::layers::LstmLayer::set_weights` reads `input_weights` (`I x 4O`) and `feedback_weights`
 /// (`O x 4O`) in COLUMN-major element order, and a gate COLUMN is `(a*O + j)` for gate
-/// block `a` and unit `j` -- so the flat pack ALREADY delivers each output element's
-/// weights contiguously and `from_flat` is a straight narrowing copy, not a transpose:
+/// block `a` and unit `j` -- so the flat pack delivers each output element's weights
+/// contiguously, and `from_flat` transposes both blocks to the kernel's K-MAJOR layout
+/// (one row of the `4O` gate outputs per input index, issue #147):
 ///
 /// | buffer | index | holds |
 /// |---|---|---|
-/// | `inp` | `(a*O + j)*I + k` | `input_weights[k, a*O + j]` |
-/// | `rec` | `(a*O + j)*O + k` | `feedback_weights[k, a*O + j]` |
+/// | `inp` | `k*4O + (a*O + j)` | `input_weights[k, a*O + j]` |
+/// | `rec` | `k*4O + (a*O + j)` | `feedback_weights[k, a*O + j]` |
 /// | `peep` | `r*O + j` | `peep_weight[r, j]`, `r` in `0..12` |
 /// | `bias` | `a*O + j` | `biases[0, a*O + j]` |
 ///
-/// `peep` is the ONE block that is transposed: the pack carries the `12 x O` bundle
-/// column-major (12 contiguous values per unit), and the step reads it ROW-major (one
-/// peephole family across all units), which is the [`super::nn::FastLstmLayer`] choice
-/// verbatim.
+/// `peep` is transposed too: the pack carries the `12 x O` bundle column-major (12
+/// contiguous values per unit), and the step reads it ROW-major (one peephole family
+/// across all units), which is the [`super::nn::FastLstmLayer`] choice verbatim.
 ///
 /// THE CELLWEIGHT-NARROW ASYMMETRY IS UPSTREAM OF THIS TYPE, and that is worth stating
 /// because the hazard list flags it as easy to over-generalize: the `g`/cell gate carries
@@ -1124,8 +1124,8 @@ pub struct FastLstm {
     cells_peep: bool,
     gates_peep: bool,
     gates_rec_peep: bool,
-    inp: Vec<f32>,  // 4O x I, row-major by output index
-    rec: Vec<f32>,  // 4O x O, row-major by output index
+    inp: Vec<f32>,  // I x 4O, k-major
+    rec: Vec<f32>,  // O x 4O, k-major
     peep: Vec<f32>, // 12 x O, row-major
     bias: Vec<f32>, // 4O
 }
@@ -1167,8 +1167,8 @@ impl FastLstm {
             seg
         };
 
-        let inp = narrow(take(4 * o * i));
-        let rec = narrow(take(4 * o * o));
+        let inp = k_major(&narrow(take(4 * o * i)), 4 * o, i);
+        let rec = k_major(&narrow(take(4 * o * o)), 4 * o, o);
         // The bundle arrives COLUMN-major (`seg[j*12 + r]`); store it ROW-major.
         let peep_seg = take(12 * o);
         let mut peep = vec![0.0_f32; 12 * o];
@@ -1232,9 +1232,8 @@ impl FastLstm {
     /// not two adds):
     ///
     /// 1. per gate element: input projection (ascending `k`), `+ bias`, `+ recurrence`
-    ///    (ascending `k`) -- the fused-per-element form of the exact path's three separate
-    ///    passes, which is bit-identical because gate elements are independent of each
-    ///    other at this stage;
+    ///    (ascending `k`, summed from `+0.0` on its own and added once) -- the exact
+    ///    path's three passes, all `4O` gate elements side by side;
     /// 2. peepholes into `i` and `f`, IN THE EXACT ORDER: cells (rows 0, 1) ->
     ///    gates-recurrent (rows 3, 7) -> gates, each ONE combined expression
     ///    (`i += f_{t-1}*P4 + o_{t-1}*P5`, `f += i_{t-1}*P6 + o_{t-1}*P8`);
@@ -1279,14 +1278,11 @@ impl FastLstm {
         let xs = &x[..k_in];
 
         // 1. proj + bias + recurrence, per gate element (`:313-319` + `:351`).
+        matvec_into(&mut pre[..four_o], &self.inp, xs);
         for jj in 0..four_o {
-            let bi = jj * i;
-            let mut acc = dot_f32(&self.inp[bi..bi + k_in], xs);
-            acc += self.bias[jj];
-            let br = jj * o;
-            acc += dot_f32(&self.rec[br..br + o], &h[..o]);
-            pre[jj] = acc;
+            pre[jj] += self.bias[jj];
         }
+        matvec_add_into(&mut pre[..four_o], &self.rec, &h[..o]);
 
         let p = &self.peep;
         // 2a. cells peep into i, f (rows 0, 1) -- `:353-356`.
@@ -3040,16 +3036,17 @@ mod tests {
             let cell = FastLstm::from_flat(&flat, i, o, LSTM_PEEP);
 
             let mut rebuilt = Vec::with_capacity(n);
-            // Block 1: InputWeights (I x 4O) COLUMN-major -> `inp[(a*O+j)*I + k]`.
+            // Block 1: InputWeights (I x 4O) COLUMN-major -> `inp[k*4O + (a*O+j)]`
+            // (k-major since issue #147).
             for col in 0..4 * o {
                 for k in 0..i {
-                    rebuilt.push(cell.inp[col * i + k]);
+                    rebuilt.push(cell.inp[k * 4 * o + col]);
                 }
             }
-            // Block 2: FeedbackWeights (O x 4O) COLUMN-major -> `rec[(a*O+j)*O + k]`.
+            // Block 2: FeedbackWeights (O x 4O) COLUMN-major -> `rec[k*4O + (a*O+j)]`.
             for col in 0..4 * o {
                 for k in 0..o {
-                    rebuilt.push(cell.rec[col * o + k]);
+                    rebuilt.push(cell.rec[k * 4 * o + col]);
                 }
             }
             // Block 3: PeepWeight (12 x O) COLUMN-major -> `peep[r*O + j]` (transposed).

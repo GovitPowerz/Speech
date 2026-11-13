@@ -60,10 +60,6 @@ pub(crate) fn k_major(w: &[f32], outputs: usize, inputs: usize) -> Vec<f32> {
 /// leading rows are read, the width-tolerance crop (fewer terms, the same chain).
 /// `out` is overwritten.
 #[inline]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "first caller: the causal cells, next commit")
-)]
 pub(crate) fn matvec_into(out: &mut [f32], wt: &[f32], x: &[f32]) {
     chains::<false>(out, wt, x);
 }
