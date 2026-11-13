@@ -448,9 +448,9 @@ paths are actually invoked elsewhere in this repo -- Image mode, backprop off), 
 the exact path has no backward-shaped allocations at all.
 
 The table below is RENDERED from the ledger (ADR-0009): every row is the latest three-process
-measurement per (leg, path, host), taken 2026-11-12 on `ed74b9d` (the same Apple M4 Pro, rustc
-1.99.1, on battery) through `python -m speech.ledger bench --leg <name>`, after the exact FFT's
-seed table of issue #145. The README and ARCHITECTURE prose quote its ratios and the 60 s leg's peak RSS (the
+measurement per (leg, path, host), taken 2026-11-13 on `470463f` (the same Apple M4 Pro, rustc
+1.100.0, on AC power) through `python -m speech.ledger bench --leg <name>`, after the fast
+tree's block kernel of issue #147. The README and ARCHITECTURE prose quote its ratios and the 60 s leg's peak RSS (the
 `maxrss_mib` column), and `speech.ledger.prose` asserts them. Peak RSS is a cost figure like
 the walls, not a metric under the ADR-0003 STOP rule.
 
@@ -460,25 +460,43 @@ refers to the ORIGINAL 2026-07 one (SAD 4.58-4.60x, LID 3.53-3.57x, macOS 26.5.2
 slower) and the ratios to SAD 4.93x / LID 3.43-3.63x, with a 60 s peak RSS of 43.5 / 57.2 MiB
 (41.95 / 56.52 in the Phase 10 Task 5 table below); its records stay in the ledger. A third,
 the 2026-11-12 re-measure on `d83b111` after the exact kernels of issue #144, read SAD
-3.70-3.71x / LID 1.86-2.18x with a 60 s peak RSS of 42.6 / 56.1 MiB. The two tables after the
-rendered one compare each with its successor.
+3.70-3.71x / LID 1.86-2.18x with a 60 s peak RSS of 42.6 / 56.1 MiB. A fourth, the same day's
+re-measure on `ed74b9d` after the exact FFT's seed table of issue #145, read SAD 2.76-2.77x /
+LID 1.92-2.19x with a 60 s peak RSS of 41.9 / 55.3 MiB. The three tables after the rendered one
+compare each with its successor.
 
 <!-- ledger:table phase7_bench_matrix -->
 | leg | audio_s | path | wall_s (mean [range], n) | rtf | maxrss_mib | MiB/audio-s | speedup (wall, fast vs exact) |
 |---|---|---|---|---|---|---|---|
-| SAD 60 s fixture (stereo) | 120.00 | exact | 0.1541 [0.1481-0.1649] (n=3) | 0.001284 | 55.302 | 0.4609 | baseline |
-| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0558 [0.0554-0.0561] (n=3) | 0.000465 | 41.932 | 0.3494 | 2.76x |
-| SAD corpus-gated (mono) | 75.00 | exact | 0.0974 [0.0931-0.1058] (n=3) | 0.001299 | 52.615 | 0.7015 | baseline |
-| SAD corpus-gated (mono) | 75.00 | fast | 0.0351 [0.0351-0.0353] (n=3) | 0.000469 | 37.161 | 0.4955 | 2.77x |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0245 [0.0243-0.0246] (n=3) | 0.000575 | 29.688 | 0.6979 | baseline |
-| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0128 [0.0126-0.0129] (n=3) | 0.000300 | 17.062 | 0.4011 | 1.92x |
-| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0213 [0.0212-0.0214] (n=3) | 0.000651 | 19.693 | 0.6031 | baseline |
-| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0097 [0.0097-0.0098] (n=3) | 0.000298 | 11.917 | 0.3650 | 2.19x |
+| SAD 60 s fixture (stereo) | 120.00 | exact | 0.1521 [0.1503-0.1550] (n=3) | 0.001267 | 55.615 | 0.4635 | baseline |
+| SAD 60 s fixture (stereo) | 120.00 | fast | 0.0476 [0.0466-0.0486] (n=3) | 0.000397 | 42.073 | 0.3506 | 3.19x |
+| SAD corpus-gated (mono) | 75.00 | exact | 0.0964 [0.0947-0.0979] (n=3) | 0.001286 | 52.719 | 0.7029 | baseline |
+| SAD corpus-gated (mono) | 75.00 | fast | 0.0298 [0.0295-0.0302] (n=3) | 0.000397 | 37.073 | 0.4943 | 3.23x |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | exact | 0.0253 [0.0245-0.0266] (n=3) | 0.000594 | 29.672 | 0.6975 | baseline |
+| LID phSeq corpus-gated (Twin M7) | 42.54 | fast | 0.0097 [0.0096-0.0097] (n=3) | 0.000227 | 17.005 | 0.3997 | 2.61x |
+| LID cep corpus-gated (Twin M7) | 32.65 | exact | 0.0219 [0.0215-0.0223] (n=3) | 0.000670 | 19.656 | 0.6020 | baseline |
+| LID cep corpus-gated (Twin M7) | 32.65 | fast | 0.0077 [0.0076-0.0078] (n=3) | 0.000236 | 11.870 | 0.3635 | 2.84x |
 
 Hosts: Apple M4 Pro (arm64, 14 cores, Darwin 25.6.0).
 <!-- ledger:end -->
 
-Against the `d83b111` records of the same day, before the seed table of issue #145 (mean wall
+Against the `ed74b9d` records of the day before, before the fast kernels of issue #147 (mean
+wall of three processes, seconds):
+
+| leg | exact, before -> after | fast, before -> after | speedup, before -> after |
+|---|---|---|---|
+| SAD 60 s fixture (stereo) | 0.1541 -> 0.1521 (-1.3%) | 0.0558 -> 0.0476 (-14.7%) | 2.76x -> 3.19x |
+| SAD corpus-gated (mono) | 0.0974 -> 0.0964 (-1.0%) | 0.0351 -> 0.0298 (-15.1%) | 2.77x -> 3.23x |
+| LID phSeq corpus-gated (Twin M7) | 0.0245 -> 0.0253 (+3.3%) | 0.0128 -> 0.0097 (-24.2%) | 1.92x -> 2.61x |
+| LID cep corpus-gated (Twin M7) | 0.0213 -> 0.0219 (+2.8%) | 0.0097 -> 0.0077 (-20.6%) | 2.19x -> 2.84x |
+
+The exact column is the control: the exact tree did not change, and its walls read within 3.3%
+of the previous day's. The ratios rose because the fast walls fell. Every leg runs the
+bidirectional LSTM twin, whose recurrence is the changed code; the LID legs gain more because
+Mode 7 builds no periodogram, so the net is a larger share of their wall. The section "Issue
+#147" at the end of this file has the criterion targets and the proof that no value moved.
+
+Against the `d83b111` records of 2026-11-12, before the seed table of issue #145 (mean wall
 of three processes, seconds):
 
 | leg | exact, before -> after | fast, before -> after | speedup, before -> after |
@@ -4816,8 +4834,37 @@ eighth catcher and `requires: oracle-libm`; off that host its seven `MISSED` rea
 Four older patches were re-targeted in the commit that moved their context: `phase7/1`,
 `phase9/7`, `phase10/6` and `phase10/8b`.
 
+### The bench legs
+
+Three fresh processes per leg and path on `470463f`, Apple M4 Pro on AC power, a quiet machine.
+Every row is a ledger record; "before" is each leg's previous record, of 2026-11-12 on
+`ed74b9d`.
+
+| leg | exact wall, before -> after | fast wall, before -> after | speedup, before -> after |
+|---|---|---|---|
+| SAD 60 s fixture (stereo) | 0.1541 s -> 0.1521 s (-1.3%) | 0.0558 s -> 0.0476 s (-14.7%) | 2.76x -> 3.19x |
+| SAD corpus-gated (mono) | 0.0974 s -> 0.0964 s (-1.0%) | 0.0351 s -> 0.0298 s (-15.1%) | 2.77x -> 3.23x |
+| LID phSeq (Twin M7) | 0.0245 s -> 0.0253 s (+3.3%) | 0.0128 s -> 0.0097 s (-24.2%) | 1.92x -> 2.61x |
+| LID cep (Twin M7) | 0.0213 s -> 0.0219 s (+2.8%) | 0.0097 s -> 0.0077 s (-20.6%) | 2.19x -> 2.84x |
+
+- **The control.** The exact tree did not change; its walls read within 3.3% of the previous
+  records, so the fast columns are the change.
+- **The SAD walls fell 15%** where the grilling projected 20 to 25%. The projection took the
+  35% of the wall the profile put in `lstm_layer_forward` as mostly recurrence; the net-level
+  target measures the whole forward at -31% (`fast_blstm_fwd_v1`), and that forward is about
+  half of the fast SAD wall.
+- **The LID walls fell 21 to 24%**: Mode 7 builds no periodogram, so the net is a larger share.
+- **Peak RSS** is unchanged: 42.1 MiB fast against 55.6 exact on the 60 s leg (41.9 / 55.3).
+- **The local wall bounds** (SAD >= 2.1x, the LID bound) hold with the ratios rising and are
+  not re-derived.
+- **A first run of the four legs was discarded, not promoted.** An unrelated compiler job was
+  running on the machine: the exact walls, the control, read 5 to 10% above their previous
+  records. The legs were re-run once the machine was quiet.
+
 ### Deviations from the grilling outcome
 
+- **No supersession stamp.** The outcome named `--supersede`; it exists for baseline records,
+  and a bench table renders each leg's latest records. The earlier records stay.
 - **The fixtures are narrower than decided.** The outcome pinned every fixture row bit-exactly
   on the oracle host. The review found the Phase 10 declination of exactly that; the rows
   downstream of faer are now under the hybrid bound everywhere (above).
