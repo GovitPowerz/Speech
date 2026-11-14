@@ -40,8 +40,8 @@ spells it out and the bundle is scattered by its named `columns`. Every committe
 regenerates byte-identical through this (`tests/test_seed_pack_regeneration.py`, manifest-
 driven); a change to any draw count or order fails there first.
 
-Returns one flat pack per net (a 1-element list, matching `speech_rs.Engine.set_weights(pos,
-nets)`'s `Vec<Vec<f64>>` contract); the algo-6 Twin's `[sad, lid]` pair is built by calling
+Returns one flat pack per net (a 1-element list of contiguous float64 arrays, matching
+`speech_rs.Engine.set_weights(pos, nets)`'s contract); the algo-6 Twin's `[sad, lid]` pair is built by calling
 `init_weights` once per prefix on one shared `Generator`, in that order.
 """
 

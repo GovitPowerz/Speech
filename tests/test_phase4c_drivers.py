@@ -224,7 +224,7 @@ def _fake_speech_rs(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
             seen["config"] = dict(configs[0])
             return Engine()
 
-        def set_weights(self, conf: int, nets: list[list[float]]) -> None:
+        def set_weights(self, conf: int, nets: list[np.ndarray]) -> None:
             seen["weights"] = [list(n) for n in nets]
 
         def run(self) -> None:

@@ -274,11 +274,10 @@ impl Engine {
 
     /// Run the corpus fold / epoch loop. The engine can take minutes, so the
     /// GIL is released for its duration via `Python::detach` (pyo3 0.28's
-    /// renamed `allow_threads`); the error chain is formatted (`{:#}`) inside
-    /// the closure so nothing GIL-bound escapes it.
+    /// renamed `allow_threads`); the `anyhow` error is `Send`, so it crosses
+    /// back out of the closure and `to_pyerr` formats it with the GIL held.
     fn run(&mut self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.inner.run().map_err(|e| format!("{e:#}")))
-            .map_err(PyRuntimeError::new_err)
+        py.detach(|| self.inner.run()).map_err(to_pyerr)
     }
 
     /// The post-`transformResults` combined result matrix (`ResultsE`): rows
@@ -420,7 +419,7 @@ impl Engine {
     /// algo 3/4/5; algo 0/1/2 (no NN) is a no-op. COPY: each pack is a
     /// contiguous 1-D float64 numpy array, copied once into an owned `Vec<f64>`
     /// on the way in (issue #153); a list of floats or another dtype is a
-    /// `TypeError`, a strided view a `RuntimeError`. An out-of-range `pos` is
+    /// `TypeError`, a strided or misaligned view a `RuntimeError`. An out-of-range `pos` is
     /// an `IndexError`; a list whose length is not the config's net count is a
     /// `RuntimeError` raised before any pack is applied (issue #60).
     fn set_weights(&mut self, pos: usize, nets: Vec<PyReadonlyArray1<'_, f64>>) -> PyResult<()> {
@@ -468,12 +467,8 @@ impl Engine {
         max_weights: usize,
     ) -> PyResult<Vec<(usize, Bound<'py, PyDict>)>> {
         let reports = py
-            .detach(|| {
-                self.inner
-                    .grad_check(epsilon, max_weights)
-                    .map_err(|e| format!("{e:#}"))
-            })
-            .map_err(PyRuntimeError::new_err)?;
+            .detach(|| self.inner.grad_check(epsilon, max_weights))
+            .map_err(to_pyerr)?;
         let mut out = Vec::with_capacity(reports.len());
         for (net_idx, r) in reports {
             let n = r.per_weight.len();
