@@ -8,6 +8,10 @@ wrong-length pack list as Python exceptions, never a `pyo3_runtime.PanicExceptio
     pack is applied (the exact engine's packs are byte-equal before and after).
   * The exact and fast trees word the same misuse identically.
 
+Issue #153: a pack crosses as a contiguous 1-D float64 array; a list of floats or another
+dtype is a `TypeError` raised on the `nets` argument, a strided view a `RuntimeError`, and the
+engine's pack is unchanged after either.
+
 The Twin rows run on the phase-9 Mode-7 sLSTM LID fixture, the single-net rows on the phase-9
 forward sLSTM SAD fixture, both seeded into a tmp dir and built through `Engine.from_map`
 with the backprop flags off (the fast bag refuses a training-shaped map).
@@ -101,3 +105,24 @@ def test_right_pack_count_still_sets(tmp_path: Path) -> None:
     sad, lid = _packs(tmp_path, TWIN)
     eng.set_weights(0, [sad * 0.5, lid])
     assert np.array_equal(eng.weights(0)[0], sad * 0.5)
+
+
+# Issue #153: a pack crosses the seam as a contiguous float64 array, copied once. Anything the
+# binding would have to convert element by element is refused, and the engine's pack is unmoved.
+_REFUSED_PACK = {
+    "float_list": (lambda p: p.tolist(), TypeError, "argument 'nets'"),
+    "float32": (lambda p: p.astype(np.float32), TypeError, "argument 'nets'"),
+    "strided": (lambda p: np.repeat(p, 2)[::2], RuntimeError, "contiguous 1-D float64"),
+}
+
+
+@pytest.mark.parametrize("leg", sorted(_REFUSED_PACK))
+def test_set_weights_takes_contiguous_float64_arrays_only(tmp_path: Path, leg: str) -> None:
+    convert, error, match = _REFUSED_PACK[leg]
+    _seed(tmp_path, SINGLE)
+    eng = _engine(tmp_path, SINGLE, "exact")
+    (pack,) = _packs(tmp_path, SINGLE)
+    before = eng.weights(0)[0].copy()
+    with pytest.raises(error, match=match):
+        eng.set_weights(0, [convert(pack * 0.5)])
+    assert np.array_equal(eng.weights(0)[0], before), "a refused pack leaves the engine's pack unchanged"

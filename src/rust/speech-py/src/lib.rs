@@ -274,11 +274,10 @@ impl Engine {
 
     /// Run the corpus fold / epoch loop. The engine can take minutes, so the
     /// GIL is released for its duration via `Python::detach` (pyo3 0.28's
-    /// renamed `allow_threads`); the error chain is formatted (`{:#}`) inside
-    /// the closure so nothing GIL-bound escapes it.
+    /// renamed `allow_threads`); the `anyhow` error is `Send`, so it crosses
+    /// back out of the closure and `to_pyerr` formats it with the GIL held.
     fn run(&mut self, py: Python<'_>) -> PyResult<()> {
-        py.detach(|| self.inner.run().map_err(|e| format!("{e:#}")))
-            .map_err(PyRuntimeError::new_err)
+        py.detach(|| self.inner.run()).map_err(to_pyerr)
     }
 
     /// The post-`transformResults` combined result matrix (`ResultsE`): rows
@@ -417,13 +416,24 @@ impl Engine {
     }
 
     /// Seed config-`pos`'s network(s): `[sad, lid]` for algo 6, `[flat]` for
-    /// algo 3/4/5; algo 0/1/2 (no NN) is a no-op. COPY: each numpy array (or
-    /// list) is read into an owned `Vec<f64>` on the way in. An out-of-range
-    /// `pos` is an `IndexError`; a list whose length is not the config's net
-    /// count is a `RuntimeError` raised before any pack is applied (issue #60).
-    fn set_weights(&mut self, pos: usize, nets: Vec<Vec<f64>>) -> PyResult<()> {
+    /// algo 3/4/5; algo 0/1/2 (no NN) is a no-op. COPY: each pack is a
+    /// contiguous 1-D float64 numpy array, copied once into an owned `Vec<f64>`
+    /// on the way in (issue #153); a list of floats or another dtype is a
+    /// `TypeError`, a strided or misaligned view a `RuntimeError`. An out-of-range `pos` is
+    /// an `IndexError`; a list whose length is not the config's net count is a
+    /// `RuntimeError` raised before any pack is applied (issue #60).
+    fn set_weights(&mut self, pos: usize, nets: Vec<PyReadonlyArray1<'_, f64>>) -> PyResult<()> {
         self.check_pos(pos)?;
-        self.inner.set_weights(pos, &nets).map_err(to_pyerr)
+        let owned = nets
+            .iter()
+            .map(|net| net.as_slice().map(<[f64]>::to_vec))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                PyRuntimeError::new_err(format!(
+                    "each pack must be a contiguous 1-D float64 array: {e}"
+                ))
+            })?;
+        self.inner.set_weights(pos, &owned).map_err(to_pyerr)
     }
 
     /// Config-`pos`'s per-network `Nx2` derivative matrices (col 0 summed deriv,
@@ -447,16 +457,17 @@ impl Engine {
     /// `(network_index, {mean_error, mean_relative_error, per_weight})` per
     /// backprop-active network of config 0, ascending index. `per_weight` is an
     /// `Nx3` array of `(backprop_normalized, numerical, abs_diff)` rows. COPY:
-    /// the report triples are packed into a fresh `Nx3` numpy array.
+    /// the report triples are packed into a fresh `Nx3` numpy array. The sweep
+    /// is `1 + 2 * min(N, max_weights)` corpus folds per network, so the GIL
+    /// is released for it as `run` releases it (issue #152).
     fn grad_check<'py>(
         &mut self,
         py: Python<'py>,
         epsilon: f64,
         max_weights: usize,
     ) -> PyResult<Vec<(usize, Bound<'py, PyDict>)>> {
-        let reports = self
-            .inner
-            .grad_check(epsilon, max_weights)
+        let reports = py
+            .detach(|| self.inner.grad_check(epsilon, max_weights))
             .map_err(to_pyerr)?;
         let mut out = Vec::with_capacity(reports.len());
         for (net_idx, r) in reports {
