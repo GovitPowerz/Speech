@@ -18,7 +18,7 @@ import pytest
 from pydantic import ValidationError
 from speech.ledger import cli, prose, schema
 from speech.ledger.bench import BINARY, bench_json, lanes_of, wrap
-from speech.ledger.render import RESULTS, render_file, render_text, table_names
+from speech.ledger.render import BEGIN, RESULTS, render_file, render_text
 from speech.ledger.schema import LEDGER_DIR, BaselinePayload, BaselineRecipe, BaselineRecord, BenchPayload, BenchRecipe, BenchRecord, Build, CollarScore, Host
 from speech.ledger.stage import FOLD_FILES, FOLD_LEGS, LEGS, sorted_first, stage_fixture_60s
 from speech.ledger.tables import TABLES, _matrix, bench_cells, current_baselines, speedups
@@ -31,6 +31,10 @@ REPO = Path(__file__).resolve().parents[1]
 T0 = datetime(2026, 10, 2, 12, 0, 0, tzinfo=UTC)
 BUILD = Build(profile="release", target="aarch64-apple-darwin", rustc="rustc 1.99.0 (b940084d7 2026-09-28)")
 HOST = Host(chip="Apple M4 Pro", arch="arm64", cores=14, os="Darwin 25.6.0")
+
+
+def _table_names(text: str) -> list[str]:
+    return [m.group("name") for line in text.splitlines() if (m := BEGIN.match(line))]
 
 
 def _collars(dcf: float, pmiss: float, pfa: float) -> list[CollarScore]:
@@ -408,7 +412,7 @@ def test_render_text_rewrites_between_markers_and_rejects_bad_markers() -> None:
     out = render_text(text, [lid_gate()])
     assert out.startswith("intro\n<!-- ledger:table phase6_lid_features -->\n| split |") and out.endswith("<!-- ledger:end -->\noutro\n")
     assert "| stale |" not in out
-    assert table_names(text) == ["phase6_lid_features"]
+    assert _table_names(text) == ["phase6_lid_features"]
     with pytest.raises(ValueError, match="no ledger table named"):
         render_text("<!-- ledger:table nope -->\n<!-- ledger:end -->\n", [])
     with pytest.raises(ValueError, match="no end marker"):
@@ -577,7 +581,7 @@ def test_every_committed_record_validates_and_is_a_release_build() -> None:
 
 
 def test_results_md_holds_what_the_ledger_renders() -> None:
-    names = table_names(RESULTS.read_text(encoding="utf-8"))
+    names = _table_names(RESULTS.read_text(encoding="utf-8"))
     assert set(names) == set(TABLES), f"every renderer has a marker and every marker a renderer: {sorted(set(names) ^ set(TABLES))}"
     assert render_file(RESULTS, LEDGER_DIR, check=True) == "", "RESULTS.md is stale; run: python -m speech.ledger render"
 

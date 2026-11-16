@@ -96,7 +96,7 @@ from rich.console import Console
 
 from speech.batching import read_listing
 from speech.config_bridge import CELL_TYPES, DIRECTIONS
-from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing
+from speech.dataprep.lre import LRE03_LANGUAGES, derive_sad_listings, localize_listing, write_lre_mapping
 from speech.drivers.spec import ARM_CONFIG, BaselineSpec, listing_hash
 from speech.drivers.state import ModernRun, ModernTrainParams, ModernTrainResult
 from speech.drivers.train import train_modern
@@ -296,13 +296,6 @@ def _write_listing_rows(path: Path, records: Sequence[dict[str, str]]) -> None:
     """Write records as the 6-field `;`-separated fileslisting the engine parses
     (`filename;refseg;lang;dial;weight;file_id;`)."""
     path.write_text("".join(f"{r['filename']};{r['refseg']};{r['lang']};{r['dial']};{r.get('weight', '1.0')};{r.get('file_id', '1.0')};\n" for r in records))
-
-
-def write_lre_mapping_12(path: Path) -> None:
-    """The 12-class `language2classmapping` (alphabetical, class 0..11, dialect `non`) --
-    identical output to `dataprep.lre.write_lre_mapping`, inlined here against the same
-    `_LANGS` order so the driver has no import-order coupling to that module's constant."""
-    path.write_text("".join(f"{lang};non;{i}\n" for i, lang in enumerate(_LANGS)))
 
 
 def assemble_flat_config(
@@ -814,7 +807,7 @@ class LidArm:
         for name, rows in zip(names, (train, valid, test), strict=True):
             _write_listing_rows(out_dir / name, rows)
         mapping_name = "language2classmapping_lre12.csv"
-        write_lre_mapping_12(out_dir / mapping_name)
+        write_lre_mapping(out_dir / mapping_name)
         return Splits(train, valid, test, *names, mapping_name, n_classes=len(_LANGS))
 
     def assemble(self, flat: dict[str, str], splits: Splits, spec: BaselineSpec, extra: dict[str, str]) -> dict[str, str]:

@@ -211,17 +211,6 @@ def test_phseq_prefix_map_bijects_onto_the_12_classes() -> None:
     assert B._PHSEQ_PREFIX_TO_LANG["ma"] == "chi", "Mandarin prefix 'ma' maps to the LRE03 'chi' tag"
 
 
-def test_write_lre_mapping_12_alphabetical(tmp_path: Path) -> None:
-    path = tmp_path / "map.csv"
-    B.write_lre_mapping_12(path)
-    lines = [ln for ln in path.read_text().splitlines() if ln]
-    assert len(lines) == 12
-    assert lines[0] == "ara;non;0" and lines[-1] == "vie;non;11"
-    # class ids are 0..11 in alphabetical language order (the _class_keys / engine convention).
-    for i, ln in enumerate(lines):
-        assert ln.split(";")[2] == str(i)
-
-
 # --------------------------------------------------------------------------------------- #
 # CLI arg wiring + flag plumbing (run_baseline monkeypatched -- no engine)
 # --------------------------------------------------------------------------------------- #
