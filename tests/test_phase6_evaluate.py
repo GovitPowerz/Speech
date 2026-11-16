@@ -11,7 +11,7 @@ underlying accumulation is bit-identical to the perl's (no value sits within tha
 of a different true result, so the rounding never masks a real difference). CI never runs the
 perl; it only consumes these goldens.
 
-The `load_tab_ref` / `load_vrcts_hyp` adapters are pinned separately on crafted inputs.
+The `load_vrcts_hyp` adapter is pinned separately on crafted inputs.
 """
 
 from __future__ import annotations
@@ -31,7 +31,6 @@ from speech.evaluate import (
     dcf,
     hyp_intervals,
     lid_error,
-    load_tab_ref,
     load_vrcts_hyp,
     load_vrcts_ref,
     read_scr_scores,
@@ -131,28 +130,6 @@ def test_dcf_hyp_padded_when_shorter_than_ref() -> None:
 
 def test_dcf_report_type() -> None:
     assert isinstance(dcf([(0.0, 1.0, "S")], [(0.0, 1.0, "speech")]), DcfReport)
-
-
-# --- load_tab_ref adapter -------------------------------------------------------------
-
-
-def test_load_tab_ref_computedcf_columns(tmp_path: Path) -> None:
-    """The -s 2 -e 3 -g 4 layout: cols 0,1 are ignored, 2/3/4 are start/end/type."""
-    tab = tmp_path / "ref.tab"
-    tab.write_text("file\t1\t0.0\t2.0\tS\nfile\t1\t2.0\t4.0\tNS\nfile\t1\t4.0\t6.0\tRI\n")
-    assert load_tab_ref(tab) == [(0.0, 2.0, "S"), (2.0, 4.0, "NS"), (4.0, 6.0, "RI")]
-
-
-def test_load_tab_ref_custom_columns(tmp_path: Path) -> None:
-    tab = tmp_path / "ref.tab"
-    tab.write_text("0.0\t2.0\tNT\n")
-    assert load_tab_ref(tab, start_col=0, end_col=1, type_col=2) == [(0.0, 2.0, "NT")]
-
-
-def test_load_tab_ref_skips_blank_lines(tmp_path: Path) -> None:
-    tab = tmp_path / "ref.tab"
-    tab.write_text("file\t1\t0.0\t2.0\tS\n\nfile\t1\t2.0\t4.0\tNS\n")
-    assert load_tab_ref(tab) == [(0.0, 2.0, "S"), (2.0, 4.0, "NS")]
 
 
 # --- load_vrcts_hyp adapter -----------------------------------------------------------
