@@ -17,7 +17,6 @@ MODULES = [
     "speech.drivers.train",
     "speech.drivers.retrain",
     "speech.drivers.test",
-    "speech.dataprep.stm_normalize",
 ]
 
 
