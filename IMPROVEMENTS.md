@@ -3849,6 +3849,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   arithmetic pass, not a dump from any run), plus one real cross-check beyond pure
   transcription -- the emitted VRCTS XML is parsed by the engine's own `load_vrcts`.
   *Pinned by:* `tests/test_phase4d_opensad15.py` (27 cases) + `src/rust/tests/phase4d_opensad15_vrcts.rs`.
+  (Issue #157: `dataprep/opensad15.py` is retired with its tests and fixtures; no entry point
+  reached it.)
 - **[4d] OpenSAD15 `audiofile[:-5]` hard-coded 5-char extension strip**
   (`ProcessOpenSAD15Corpus.py:48,67,100`, ported as `_path_leaf(audio_path[:-5])`): the stem
   used for the XML `AudioDoc` name, the STM name field, and the lang fallback is derived by
@@ -3860,6 +3862,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `Path(audiofile).stem` after parity (the legacy's own docs corpus is `.flac`-only, so this
   never manifested there). *Pinned by:*
   `test_case5_extension_length_quirk_truncates_stem` (`tests/test_phase4d_opensad15.py`).
+  (Issue #157: `dataprep/opensad15.py` is retired with its tests and fixtures; no entry point
+  reached it.)
 - **[4d] OpenSAD15 `duration`/`lang` last-physical-row quirk (two instances, not one)**
   (`ProcessOpenSAD15Corpus.py:35-39`): inside the per-tab-row loop, `beg`/`endS`/`lang` are
   read from `tmp[2]`/`tmp[3]`/`tmp[8]` and `duration = endS` is assigned on EVERY row, BEFORE
@@ -3876,6 +3880,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   empty lang field (exercising both the duration quirk and the lang-fallback path in one
   fixture); case3's two rows carry deliberately DIFFERENT explicit lang codes to prove the
   physically-last row wins over the only speech row.
+  (Issue #157: `dataprep/opensad15.py` is retired with its tests and fixtures; no entry point
+  reached it.)
 - **[4d] OpenSAD15 `str(float)` is Python 2's 12-significant-digit format, not Python 3's
   shortest round-trip repr** (`ProcessOpenSAD15Corpus.py:53,57,61,100-102,106`, ported as
   `py2_str_float`): CPython 2.7's `float.__str__` formats via `PyOS_double_to_string(v, 'g',
@@ -3893,6 +3899,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `143.76000000000002` -> `"143.76"` example and both fixtures' actual noisy `spdur` values),
   `test_py2_str_float_nan_inf`, and `test_py2_str_float_differs_from_python3_str_on_noisy_case`
   (`tests/test_phase4d_opensad15.py`).
+  (Issue #157: `dataprep/opensad15.py` is retired with its tests and fixtures; no entry point
+  reached it.)
 - **[4d] OpenSAD15 `Pool(20).imap` -> sequential loop (determinism deviation)**
   (`ProcessOpenSAD15Corpus.py:131-135`, ported as `process_opensad15`'s plain `for line in
   lines` loop): the legacy parallelizes `treat_file` over a 20-worker pool and writes results
@@ -3904,6 +3912,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `test_process_opensad15_sequential_preserves_listing_order` (3-entry listing,
   deliberately out-of-alphabetical-order, asserts the output preserves exactly that order;
   `tests/test_phase4d_opensad15.py`).
+  (Issue #157: `dataprep/opensad15.py` is retired with its tests and fixtures; no entry point
+  reached it.)
 - **[4d] OpenSAD15 lang-fallback `IndexError` latent bug (discovered, not exercised by the
   golden cases)** (`ProcessOpenSAD15Corpus.py:66-67`: `lang = path_leaf(audiofile[:-5]).split
   ('_')[-2]`): when the last tab row's lang field is empty AND the (possibly `[:-5]`-corrupted,
@@ -3917,6 +3927,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   corpora. *Pinned by:*
   `test_lang_fallback_raises_indexerror_without_two_underscore_tokens`
   (`tests/test_phase4d_opensad15.py`).
+  (Issue #157: `dataprep/opensad15.py` is retired with its tests and fixtures; no entry point
+  reached it.)
 - **[4d] `process_opensad15`'s blank-listing-line guard: added as an undocumented
   defensive divergence, removed in Task 15 for legacy parity** (`ProcessOpenSAD15Corpus.py`'s
   `treat_file(line)`, the per-listing-line loop ported as `process_opensad15`): an earlier
@@ -3931,6 +3943,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `IndexError` above, not a fresh divergence. Removal was zero-test-breakage (no fixture ever
   fed a blank listing line). *Pinned by:*
   `test_process_opensad15_blank_listing_line_raises_indexerror` (`tests/test_phase4d_opensad15.py`).
+  (Issue #157: `dataprep/opensad15.py` is retired with its tests and fixtures; no entry point
+  reached it.)
 - **[4d] Corpus augmentation: injected RNG is a DOCUMENTED CONVENTION, not a parity claim**
   (`src/python/speech/dataprep/augment.py`, ported from `AugmentCorpus.py:46-57`): the legacy
   draws `noise`/`noisetype`/`pitch`/`tempo` from `numpy.random` seeded implicitly off the
@@ -3943,6 +3957,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   re-derivation off a freshly seeded generator, not a call into the function under test) and
   `test_draw_variant_noisetype_ladder` (4 brute-force-found seeds, one per ladder bucket)
   (`tests/test_phase4d_augment.py`).
+  (Issue #157: `dataprep/augment.py` is retired with its tests; no entry point reached it.)
 - **[4d] Corpus augmentation: hard-coded `noise.wav`/`mod.wav` scratch-file collision hazard**
   (`AugmentCorpus.py:39,58,60,63,66`, ported as the `_NOISE_SCRATCH`/`_MOD_SCRATCH` constants in
   `augment.py`): every sox invocation -- the per-file silence-strip duration probe AND all 5
@@ -3958,6 +3973,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   hazard note plus every `RecordingRunner`-based test in `tests/test_phase4d_augment.py` (the
   recorder's `duration()` intentionally cannot key readings by path -- only by call order --
   because the path is always the same overwritten `noise.wav`).
+  (Issue #157: `dataprep/augment.py` is retired with its tests; no entry point reached it.)
 - **[4d] Corpus augmentation: a short listing line (fewer than 6 `;`-fields) raises an unguarded
   `IndexError`** (`AugmentCorpus.py:69` indexes `elems[1]`..`elems[5]` directly; ported as-is at
   `augment.py`'s listing-row emission): the legacy crashes identically at the same read, so the
@@ -3967,6 +3983,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `tests/test_phase4d_augment.py::test_augment_corpus_short_line_raises_indexerror_on_gate_pass`
   (this bullet was added in the T16 final-review cleanup for consistency with the sibling
   precedent; the docstring + test landed with Task 6 itself).
+  (Issue #157: `dataprep/augment.py` is retired with its tests; no entry point reached it.)
 - **[4d] Corpus augmentation: `str(pitch)`/`str(tempo)`/`str(noise)` inside the sox COMMAND
   strings are Python 2's `str(float)`, reused from the OpenSAD15 `py2_str_float` helper**
   (`AugmentCorpus.py:60,63`, ported as `pitch_tempo_command`/`noise_synth_command` calling
@@ -3981,6 +3998,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `test_pitch_tempo_command_uses_py2_str_float_not_python3_str` (a noisy-past-12-sig-figs pitch
   value) and `test_variant_filename_uses_fixed_point_not_py2_str_float`
   (`tests/test_phase4d_augment.py`).
+  (Issue #157: `dataprep/augment.py` is retired with its tests; no entry point reached it.)
 - **[4d] `norm_stm_pk_cts_all_trans_03a.pl`'s number-normalization arm is a TYPED BAIL,
   `NormalizerUnavailable`, not a reproduction of a broken shell-out**
   (`src/python/speech/dataprep/stm_normalize.py::normalize_stm_full`, ported from
@@ -4001,6 +4019,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `test_full_content_line_raises_normalizer_unavailable`,
   `test_full_content_line_raise_carries_prefix_state`,
   `test_full_content_line_after_comments_still_raises` (`tests/test_phase4d_stm.py`).
+  (Issue #157: `dataprep/stm_normalize.py` is retired with its tests and Perl goldens; no entry
+  point reached it.)
 - **[4d] `normalize_stm_full`'s pure-regex PREFIX (:17-105) has NO live-oracle backing**
   (`stm_normalize.py::_full_prefix`): unlike `normalize_stm_light` (byte-oracle-verified
   end to end against the real perl script), the prefix computation this function performs
@@ -4011,6 +4031,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   a live run -- the weakest-tier piece of this otherwise byte-oracle-verified module.
   *Pinned by:* `test_full_content_line_raise_carries_prefix_state` (white-box, asserts a
   specific computed value by hand-derivation, not by oracle diff).
+  (Issue #157: `dataprep/stm_normalize.py` is retired with its tests and Perl goldens; no entry
+  point reached it.)
 - **[4d] `norm_stm_pk_cts_all_trans_03a.pl:49`'s `\[[rien]\]` filler rule is a BUG: a
   character class, not the literal word "rien"** (ported verbatim into
   `_FULL_PREFIX_SUBS`): `[rien]` inside the pattern is an UNESCAPED bracket expression --
@@ -4020,6 +4042,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   rule is unreachable in practice, see the two entries above, so the bug has zero
   observable effect in this port -- recorded for completeness since the brief asked for
   every perl-vs-python semantic surprise the oracle work exposed).
+  (Issue #157: `dataprep/stm_normalize.py` is retired with its tests and Perl goldens; no entry
+  point reached it.)
 - **[4d] `norm_stm_pkt_light.pl` vs `norm_stm_pk_cts_all_trans_03a.pl`: two silent
   cross-script divergences in otherwise-parallel code** (both scripts share the same
   head/text-split-then-substitution-cascade shape, but differ at two points): (1) the
@@ -4034,6 +4058,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   exercise the ALL-leading-spaces strip after substitutions widen the leading run).
   *Pinned by:* `test_full_content_line_raise_carries_prefix_state` (documents both
   divergences inline) plus the `light_*` byte-oracle fixtures (`tests/test_phase4d_stm.py`).
+  (Issue #157: `dataprep/stm_normalize.py` is retired with its tests and Perl goldens; no entry
+  point reached it.)
 - **[4d] FIX-WAVE (Task 7 review): `@line[0..5]` undef-padding vs Python slice
   truncation -- both normalizers' head split silently diverged on short lines**
   (`stm_normalize.py::normalize_stm_light` and `::normalize_stm_full`, both :19, ported
@@ -4070,6 +4096,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   plus twice across separate invocations to confirm determinism), and
   `test_full_short_line_head_is_padded_not_truncated` (hand-derived, exception-observed)
   (`tests/test_phase4d_stm.py`).
+  (Issue #157: `dataprep/stm_normalize.py` is retired with its tests and Perl goldens; no entry
+  point reached it.)
 - **[4d] `perl s///g`'s non-overlap semantics on the filler alternation rules --
   Python's `re.sub` reproduces it with NO special-casing, verified against the live
   oracle** (`norm_stm_pkt_light.pl:29,31`, ported as `_LIGHT_SUBS`' first two entries):
@@ -4088,6 +4116,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `test_light_filler_class1_adjacent_tokens_alternate`,
   `test_light_filler_class2_adjacent_tokens_alternate` (`tests/test_phase4d_stm.py`),
   cross-checked against `light_case2`'s byte-oracle fixture.
+  (Issue #157: `dataprep/stm_normalize.py` is retired with its tests and Perl goldens; no entry
+  point reached it.)
 - **[4d] `norm_stm_train_05a_p5_Quaero.sh` (the corpus-batch `.sh` driver around the 03a
   script) is NOT ported** (`legacy/norm_stm_train_05a_p5_Quaero.sh`, read-only reference):
   a bash wrapper that iterates a hard-coded set of `/users/vieru/...` corpus directories,
@@ -4101,6 +4131,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   type=am" -- since the 03a script's content-line arm is itself a permanent typed bail
   (see above), a ported driver would have nothing left to drive. Not transcribed; recorded
   here per the task brief's explicit ask to note it.
+  (Issue #157: `dataprep/stm_normalize.py` is retired with its tests and Perl goldens; no entry
+  point reached it.)
 - **[4d] `WriteListing.m`'s worker-shard `fliplr(length(index)-jj+1:-nbworker:1)`
   interleave leaves LEFTOVER files unevenly distributed across shards, front-loaded
   toward the LAST worker** (`src/python/speech/batching.py::write_listing`/
@@ -4572,14 +4604,16 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   ran once at the end, all green (see the Task 14 report,
   `.superpowers/sdd/task-14-report.md`, for exact commands/logs).
 
-  **Live since issue #76:** `tests/mutations/phase4d/` (6 patches, ids `1` to `4`, `6` and `8`;
+  **Live since issue #76:** `tests/mutations/phase4d/` (1 patch, id `8`;
   `uv run python tests/mutations/run.py phase4d`). Item 7 is retired: it weakened the test-side
   comparator of `tests/test_phase4d_parity.py::test_vrcts_structural_and_boundaries`, removed in
   6c6acdf with the 2015-parity gates. Item 5 is retired in issue #103 with the shard branch it
-  mutated (`_worker_positions` and its three catchers are gone). Every edit is the literal one,
-  recovered from the Task 14 session transcript; item 1 changes all six collar sites, the
+  mutated (`_worker_positions` and its three catchers are gone). Items 1 to 4 and 6 are retired
+  in issue #157 with the three corpus-preparation modules they mutated (`dataprep/opensad15.py`,
+  `stm_normalize.py` and `augment.py`; 18 verdicts). Every edit is the literal one,
+  recovered from the Task 14 session transcript; item 1 changed all six collar sites, the
   output-inert `:157` one included.
-  Item 2's "case4 fixture golden" is `test_convert_tab_file_matches_hand_computed_fixture[case4]`;
+  Item 2's "case4 fixture golden" was `test_convert_tab_file_matches_hand_computed_fixture[case4]`;
   item 5's two unnamed legs are the two `test_write_listing_worker_shards_*` tests the Task 14
   report names.
 

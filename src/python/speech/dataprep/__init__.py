@@ -1,1 +1,1 @@
-"""Corpus preparation: augmentation, OpenSAD15 conversion, STM normalization."""
+"""Corpus preparation: the LRE03/07 listing tooling (`lre.py`)."""
