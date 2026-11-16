@@ -365,7 +365,7 @@ def test_derive_sad_listings_real_corpus(tmp_path: pathlib.Path) -> None:
 
 @pytest.mark.corpus
 @requires_corpus
-def test_derive_sad_listings_xml_sample_parses_structurally(tmp_path: pathlib.Path) -> None:
+def test_derive_sad_listings_xml_sample_loads_as_a_reference(tmp_path: pathlib.Path) -> None:
     out_dir = tmp_path / "sad"
     out_dir.mkdir()
     split = derive_sad_listings(CORPUS_ROOT, out_dir, seed=0)

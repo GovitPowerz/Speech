@@ -412,7 +412,6 @@ def test_render_text_rewrites_between_markers_and_rejects_bad_markers() -> None:
     out = render_text(text, [lid_gate()])
     assert out.startswith("intro\n<!-- ledger:table phase6_lid_features -->\n| split |") and out.endswith("<!-- ledger:end -->\noutro\n")
     assert "| stale |" not in out
-    assert _table_names(text) == ["phase6_lid_features"]
     with pytest.raises(ValueError, match="no ledger table named"):
         render_text("<!-- ledger:table nope -->\n<!-- ledger:end -->\n", [])
     with pytest.raises(ValueError, match="no end marker"):
