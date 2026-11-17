@@ -4936,7 +4936,8 @@ these ports was a subject with its own oracle.
 - `dataprep.lre.parse_vrcts_structural`. The corpus-gated audit of a sampled SAD reference,
   renamed `test_derive_sad_listings_xml_sample_loads_as_a_reference`, reads through
   `evaluate.load_vrcts_ref`, the reader the arms score against.
-- `ledger.render.table_names` is a private helper of `tests/test_ledger.py`.
+- `ledger.render.table_names` is inlined into its one caller, the `RESULTS.md` render test in
+  `tests/test_ledger.py`, over `render.BEGIN`.
 - `drivers/baseline.py::write_lre_mapping_12` duplicated `dataprep.lre.write_lre_mapping`; the
   driver imports the one writer.
 

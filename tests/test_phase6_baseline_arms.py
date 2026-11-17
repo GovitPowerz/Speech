@@ -392,6 +392,8 @@ def test_prepare_wires_the_flags_into_the_params_and_the_manifest(tmp_path: Path
     # the params carry the spec, the clamp included; the run is the map over the out dir.
     assert (p.params.epochs, p.params.steps_per_epoch, p.params.patience) == (1, 1, 99)
     assert p.params.minibatch == 4 and p.params.seed == 5 and p.params.nb_classes == len(B._LANGS)
+    # the mapping the arm writes carries the driver's class base: `_LANGS` order, ids 0..11.
+    assert (out / p.splits.mapping_name).read_text() == "".join(f"{lang};non;{i}\n" for i, lang in enumerate(B._LANGS))
     assert p.params.valid_listing == p.splits.valid_name and p.params.resume_from is None
     # the seed packs (the scored `score_init` baseline) draw under the training call's seed and scheme
     assert p.params.init_scheme == meta["init_scheme"] == "he" and drawn_under == [(5, "he")]

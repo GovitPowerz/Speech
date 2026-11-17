@@ -4614,7 +4614,7 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   recovered from the Task 14 session transcript; item 1 changed all six collar sites, the
   output-inert `:157` one included.
   Item 2's "case4 fixture golden" was `test_convert_tab_file_matches_hand_computed_fixture[case4]`;
-  item 5's two unnamed legs are the two `test_write_listing_worker_shards_*` tests the Task 14
+  item 5's two unnamed legs were the two `test_write_listing_worker_shards_*` tests the Task 14
   report names.
 
 ### Mutation battery (Phase 5)

@@ -33,10 +33,6 @@ BUILD = Build(profile="release", target="aarch64-apple-darwin", rustc="rustc 1.9
 HOST = Host(chip="Apple M4 Pro", arch="arm64", cores=14, os="Darwin 25.6.0")
 
 
-def _table_names(text: str) -> list[str]:
-    return [m.group("name") for line in text.splitlines() if (m := BEGIN.match(line))]
-
-
 def _collars(dcf: float, pmiss: float, pfa: float) -> list[CollarScore]:
     return [CollarScore(collar=c, dcf=dcf, pmiss=pmiss, pfa=pfa) for c in (0.0, 0.25, 0.5, 1.0, 2.0)]
 
@@ -580,7 +576,7 @@ def test_every_committed_record_validates_and_is_a_release_build() -> None:
 
 
 def test_results_md_holds_what_the_ledger_renders() -> None:
-    names = _table_names(RESULTS.read_text(encoding="utf-8"))
+    names = [m.group("name") for line in RESULTS.read_text(encoding="utf-8").splitlines() if (m := BEGIN.match(line))]
     assert set(names) == set(TABLES), f"every renderer has a marker and every marker a renderer: {sorted(set(names) ^ set(TABLES))}"
     assert render_file(RESULTS, LEDGER_DIR, check=True) == "", "RESULTS.md is stale; run: python -m speech.ledger render"
 
