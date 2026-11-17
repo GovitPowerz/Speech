@@ -139,7 +139,7 @@
     }
   },
   "mat_conversion": {
-    "text": "Each harness .mat (saveResults writes 5 vars: MultiConfigResults, CostMem, BadClassifMem, CostLIDMem, BadClassifLIDMem via Matrix2MatFile, MAT_COMPRESSION_ZLIB) is converted to per-variable .bin (io::binary: i64 LE rows, i64 LE cols, f64 LE column-major) via scipy.io.loadmat. The wall-clock timing column of MultiConfigResults (col 6 = the 4th data column after [file, conf, chan] = time_per_hour) is ZEROED so the dump is byte-reproducible; the Rust golden masks the same column. The RAW .mat outputs and the scipy guard that re-read them (checking the conversion, with the same col-6 mask) live in the oracle archive since issue #169.",
+    "text": "Each harness .mat (saveResults writes 5 vars: MultiConfigResults, CostMem, BadClassifMem, CostLIDMem, BadClassifLIDMem via Matrix2MatFile, MAT_COMPRESSION_ZLIB) is converted to per-variable .bin (io::binary: i64 LE rows, i64 LE cols, f64 LE column-major) via scipy.io.loadmat. The wall-clock timing column of MultiConfigResults (col 6 = the 4th data column after [file, conf, chan] = time_per_hour) is ZEROED so the dump is byte-reproducible; the Rust golden masks the same column. The RAW .mat outputs and the scipy guard that re-read them (checking the conversion, with the same col-6 mask) left this tree in issue #169; they belong in the oracle archive, beside the extractor.",
     "vars": [
       "MultiConfigResults",
       "CostMem",

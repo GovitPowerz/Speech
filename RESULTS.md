@@ -4980,7 +4980,7 @@ Twin training golden builds their names with a `format!`, so a search for a full
 finds nothing; they are renamed, not deleted.
 
 `cargo test --release --no-fail-fast --features test-support` 1436 passed, 6 ignored, 0 failed,
-unchanged. `pytest tests -q -m "not slow"` 1119 passed, none skipped (the two removed tests).
+unchanged. `pytest tests -q -m "not slow"` 1119 passed, none skipped (two tests fewer, the two removed).
 `pytest tests/pyo3 -q` 299 passed. `run.py --check` 207 mutations, 0 problems;
 `run.py --changed-since origin/main` 21 patches, 74 verdicts, 0 differ from expected. No ledger
 record: no measured number moves.

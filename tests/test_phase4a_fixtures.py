@@ -5,8 +5,8 @@ CorpusProcessor stack and converts each `.mat` output to per-variable `.bin`
 (io::binary column-major), masking the MultiConfigResults timing column. These tests
 guard the committed fixtures WITHOUT the harness: the manifest is present and records
 `masked_cols`, and every referenced `.bin` exists and parses to its recorded shape. The
-RAW `.mat` outputs and the scipy guard of the conversion itself live in the oracle
-archive since issue #169.
+RAW `.mat` outputs and the guard of the conversion itself left this tree in issue #169;
+they belong in the oracle archive, beside the extractor.
 """
 
 from __future__ import annotations
@@ -175,14 +175,17 @@ def test_tier2_gradcheck_fixture_shape_and_seed() -> None:
 def test_tier2_best_pack_artifacts() -> None:
     """The bestNNWeight weights/derivs pair is present and coherent (io::binary; the
     legacy save named them `.mat`, renamed in issue #169)."""
-    w = _read_bin(PHASE4A / "weights_bestNNWeight_1_tier2_spectral.bin")
+    train = cast(dict[str, object], cast(dict[str, object], _load_manifest()["tier2"])["train"])
+    names = cast(list[str], train["best_artifacts"])
+    assert names == ["weights_bestNNWeight_1_tier2_spectral.bin", "weightsDerivatives_bestNNWeight_1_tier2_spectral.bin"]
+    w = _read_bin(PHASE4A / names[0])
     assert w.shape == (33671, 1)
     # saveWeights fires BEFORE updateWeights (BagOfProcessors.cpp:464 vs :466), so
     # the saved best == the PRE-update weights of the last firing epoch (the final
     # eval) == the post-epoch-3 vector.
     epoch3 = _read_bin(PHASE4A / "tier2_weights_epoch3.bin")
     assert np.array_equal(w.view(np.uint64), epoch3.view(np.uint64)), "best weights == post-epoch-3 (save-before-update order)"
-    d = _read_bin(PHASE4A / "weightsDerivatives_bestNNWeight_1_tier2_spectral.bin")
+    d = _read_bin(PHASE4A / names[1])
     assert d.shape == (33671, 2)
     assert np.any(d[:, 0] != 0.0), "derivs col0 must be nonzero (live backward)"
     assert np.all(d[:, 1][d[:, 1] != 0.0] > 0.0), "derivs col1 counts are positive"
