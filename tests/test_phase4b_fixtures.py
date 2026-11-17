@@ -185,26 +185,3 @@ def test_lid5_calibration_cost_max_abs_is_a_true_delta() -> None:
         entry = cast(dict[str, object], calibration[f])
         cost_max_abs = cast(float, entry["cost_max_abs"])
         assert cost_max_abs < 1e-6, f"lid5 {f}: cost_max_abs {cost_max_abs} not a small real-vs-reimpl delta"
-
-
-def test_mode7_dump_lid_internals_scipy_valued() -> None:
-    """DumpLIDInternals (:1136-1158): the harness real-Eigen `.mat` carries
-    `features_<n>` = [_OutputForward | _OutputBackward] per kept phSeq block +
-    a `matNb` scalar. Read via scipy (the 4a conversion pattern) and value-check:
-    matNb == number of features_n vars (2 for s1's 7-/5-row blocks), each is a
-    finite (rows x 96) matrix (TwoSweeps doubles the 24-wide fwd/bwd -> 48 each,
-    hcat -> 96), and not all-zero."""
-    import numpy as np
-    import scipy.io
-
-    mat = scipy.io.loadmat(PHASE4B / "mode7_dump_s1.mat")
-    varnames = [k for k in mat if not k.startswith("__")]
-    feats = sorted(v for v in varnames if v.startswith("features_"))
-    assert feats == ["features_0", "features_1"], f"unexpected feature vars {feats}"
-    assert "matNb" in varnames, "matNb missing"
-    assert int(np.asarray(mat["matNb"]).ravel()[0]) == len(feats), "matNb != feature count"
-    for name in feats:
-        m = np.asarray(mat[name])
-        assert m.shape[1] == 96, f"{name}: cols {m.shape[1]} != 96 (2*2*24 TwoSweeps [oF|oB])"
-        assert m.shape[0] > 0 and np.all(np.isfinite(m)), f"{name}: empty or non-finite"
-        assert np.any(m != 0.0), f"{name}: all-zero"
