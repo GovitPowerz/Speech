@@ -97,7 +97,7 @@ def test_error_is_non_vacuous() -> None:
     assert data[0] == 200.0 / 3.0, "hand-derivable exact value (see manifest + Rust golden doc)"
 
 
-# --- Task 7 FLAGSHIP: Mode-7 (phSeq) real-compiled member fixtures + DumpLIDInternals ---
+# --- Task 7 FLAGSHIP: Mode-7 (phSeq) real-compiled member fixtures ---
 
 MODE7_VARIANTS = ["twin_mode7", "twin_mode7_ppm1", "twin_mode7_ppm2"]
 MODE7_FILES = ["s1", "s2", "s3"]

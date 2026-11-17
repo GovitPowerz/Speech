@@ -23,7 +23,6 @@ build/
 
 # === MATLAB / binary data ===
 *.mat
-!/tests/reference_data/**/*.mat
 
 # === Legacy oracle family (archived in GovitPowerz/speech-legacy-oracle, issue #132) ===
 # A regeneration run places (or symlinks) the archive's legacy/ and tools/ here; never committed.
