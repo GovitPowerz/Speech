@@ -46,10 +46,6 @@ def render_text(text: str, records: list[Record]) -> str:
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
-def table_names(text: str) -> list[str]:
-    return [m.group("name") for line in text.splitlines() if (m := BEGIN.match(line))]
-
-
 def render_file(path: Path = RESULTS, root: Path = LEDGER_DIR, *, check: bool = False) -> str:
     """Rewrite `path` in place (or, with `check`, leave it alone) and return the unified diff
     between the file and its rendering: empty when the file was already current."""

@@ -211,17 +211,6 @@ def test_phseq_prefix_map_bijects_onto_the_12_classes() -> None:
     assert B._PHSEQ_PREFIX_TO_LANG["ma"] == "chi", "Mandarin prefix 'ma' maps to the LRE03 'chi' tag"
 
 
-def test_write_lre_mapping_12_alphabetical(tmp_path: Path) -> None:
-    path = tmp_path / "map.csv"
-    B.write_lre_mapping_12(path)
-    lines = [ln for ln in path.read_text().splitlines() if ln]
-    assert len(lines) == 12
-    assert lines[0] == "ara;non;0" and lines[-1] == "vie;non;11"
-    # class ids are 0..11 in alphabetical language order (the _class_keys / engine convention).
-    for i, ln in enumerate(lines):
-        assert ln.split(";")[2] == str(i)
-
-
 # --------------------------------------------------------------------------------------- #
 # CLI arg wiring + flag plumbing (run_baseline monkeypatched -- no engine)
 # --------------------------------------------------------------------------------------- #
@@ -403,6 +392,8 @@ def test_prepare_wires_the_flags_into_the_params_and_the_manifest(tmp_path: Path
     # the params carry the spec, the clamp included; the run is the map over the out dir.
     assert (p.params.epochs, p.params.steps_per_epoch, p.params.patience) == (1, 1, 99)
     assert p.params.minibatch == 4 and p.params.seed == 5 and p.params.nb_classes == len(B._LANGS)
+    # the mapping the arm writes carries the driver's class base: `_LANGS` order, ids 0..11.
+    assert (out / p.splits.mapping_name).read_text() == "".join(f"{lang};non;{i}\n" for i, lang in enumerate(B._LANGS))
     assert p.params.valid_listing == p.splits.valid_name and p.params.resume_from is None
     # the seed packs (the scored `score_init` baseline) draw under the training call's seed and scheme
     assert p.params.init_scheme == meta["init_scheme"] == "he" and drawn_under == [(5, "he")]

@@ -4909,3 +4909,46 @@ test and the C-symbol leg over the count above; the sixth ignored test is the ca
 issue33/oracle-libm-f32-ignored issue33/oracle-libm-ignored` 7 patches, 29 verdicts, 0 differ
 from expected. `tests/pyo3` and the rest of `--changed-since origin/main` were not re-run on
 it.
+
+## Issue #157 -- the corpus-preparation ports nothing ran are retired
+
+**Live:** no new patches. `tests/mutations/phase4d/1`, `/2`, `/3`, `/4` and `/6` are retired
+(ADR-0011: the sites are gone) with their 18 verdicts; `phase4d/8` is that battery's one live
+patch.
+
+Branch `feature/issue-157-retire-test-only-dataprep`, off `main@b62a540`. The #155 grilling had
+counted the references to every top-level name of `src/python/speech`, and three groups were
+reached only from tests. The rule settled here: a corpus-preparation tool is production when a CLI
+subcommand, a runner or the launcher reaches it, and one that nothing runs is retired. It is not
+moved to `tests/oracles/`: by #103 an oracle is what the port is compared against, and each of
+these ports was a subject with its own oracle.
+
+- `dataprep/augment.py` (the `AugmentCorpus.py` port). `RealSoxRunner` had no caller, tests
+  included, so the real `sox` path never ran in the port.
+- `dataprep/opensad15.py` (the `ProcessOpenSAD15Corpus.py` port), with `py2_str_float`, its
+  hand-computed fixtures and the Rust cross-parse test `phase4d_opensad15_vrcts.rs`.
+  `evaluate.load_tab_ref`, the reader of the same TAB reference format, goes with it.
+- `dataprep/stm_normalize.py` (the two Perl normalizers), with its Perl goldens and the
+  `stm_normalizer_fixtures` section of `phase4d_parity_manifest.json`.
+- The `.sph` conversion of `dataprep/lre.py` (`convert_sph_listing`, `sph2wav_command`,
+  `SphRunner`, `RealSphRunner`). No arm reads the eval audio, and `sph2pipe` was never installed
+  on the development host, so its real-path test was the non-slow suite's one standing skip.
+- `dataprep.lre.parse_vrcts_structural`. The corpus-gated audit of a sampled SAD reference,
+  renamed `test_derive_sad_listings_xml_sample_loads_as_a_reference`, reads through
+  `evaluate.load_vrcts_ref`, the reader the arms score against.
+- `ledger.render.table_names` is inlined into its one caller, the `RESULTS.md` render test in
+  `tests/test_ledger.py`, over `render.BEGIN`.
+- `drivers/baseline.py::write_lre_mapping_12` duplicated `dataprep.lre.write_lre_mapping`; the
+  driver imports the one writer.
+
+`dataprep/` keeps its name with `lre.py` alone. `soundfile` is left with one user, an `sf.info`
+call in `tests/test_phase1_fixtures.py` (#148).
+
+One count corrected on the way: `CLAUDE.md` quoted 702 verdicts where `main` carried 704
+`catcher:` lines; the count is now read off the lines on disk, 686 after the 18 retired here.
+
+`cargo test --release --no-fail-fast --features test-support` 1436 passed, 6 ignored, 0 failed
+(one test fewer, the cross-parse one). `pytest tests -q -m "not slow"` 1121 passed, none skipped
+(96 tests fewer: 95 that passed and the standing skip). `pytest tests/pyo3 -q` 299 passed.
+`run.py --check` 207 mutations, 0 problems; `run.py --changed-since origin/main` 13 patches, 25
+verdicts, 0 differ from expected. No ledger record: no measured number moves.

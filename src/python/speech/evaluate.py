@@ -108,21 +108,6 @@ def dcf(
     return DcfReport(scores)
 
 
-def load_tab_ref(path: Path, start_col: int = 2, end_col: int = 3, type_col: int = 4) -> list[Interval]:
-    """Read a TAB-delimited NIST ref file into raw intervals. Column defaults are the
-    ComputeDCF.py convention (-s 2 -e 3 -g 4); kinds are returned verbatim (S/NS/NT/RI/RS/RX)
-    for `dcf()` to interpret. The named-int-column signature (`start_col`/`end_col`/`type_col`)
-    is a benign deviation from the plan's `cols`-tuple sketch -- same columns, clearer call
-    sites."""
-    out: list[Interval] = []
-    for line in path.read_text().splitlines():
-        if not line.strip():
-            continue
-        fields = line.split("\t")
-        out.append((float(fields[start_col]), float(fields[end_col]), fields[type_col]))
-    return out
-
-
 def load_vrcts_ref(path: Path) -> list[Interval]:
     """Read a VRCTS xml as a dcf() REFERENCE: `load_vrcts_hyp`'s contiguous
     speech/non-speech intervals with the kinds mapped to the NIST ref labels
