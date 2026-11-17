@@ -1615,6 +1615,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `io::matfile` are retired too, so `bench_names_the_unwritable_output_path` goes with the last
   write it named and `bench_runs_with_absolute_output_keys` asserts the output directory holds
   the dumps only. The engine's one output key is `Dump_Directory`.)
+  (Issue #169: the committed artifacts are renamed `.bin`, bytes unchanged -- they were
+  io::binary all along; the glued legacy names quoted above are what the harness wrote.)
 
 - **[phase4a] `<prefix>_weightsFile` too-many case: warning + silent head-truncation; the port drops
   the console warning -- FIXED (phase 11 interstitial, commit `c02509e`)**
@@ -2653,6 +2655,8 @@ purpose, either kept-documented by the Phase 5 sweep's own adjudication or not y
   `twin_mode7_ppm2.config` keeps its inert line. The filename observation above stands; the
   `classNb` and ppm1 halves of this entry are unchanged. The harness's `mode7_dump_s1.mat`
   keeps its own scipy check in `tests/test_phase4b_fixtures.py`.)
+  (Issue #169: `mode7_dump_s1.mat` and that scipy check left this tree; they belong in the oracle
+  archive, beside the extractor.)
 
 - **[phase4b] `VrctsPart` (Algo 0) hard-codes the legacy `vrcts_part` binary path, and its spawn
   failure semantics necessarily diverge from the legacy's discarded `system()` return** (`tasks/

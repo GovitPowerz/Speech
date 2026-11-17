@@ -4,9 +4,9 @@ The extractor (`scripts/extract_phase4a_fixtures.py`) runs the REAL compiled
 CorpusProcessor stack and converts each `.mat` output to per-variable `.bin`
 (io::binary column-major), masking the MultiConfigResults timing column. These tests
 guard the committed fixtures WITHOUT the harness: the manifest is present and records
-`masked_cols`, every referenced `.bin` exists and parses to its recorded shape, and
-scipy re-reading the RAW `.mat` outputs reproduces the converted `.bin` values (with
-the same col-6 mask) -- guarding the conversion itself.
+`masked_cols`, and every referenced `.bin` exists and parses to its recorded shape. The
+RAW `.mat` outputs and the guard of the conversion itself left this tree in issue #169;
+they belong in the oracle archive, beside the extractor.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import cast
 
 import numpy as np
-import scipy.io
 
 PHASE4A = Path("tests/reference_data/phase4a")
 MANIFEST = PHASE4A / "manifest.json"
@@ -72,24 +71,6 @@ def test_every_referenced_bin_exists_and_parses() -> None:
             arr = _read_bin(path)
             expected = tuple(shapes[var])
             assert arr.shape == expected, f"{path.name}: shape {arr.shape} != manifest {expected}"
-
-
-def test_raw_mat_matches_converted_bin() -> None:
-    """scipy re-reads the RAW committed `.mat` and, after masking the timing column,
-    reproduces the converted `.bin` values byte-for-byte -- guards the conversion."""
-    masked_cols = [6]
-    for run in RUNS:
-        mat = scipy.io.loadmat(PHASE4A / f"{run}.mat")
-        for var in MAT_VARS:
-            raw = cast(np.ndarray, mat[var]).astype("<f8").copy()
-            if var == "MultiConfigResults":
-                for c in masked_cols:
-                    if c < raw.shape[1]:
-                        raw[:, c] = 0.0
-            converted = _read_bin(PHASE4A / f"{run}_{var}.bin")
-            assert raw.shape == converted.shape, f"{run}/{var}: shape mismatch"
-            # Bit-exact: the conversion is a pure copy + timing mask, no arithmetic.
-            assert np.array_equal(raw.view(np.uint64), converted.view(np.uint64)), f"{run}/{var}: raw .mat (masked) != converted .bin"
 
 
 def test_vrcts_dumps_present() -> None:
@@ -191,34 +172,23 @@ def test_tier2_gradcheck_fixture_shape_and_seed() -> None:
     assert np.array_equal(seed.view(np.uint64), expect.view(np.uint64))
 
 
-def test_tier2_mat_conversion_and_artifacts() -> None:
-    """The tier-2 result .mat reproduces its converted .bin fixtures (same col-6 mask
-    guard as tier-1); the bestNNWeight artifact split is present and coherent (the
-    weights/derivs are io::binary despite the legacy .mat suffix; the stats .mat
-    carries empty mean/std with n == 0 -- type -1 never accumulated)."""
-    mat = scipy.io.loadmat(PHASE4A / "tier2_spectral.mat")
-    for var in MAT_VARS:
-        raw = cast(np.ndarray, mat[var]).astype("<f8").copy()
-        if var == "MultiConfigResults":
-            raw[:, 6] = 0.0
-        converted = _read_bin(PHASE4A / f"tier2_spectral_{var}.bin")
-        assert raw.shape == converted.shape, f"tier2/{var}: shape mismatch"
-        assert np.array_equal(raw.view(np.uint64), converted.view(np.uint64)), f"tier2/{var}: raw .mat (masked) != converted .bin"
-    w = _read_bin(PHASE4A / "weights_bestNNWeight_1_tier2_spectral.mat")
+def test_tier2_best_pack_artifacts() -> None:
+    """The bestNNWeight weights/derivs pair is present and coherent (io::binary; the
+    legacy save named them `.mat`, renamed in issue #169)."""
+    train = cast(dict[str, object], cast(dict[str, object], _load_manifest()["tier2"])["train"])
+    names = cast(list[str], train["best_artifacts"])
+    assert names == ["weights_bestNNWeight_1_tier2_spectral.bin", "weightsDerivatives_bestNNWeight_1_tier2_spectral.bin"]
+    w = _read_bin(PHASE4A / names[0])
     assert w.shape == (33671, 1)
     # saveWeights fires BEFORE updateWeights (BagOfProcessors.cpp:464 vs :466), so
     # the saved best == the PRE-update weights of the last firing epoch (the final
     # eval) == the post-epoch-3 vector.
     epoch3 = _read_bin(PHASE4A / "tier2_weights_epoch3.bin")
     assert np.array_equal(w.view(np.uint64), epoch3.view(np.uint64)), "best weights == post-epoch-3 (save-before-update order)"
-    d = _read_bin(PHASE4A / "weightsDerivatives_bestNNWeight_1_tier2_spectral.mat")
+    d = _read_bin(PHASE4A / names[1])
     assert d.shape == (33671, 2)
     assert np.any(d[:, 0] != 0.0), "derivs col0 must be nonzero (live backward)"
     assert np.all(d[:, 1][d[:, 1] != 0.0] > 0.0), "derivs col1 counts are positive"
-    stats = scipy.io.loadmat(PHASE4A / "bestNNWeight_1_tier2_spectral.mat")
-    assert cast(np.ndarray, stats["nbOfInputs"])[0, 0] == 0.0
-    assert cast(np.ndarray, stats["meanInputs"]).size == 0
-    assert cast(np.ndarray, stats["stdInputs"]).size == 0
 
 
 def test_tier2_vrcts_dumps_present() -> None:

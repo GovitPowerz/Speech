@@ -257,7 +257,7 @@ fn twin_train_epoch_weights_golden() {
             pack.fires, fires_want,
             "net {net}: gate fires incl. epoch 0"
         );
-        let want_w = read(format!("weights_{prefix}bestNNWeight_1_twin_train.mat"));
+        let want_w = read(format!("weights_{prefix}bestNNWeight_1_twin_train.bin"));
         assert_eq!(
             want_w.dim(),
             (pack.weights.len(), 1),
@@ -267,7 +267,7 @@ fn twin_train_epoch_weights_golden() {
             assert_oracle_eq_f64(g, want_w[[k, 0]], &format!("net {net} weight {k}"));
         }
         let want_d = read(format!(
-            "weightsDerivatives_{prefix}bestNNWeight_1_twin_train.mat"
+            "weightsDerivatives_{prefix}bestNNWeight_1_twin_train.bin"
         ));
         assert_eq!(pack.derivs.dim(), want_d.dim(), "net {net} derivs dims");
         for (ix, &g) in pack.derivs.indexed_iter() {

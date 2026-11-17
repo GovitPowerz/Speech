@@ -4952,3 +4952,35 @@ One count corrected on the way: `CLAUDE.md` quoted 702 verdicts where `main` car
 (96 tests fewer: 95 that passed and the standing skip). `pytest tests/pyo3 -q` 299 passed.
 `run.py --check` 207 mutations, 0 problems; `run.py --changed-since origin/main` 13 patches, 25
 verdicts, 0 differ from expected. No ledger record: no measured number moves.
+
+---
+
+## Issue #169 -- the `.mat` suffix leaves the fixtures
+
+Twelve fixtures under `tests/reference_data/` carried a MATLAB suffix. None does now:
+
+- Six were `io::binary` files the legacy save had named `.mat`: the `weights_` /
+  `weightsDerivatives_` pair of `bestNNWeight_1_tier2_spectral` in `phase4a/`, and the same pair
+  with and without the `LID_` prefix of `bestNNWeight_1_twin_train` in `phase4b/`. They are
+  renamed `.bin`, bytes unchanged; `tier2_train_epoch_weights_golden` and
+  `twin_train_epoch_weights_golden` read them under the new names with no assertion edited.
+- Six were MAT v5 files read only through `scipy`: the four raw results files of `phase4a/`
+  (`multiconfig`, `solo_tdc`, `train_ltsv`, `tier2_spectral`), the input-statistics file
+  `bestNNWeight_1_tier2_spectral.mat`, and `phase4b/mode7_dump_s1.mat`. They are removed with
+  the reads that guarded their one-time conversion (`test_raw_mat_matches_converted_bin`,
+  `test_mode7_dump_lid_internals_scipy_valued`, and the two `loadmat` halves of the tier-2 test,
+  whose assertions on the renamed pair stay as `test_tier2_best_pack_artifacts`). Fixtures and
+  guards belong beside the extractor in the oracle archive.
+- `scipy` and `scipy-stubs` leave `pyproject.toml`; the lock loses them and the two packages
+  only they pulled in. The `.gitignore` exception that let a `.mat` in under
+  `tests/reference_data/` goes too.
+
+One claim corrected on the way: the #148 outcome called the four `phase4b` files unread. The
+Twin training golden builds their names with a `format!`, so a search for a full file name
+finds nothing; they are renamed, not deleted.
+
+`cargo test --release --no-fail-fast --features test-support` 1436 passed, 6 ignored, 0 failed,
+unchanged. `pytest tests -q -m "not slow"` 1119 passed, none skipped (two tests fewer, the two removed).
+`pytest tests/pyo3 -q` 299 passed. `run.py --check` 207 mutations, 0 problems;
+`run.py --changed-since origin/main` 21 patches, 74 verdicts, 0 differ from expected. No ledger
+record: no measured number moves.

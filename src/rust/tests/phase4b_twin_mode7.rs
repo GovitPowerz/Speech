@@ -66,8 +66,7 @@ fn phseq_audio(f: &str, lang: i32, weight: f64) -> Audio {
     a.weight = weight;
     // Mirrors `engine::bag_of_processors::apply_corpus_item` (Phase 4b Task 8), which sets
     // `Audio::audio_file_name` from the owning `CorpusItem` post-hoc, outside `read_audio`.
-    // Exercises the mode-7 dump filename's legacy-faithful basename derivation (`mode7_dump_
-    // basename`, `tasks/lid.rs`) against a realistic non-`.wav` extension.
+    // No mode-7 path reads it since issue #135 retired the `_DumpLIDInternals` dump.
     a.audio_file_name = path.to_string_lossy().into_owned();
     a
 }
